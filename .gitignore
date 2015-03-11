@@ -5,3 +5,8 @@ ebin/*
 rel/bigset
 dev
 apps/bigset/src/*
+*.o
+*.plt
+erl_crash.dump
+.concrete/DEV_MODE
+.rebar
