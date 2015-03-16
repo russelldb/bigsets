@@ -25,10 +25,10 @@
 -record(state, {req_id :: reqid(),
                 from :: pid(),
                 set :: binary(),
-                elements :: [binary()],
+                op :: ?OP{},
                 preflist :: riak_core_apl:preflist(),
                 results :: [result()],
-                value :: value()
+                replicate :: value()
                }).
 
 -type state() :: #state{}.
@@ -52,8 +52,8 @@ start_link(ReqId, From, Set, Elements) ->
 %%%===================================================================
 %%% gen_fsm callbacks
 %%%===================================================================
-init([ReqId, From, Set, Elements]) ->
-    {ok, prepare, #state{req_id=ReqId, from=From, set=Set, elements=Elements}, 0}.
+init([ReqId, From, Set, Op]) ->
+    {ok, prepare, #state{req_id=ReqId, from=From, set=Set, op=Op}, 0}.
 
 -spec prepare(timeout, state()) -> {next_state, coordinate, state(), 0}.
 prepare(timeout, State) ->
@@ -68,20 +68,20 @@ coordinate(timeout, State) ->
     #state{set=Set, elements=Elements, preflist=PL} = State,
     Coordinator = pick_coordinator(PL),
     Req = ?INSERT_REQ{set=Set, elements=Elements},
-    bigset:coordinate(Coordinator, Req),
+    bigset_vnode:insert(Coordinator, Req),
     {next_state, await_coord, State}.
 
 -spec await_coord(coord_res(), state()) ->
                          {next_state, replicate, state(), 0}.
-await_coord({dw, Partition, Value}, State) ->
-    {next_state, replicate, State#state{value=Value, results=[{dw, Partition}]}, 0}.
+await_coord({dw, Partition, Res}, State) ->
+    {next_state, replicate, State#state{value=Res, results=[{dw, Partition}]}, 0}.
 
 -spec replicate(timeout, state()) -> {next_state, await_reps, state()}.
 replicate(timeout, State) ->
-    #state{preflist=PL, set=Set, results=Res, value={Es, D}} = State,
+    #state{preflist=PL, set=Set, results=Res, value=Es} = State,
     RepPL = replica_pl(PL, Res),
-    Req = ?REPLICATE_REQ{set=Set, elements=Es, dot=D},
-    bigset:replicate(RepPL, Req),
+    Req = ?REPLICATE_REQ{set=Set, elements_dots=Es},
+    bigset_vnode:replicate(RepPL, Req),
     {next_state, await_reps, State}.
 
 -spec await_reps(rep_res(), state()) ->

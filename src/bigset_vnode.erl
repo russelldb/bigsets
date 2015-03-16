@@ -77,7 +77,8 @@ handle_command(?INSERT_REQ{set=Set, elements=Elements}, Sender, State) ->
     riak_core_vnode:reply(Sender, {dw, Partition, Reps}),
     {noreply, State};
 handle_command(?REPLICATE_REQ{set=Set,
-                              elements_dots=Elements}, Sender, State) ->
+                              elements_dots=Elements},
+               Sender, State) ->
     #state{db=DB, partition=Partition} = State,
     %% fire and forget? It's fair? Should DW to be fair in a benchmark, eh?
     riak_core_vnode:reply(Sender, {w, Partition}),
@@ -144,8 +145,17 @@ handle_command(?CONTAINS_REQ{set=Set, elements=Elements}, Sender, State) ->
             end,
     riak_core_vnode:reply(Sender, {r, Partition, Reply}),
     {noreply, State};
-handle_command(?REMOVE_REQ{set=Set, elements=Elements, ctx=Ctx}, Sender, State) ->
+handle_command(?REMOVE_REQ{set=Set, elements=Elements, ctx=undefined}, Sender, State) ->
+    %% This is like "coordinate remove" see a replicate command for
+    %% downstream remove.
+
+    %% No context remove is a dirty "just do it" remove, so just do
+    %% it, nothing to replicate
     #state{db=DB, partition=Partition} = State,
+
+    %% An "ack" of the delete
+    riak_core_vnode:reply(Sender, {d, Partition, ok}),
+
     riak_core_vnode:reply(Sender, {d, Partition, ok}),
     Writes = lists:foldl(fun(E, A) ->
                                  [{delete, elem_key(Set, E)} | A]
@@ -153,8 +163,51 @@ handle_command(?REMOVE_REQ{set=Set, elements=Elements, ctx=Ctx}, Sender, State) 
                          [],
                          Elements),
     eleveldb:writes(DB, Writes, ?WRITE_OPTS),
+
+    %% dd == durable delete
     riak_core_vnode:reply(Sender, {dd, Partition, ok}),
     {noreply, State}.
+%% handle_command(?REMOVE_REQ{set=Set, elements=Elements, ctx=Ctx}, Sender, State) ->
+%%     %% This is like "coordinate remove" see a replicate command for
+%%     %% downstream remove.
+
+%%     %% we need to send the removed dots downstream, but if we send the
+%%     %% whole removed elements that is simpler (since we operate in a
+%%     %% element->dot mapped world) If we stored things dot->element
+%%     %% then just sending dots is enough I wonder if we can have a
+%%     %% reverse index so we can have both!  In other words some scope
+%%     %% for optimisation clearly exists here, it seems a waste to send
+%%     %% elements across the network just to delete them from disk!
+%%     #state{db=DB, partition=Partition} = State,
+%%     riak_core_vnode:reply(Sender, {d, Partition, ok}),
+%%     Writes = lists:foldl(fun(E, A) ->
+%%                                  [{delete, elem_key(Set, E)} | A]
+%%                          end,
+%%                          [],
+%%                          Elements),
+
+%%     {ok, Itr} = eleveldb:iterator(DB, ?FOLD_OPTS),
+%%     ElemsAndKeys = lists:sort([{elem_key(Set, E), E} || E <- Elements]),
+%%     {Dels, Reps} = lists:foldl(fun({Key, Elem}, {Del, Rep}=Acc) ->
+%%                                        case eleveldb:iterator_move(Itr, Key) of
+%%                                            {ok, Key, DotsBin} ->
+%%                                                Dots = from_bin(DotsBin),
+%%                                                {[{delete, Key} | Del],
+%%                                                 [{Elem, Dots} | Rep]};
+%%                                            {ok, _OtherKey, _OtherVal} ->
+%%                                                Acc
+%%                                        end
+%%                                end,
+%%                                {[], []},
+%%                                ElemsAndKeys),
+
+%%     eleveldb:iterator_close(Itr),
+
+%%     riak_core_vnode:reply(Sender, {r, Partition, Reply}),
+
+%%     eleveldb:writes(DB, Writes, ?WRITE_OPTS),
+%%     riak_core_vnode:reply(Sender, {dd, Partition, ok}),
+%%     {noreply, State}.
 
 
 -spec handle_handoff_command(term(), term(), state()) ->

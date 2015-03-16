@@ -11,8 +11,15 @@
 -record(bigset_contains_req_v1, {set, elements}).
 -record(bigset_remove_req_v1, {set, elements, ctx}).
 
+-record(api_op_v1, {ctx :: riak_dt_vclock:vclock(),
+                    inserts :: [binary()],
+                    removes :: [binary()]}).
+
+-define(OP, #api_op_v1).
+
 -define(INSERT_REQ, #bigset_insert_req_v1).
 -define(REPLICATE_REQ, #bigset_replicate_req_v1).
 -define(READ_REQ, #bigset_read_req_v1).
 -define(CONTAINS_REQ, #bigset_contains_req_v1).
 -define(REMOVE_REQ, #bigset_remove_req_v1).
+
