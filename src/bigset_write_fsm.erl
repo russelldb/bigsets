@@ -24,7 +24,6 @@
 
 -record(state, {req_id :: reqid(),
                 from :: pid(),
-                set :: binary(),
                 op :: ?OP{},
                 preflist :: riak_core_apl:preflist(),
                 results :: [result()],
@@ -57,7 +56,7 @@ init([ReqId, From, Set, Op]) ->
 
 -spec prepare(timeout, state()) -> {next_state, coordinate, state(), 0}.
 prepare(timeout, State) ->
-    #state{set=Set} = State,
+    #state{op=?OP{set=Set}} = State,
     Hash = riak_core_util:chash_key({bigset, Set}),
     UpNodes = riak_core_node_watcher:nodes(bigset),
     PL = riak_core_apl:get_apl_ann(Hash, 3, UpNodes),
@@ -65,10 +64,9 @@ prepare(timeout, State) ->
 
 -spec coordinate(timeout, state()) -> {next_state, awaitcoord, state()}.
 coordinate(timeout, State) ->
-    #state{set=Set, elements=Elements, preflist=PL} = State,
+    #state{preflist=PL, op=Op} = State,
     Coordinator = pick_coordinator(PL),
-    Req = ?INSERT_REQ{set=Set, elements=Elements},
-    bigset_vnode:insert(Coordinator, Req),
+    bigset_vnode:coordinate(Coordinator, Op),
     {next_state, await_coord, State}.
 
 -spec await_coord(coord_res(), state()) ->
