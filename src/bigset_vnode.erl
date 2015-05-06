@@ -95,7 +95,7 @@ handle_command(?OP{set=Set, inserts=Inserts, removes=Removes, ctx=Ctx}, Sender, 
     BinClock = to_bin(Clock2),
 
     Writes = lists:append([[{put, ClockKey, BinClock}],  InsertWrites, DeleteWrites]),
-    eleveldb:writes(DB, Writes, ?WRITE_OPTS),
+    eleveldb:write(DB, Writes, ?WRITE_OPTS),
     riak_core_vnode:reply(Sender, {dw, Partition, ReplicationPayload, DeleteWrites}),
     {noreply, State};
 handle_command(?REPLICATE_REQ{set=Set,
@@ -111,7 +111,7 @@ handle_command(?REPLICATE_REQ{set=Set,
     {Clock, Inserts} = replica_writes(eleveldb:get(DB, ClockKey, ?READ_OPTS), Ins),
     BinClock = to_bin(Clock),
     Writes = lists:append([[{put, ClockKey, BinClock}], Inserts, Rems]),
-    ok = eleveldb:write(DB, [{put, ClockKey, BinClock} | Writes], ?WRITE_OPTS),
+    ok = eleveldb:write(DB, Writes, ?WRITE_OPTS),
     riak_core_vnode:reply(Sender, {dw, Partition}),
     {noreply, State}.
 %% handle_command(?READ_REQ{set=Set}, Sender, State) ->
@@ -388,7 +388,7 @@ replica_writes(not_found, Elements) ->
                 C2 = bigset_clock:strip_dots(Dot, Clock),
                 {C2, [{put, Key, <<>>} | Writes]}
         end,
-    lists:fold(F, {bigset_clock:fresh(), []}, Elements);
+    lists:foldl(F, {bigset_clock:fresh(), []}, Elements);
 replica_writes({ok, BinClock}, Elements) ->
     Clock0 = from_bin(BinClock),
     F = fun({Key, Dot}, {Clock, Writes}) ->
