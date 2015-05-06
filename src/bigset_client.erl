@@ -4,7 +4,8 @@
 
 -export([
          ping/0,
-         update/3
+         update/3,
+         read/2
         ]).
 
 -define(DEFAULT_TIMEOUT, 60000).
@@ -47,6 +48,13 @@ update(Set, Adds, Removes, Ctx, Options) ->
     ReqId = mk_reqid(),
     Op = ?OP{set=Set, inserts=Adds, removes=Removes, ctx=Ctx},
     bigset_write_fsm:start_link(ReqId, Me, Set, Op, Options),
+    Timeout = recv_timeout(Options),
+    wait_for_reqid(ReqId, Timeout).
+
+read(Set, Options) ->
+    Me = self(),
+    ReqId = mk_reqid(),
+    bigset_read_fsm:start_link(ReqId, Me, Set, Options),
     Timeout = recv_timeout(Options),
     wait_for_reqid(ReqId, Timeout).
 

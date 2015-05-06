@@ -6,17 +6,17 @@
 %%% @end
 %%% Created : 12 Jan 2015 by Russell Brown <russelldb@basho.com>
 %%%-------------------------------------------------------------------
--module(bigset_write_fsm).
+-module(bigset_read_fsm).
 
 -behaviour(gen_fsm).
 
 -include("bigset.hrl").
 
 %% API
--export([start_link/5]).
+-export([start_link/4]).
 
 %% gen_fsm callbacks
--export([init/1, prepare/2, coordinate/2, validate/2, await_coord/2, replicate/2,
+-export([init/1, prepare/2,  validate/2, read/2,
          await_reps/2, reply/2, handle_event/3,
          handle_sync_event/4, handle_info/3, terminate/3, code_change/4]).
 
@@ -24,21 +24,17 @@
 
 -record(state, {req_id :: reqid(),
                 from :: pid(),
-                op :: ?OP{},
                 set :: binary(),
                 preflist :: riak_core_apl:preflist(),
-                results :: [result()],
-                replicate :: {Inserts :: [delta_element()], Removes :: []},
+                logic = bigset_read_core:new(),
                 options=[] :: list(),
                 timer=undefined :: reference() | undefined,
-                reply = ok
+                reply = undefined
                }).
 
 -type state() :: #state{}.
-
--type result() :: coord_res() | rep_res().
--type coord_res() :: {dw, partition(), [delta_element()], Removes :: list()}.
--type rep_res() ::   {w | dw, partition()}.
+-type result() :: {r, partition(), clock, Clock :: binary()} | {r, partition(), [res()]}.
+-type res() :: {Member :: binary(), Dot :: riak_dt_vclock:dot()}.
 -type partition() :: non_neg_integer().
 -type reqid() :: term().
 
@@ -48,18 +44,18 @@
 %%% API
 %%%===================================================================
 
-start_link(ReqId, From, Set, Op, Options) ->
-    gen_fsm:start_link(?MODULE, [ReqId, From, Set, Op, Options], []).
+start_link(ReqId, From, Set, Options) ->
+    gen_fsm:start_link(?MODULE, [ReqId, From, Set, Options], []).
 
 %%%===================================================================
 %%% gen_fsm callbacks
 %%%===================================================================
-init([ReqId, From, Set, Op, Options]) ->
-    {ok, prepare, #state{req_id=ReqId, from=From, set=Set, op=Op, options=Options}, 0}.
+init([ReqId, From, Set, Options]) ->
+    {ok, prepare, #state{req_id=ReqId, from=From, set=Set, options=Options}, 0}.
 
 -spec prepare(timeout, state()) -> {next_state, validate, state(), 0}.
 prepare(timeout, State) ->
-    #state{options=Options, op=?OP{set=Set}} = State,
+    #state{options=Options, set=Set} = State,
     Hash = riak_core_util:chash_key({bigset, Set}),
     UpNodes = riak_core_node_watcher:nodes(bigset),
     PL = riak_core_apl:get_apl_ann(Hash, 3, UpNodes),
@@ -77,61 +73,34 @@ validate(timeout, State) ->
         N when N < 2 ->
             {next_state, reply, State#state{reply={error, too_few_vnodes}}, 0};
         _ ->
-            {next_state, coordinate, State, 0}
+            {next_state, read, State, 0}
     end.
 
--spec coordinate(timeout | request_timeout, state()) ->
-                        {next_state, await_coord | reply, state()}.
-coordinate(request_timeout, State) ->
+-spec read(timeout, state()) -> {next_state, await_reps, state()}.
+read(request_timeout, State) ->
     {next_state, reply, State#state{reply={error, timeout}}, 0};
-coordinate(timeout, State) ->
-    #state{preflist=PL, op=Op} = State,
-    Coordinator = pick_coordinator(PL),
-    bigset_vnode:coordinate(Coordinator, Op),
-    {next_state, await_coord, State}.
-
--spec await_coord(coord_res(), state()) ->
-                         {next_state, replicate, state(), 0}.
-%% @TODO have to handle errors here
-await_coord(request_timeout, State) ->
-    {next_state, reply, State#state{reply={error, timeout}}, 0};
-await_coord({dw, Partition, Ins, Dels}, State) ->
-    {next_state,
-     replicate,
-     State#state{replicate={Ins, Dels},
-                 results=[{dw, Partition}]},
-     0}.
-
--spec replicate(timeout, state()) -> {next_state, await_reps, state()}.
-replicate(request_timeout, State) ->
-    {next_state, reply, State#state{reply={error, timeout}}, 0};
-replicate(timeout, State) ->
-    #state{preflist=PL, set=Set, results=[{dw, Partition}], replicate={Ins, Dels}} = State,
-    RepPL = replica_pl(PL, Partition),
-    Req = ?REPLICATE_REQ{set=Set, inserts=Ins, removes=Dels},
-    bigset_vnode:replicate(RepPL, Req),
+read(timeout, State) ->
+    #state{preflist=PL, set=Set} = State,
+    Req = ?READ_REQ{set=Set},
+    bigset_vnode:read(PL, Req),
     {next_state, await_reps, State}.
 
--spec await_reps(rep_res(), state()) ->
+-spec await_reps(result(), state()) ->
                         {next_state, reply, state(), 0} |
                         {next_state, await_reps, state()}.
-%% @TODO have to handle errors here
 await_reps(request_timeout, State) ->
     {next_state, reply, State#state{reply={error, timeout}}, 0};
-await_reps({dw, _Partition}=Res, State) ->
-    %% we must have one `dw' to be this far (coordinate must return dw
-    %% for us to continue.) Which means any one `dw' response is
-    %% quorum. This is to match default riak_kv settings.
-    #state{results=Results} = State,
-    Results2 = [Res | Results],
-    State2 = State#state{results=Results2},
-    {next_state, reply, State2, 0};
-await_reps({w, _Partition}=Res, State) ->
-    %% only an ack, await a `dw'
-    #state{results=Results} = State,
-    Results2 = [Res | Results],
-    State2 = State#state{results=Results2},
-    {next_state, await_reps, State2}.
+await_reps(Res, State) ->
+    #state{logic=Core} = State,
+    Core2 = bigset_read_core:result(Res, Core),
+    State2 = #state{logic=Core2},
+    case bigset_read_core:done(Core2) of
+        true ->
+            Reply = {ok, Core2},
+            {next_state, reply, State2#state{reply=Reply}, 0};
+        false ->
+            {next_state, await_reps, State2}
+    end.
 
 -spec reply(timeout, State) -> {stop, normal, State}.
 reply(_, State) ->

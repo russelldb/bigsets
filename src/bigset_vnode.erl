@@ -114,33 +114,33 @@ handle_command(?REPLICATE_REQ{set=Set,
     ok = eleveldb:write(DB, Writes, ?WRITE_OPTS),
     riak_core_vnode:reply(Sender, {dw, Partition}),
     {noreply, State}.
-%% handle_command(?READ_REQ{set=Set}, Sender, State) ->
-%%     #state{db=DB, partition=Partition} = State,
-%%     %% clock is first key
-%%     %% read all the way to last element
-%%     FirstKey = clock_key(Set),
+handle_command(?READ_REQ{set=Set}, Sender, State) ->
+    #state{db=DB, partition=Partition} = State,
+    %% clock is first key
+    %% read all the way to last element
+    FirstKey = clock_key(Set),
 
-%%     FoldFun = fun({Key, Value}, Acc) ->
-%%                       {s, S, K} = sext:decode(Key),
-%%                       if S == Set, K == clock ->
-%%                               %% Set clock
-%%                               {from_bin(Value), dict:new()};
-%%                          S == Set, is_binary(K) ->
-%%                               {Clock, Dict} = Acc,
-%%                               {Clock, dict:store(K, from_bin(Value), Dict)};
-%%                          true ->
-%%                               {throw, Acc}
-%%                       end
-%%               end,
-%%     Folder = fun() ->
-%%                      try
-%%                          eleveldb:fold(DB, FoldFun, [], [FirstKey | ?FOLD_OPTS])
-%%                      catch
-%%                          {break, AccFinal} ->
-%%                              riak_core_vnode:reply(Sender, {r, Partition, AccFinal})
-%%                      end
-%%              end,
-%%     {async, {get, Folder}, Sender, State};
+    FoldFun = fun({Key, Value}, Acc) ->
+                      {s, S, K} = sext:decode(Key),
+                      if S == Set, K == clock ->
+                              %% Set clock
+                              {from_bin(Value), dict:new()};
+                         S == Set, is_binary(K) ->
+                              {Clock, Dict} = Acc,
+                              {Clock, dict:store(K, from_bin(Value), Dict)};
+                         true ->
+                              {throw, Acc}
+                      end
+              end,
+    Folder = fun() ->
+                     try
+                         eleveldb:fold(DB, FoldFun, [], [FirstKey | ?FOLD_OPTS])
+                     catch
+                         {break, AccFinal} ->
+                             riak_core_vnode:reply(Sender, {r, Partition, AccFinal})
+                     end
+             end,
+    {async, {get, Folder}, Sender, State}.
 %% handle_command(?CONTAINS_REQ{set=Set, elements=Elements}, Sender, State) ->
 %%     #state{db=DB, partition=Partition} = State,
 %%     %% You need to materialize the set (in part) to see if Element(s) is/are
