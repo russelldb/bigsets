@@ -13,10 +13,10 @@
 -include("bigset.hrl").
 
 %% API
--export([start_link/4]).
+-export([start_link/5]).
 
 %% gen_fsm callbacks
--export([init/1, prepare/2, coordinate/2, await_coord/2, replicate/2,
+-export([init/1, prepare/2, coordinate/2, validate/2, await_coord/2, replicate/2,
          await_reps/2, reply/2, handle_event/3,
          handle_sync_event/4, handle_info/3, terminate/3, code_change/4]).
 
@@ -25,44 +25,65 @@
 -record(state, {req_id :: reqid(),
                 from :: pid(),
                 op :: ?OP{},
+                set :: binary(),
                 preflist :: riak_core_apl:preflist(),
                 results :: [result()],
-                replicate :: value()
+                replicate :: {Inserts :: [delta_element()], Removes :: []},
+                options=[] :: list(),
+                timer=undefined :: reference() | undefined,
+                reply = ok
                }).
 
 -type state() :: #state{}.
 
 -type result() :: coord_res() | rep_res().
--type coord_res() :: {dw, partition(), {binary(), dot()}}.
+-type coord_res() :: {dw, partition(), [delta_element()], Removes :: list()}.
 -type rep_res() ::   {w | dw, partition()}.
 -type partition() :: non_neg_integer().
--type dot() :: {binary(), non_neg_integer()}.
 -type reqid() :: term().
--type value() :: {binary(), dot()}.
 
+-define(DEFAULT_TIMEOUT, 60000).
 
 %%%===================================================================
 %%% API
 %%%===================================================================
 
-start_link(ReqId, From, Set, Elements) ->
-    gen_fsm:start_link(?MODULE, [ReqId, From, Set, Elements], []).
+start_link(ReqId, From, Set, Op, Options) ->
+    gen_fsm:start_link(?MODULE, [ReqId, From, Set, Op, Options], []).
 
 %%%===================================================================
 %%% gen_fsm callbacks
 %%%===================================================================
-init([ReqId, From, Set, Op]) ->
-    {ok, prepare, #state{req_id=ReqId, from=From, set=Set, op=Op}, 0}.
+init([ReqId, From, Set, Op, Options]) ->
+    {ok, prepare, #state{req_id=ReqId, from=From, set=Set, op=Op, options=Options}, 0}.
 
--spec prepare(timeout, state()) -> {next_state, coordinate, state(), 0}.
+-spec prepare(timeout, state()) -> {next_state, validate, state(), 0}.
 prepare(timeout, State) ->
-    #state{op=?OP{set=Set}} = State,
+    #state{options=Options, op=?OP{set=Set}} = State,
     Hash = riak_core_util:chash_key({bigset, Set}),
     UpNodes = riak_core_node_watcher:nodes(bigset),
     PL = riak_core_apl:get_apl_ann(Hash, 3, UpNodes),
-    {next_state, coordinate, State#state{preflist=PL}, 0}.
+    Timeout = proplists:get_value(timeout, Options, ?DEFAULT_TIMEOUT),
+    TRef = schedule_timeout(Timeout),
+    {next_state, validate, State#state{preflist=PL, timer=TRef}, 0}.
 
--spec coordinate(timeout, state()) -> {next_state, awaitcoord, state()}.
+-spec validate(timeout | request_timeout, state()) ->
+                      {next_state, coordinate | reply, state(), 0}.
+validate(request_timeout, State) ->
+        {next_state, reply, State#state{reply={error, timeout}}};
+validate(timeout, State) ->
+    #state{preflist=PL} = State,
+    case length(PL) of
+        N when N < 2 ->
+            {next_state, reply, State#state{reply={error, too_few_vnodes}}, 0};
+        _ ->
+            {next_state, coordinate, State, 0}
+    end.
+
+-spec coordinate(timeout | request_timeout, state()) ->
+                        {next_state, await_coord | reply, state()}.
+coordinate(request_timeout, State) ->
+    {next_state, reply, State#state{reply={error, timeout}}, 0};
 coordinate(timeout, State) ->
     #state{preflist=PL, op=Op} = State,
     Coordinator = pick_coordinator(PL),
@@ -71,23 +92,36 @@ coordinate(timeout, State) ->
 
 -spec await_coord(coord_res(), state()) ->
                          {next_state, replicate, state(), 0}.
-await_coord({dw, Partition, Res}, State) ->
-    {next_state, replicate, State#state{value=Res, results=[{dw, Partition}]}, 0}.
+%% @TODO have to handle errors here
+await_coord(request_timeout, State) ->
+    {next_state, reply, State#state{reply={error, timeout}}, 0};
+await_coord({dw, Partition, Ins, Dels}, State) ->
+    {next_state,
+     replicate,
+     State#state{replicate={Ins, Dels},
+                 results=[{dw, Partition}]},
+     0}.
 
 -spec replicate(timeout, state()) -> {next_state, await_reps, state()}.
+replicate(request_timeout, State) ->
+    {next_state, reply, State#state{reply={error, timeout}}, 0};
 replicate(timeout, State) ->
-    #state{preflist=PL, set=Set, results=Res, value=Es} = State,
-    RepPL = replica_pl(PL, Res),
-    Req = ?REPLICATE_REQ{set=Set, elements_dots=Es},
+    #state{preflist=PL, set=Set, results=[{dw, Partition}], replicate={Ins, Dels}} = State,
+    RepPL = replica_pl(PL, Partition),
+    Req = ?REPLICATE_REQ{set=Set, inserts=Ins, removes=Dels},
     bigset_vnode:replicate(RepPL, Req),
     {next_state, await_reps, State}.
 
 -spec await_reps(rep_res(), state()) ->
                         {next_state, reply, state(), 0} |
                         {next_state, await_reps, state()}.
+%% @TODO have to handle errors here
+await_reps(request_timeout, State) ->
+    {next_state, reply, State#state{reply={error, timeout}}, 0};
 await_reps({dw, _Partition}=Res, State) ->
-    %% we must have one `dw' to be this far (coordinate must retunr dw
-    %% for us to continue.) Which means any `dw' response is quorum.
+    %% we must have one `dw' to be this far (coordinate must return dw
+    %% for us to continue.) Which means any one `dw' response is
+    %% quorum. This is to match default riak_kv settings.
     #state{results=Results} = State,
     Results2 = [Res | Results],
     State2 = State#state{results=Results2},
@@ -101,8 +135,8 @@ await_reps({w, _Partition}=Res, State) ->
 
 -spec reply(timeout, State) -> {stop, normal, State}.
 reply(timeout, State) ->
-    #state{from=From, req_id=ReqId} = State,
-    From ! {ReqId, ok}.
+    #state{from=From, req_id=ReqId, reply=Reply} = State,
+    From ! {ReqId, Reply}.
 
 handle_event(_Event, _StateName, State) ->
     {stop, badmsg, State}.
@@ -110,6 +144,8 @@ handle_event(_Event, _StateName, State) ->
 handle_sync_event(_Event, _From, _StateName, State) ->
     {stop, badmsg, State}.
 
+handle_info(request_timeout, StateName, StateData) ->
+    ?MODULE:StateName(request_timeout, StateData);
 handle_info(_Info, _StateName, State) ->
     {stop, badmsg, State}.
 
@@ -129,7 +165,11 @@ pick_coordinator(PL) ->
     {Coord, _Type} = lists:nth(ListPos, PL),
     Coord.
 
--spec replica_pl(riak_core_apl:preflist(), [result()]) -> any().
-replica_pl(PL, Results) ->
-    [{Idx, Node} || {{Idx, Node}, _Type} <- PL,
-                    not lists:keymember(Idx, 2, Results)].
+-spec replica_pl(riak_core_apl:preflist(), partition()) -> any().
+replica_pl(PL, CoordPartition) ->
+    [{Idx, Node} || {{Idx, Node}, _Type} <- PL, Idx /= CoordPartition].
+
+schedule_timeout(infinity) ->
+    undefined;
+schedule_timeout(Timeout) ->
+    erlang:send_after(Timeout, self(), request_timeout).

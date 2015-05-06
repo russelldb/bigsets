@@ -3,6 +3,8 @@
 -include("bigset.hrl").
 
 -export([start_vnode/1,
+         coordinate/2,
+         replicate/2,
          init/1,
          terminate/2,
          handle_command/3,
@@ -26,19 +28,39 @@
                 db %% eleveldb handle
                }).
 
+-type set() :: binary().
+-type member() :: binary().
+-type actor() :: binary().
+-type counter() :: pos_integer().
+-type key() :: binary().
 -type state() :: #state{}.
 -type status() :: orddict:orddict().
 -type level_put() :: {put, Key :: binary(), Value :: binary()}.
--type level_delete() :: {delete, Key :: binary()}.
--type level_writes() :: [level_put() | level_delete()].
 
 -define(READ_OPTS, [{fill_cache, true}]).
 -define(WRITE_OPTS, [{sync, false}]).
 -define(FOLD_OPTS, [{iterator_refresh, true}]).
 
+%% added onto the key for an add so it sorts higher than a remove key
+-define(ADD, <<>>).
+
 %% API
 start_vnode(I) ->
     riak_core_vnode_master:get_vnode_pid(I, ?MODULE).
+
+%% @doc coordinate a set operation
+coordinate(Coordinator, Op=?OP{}) ->
+    riak_core_vnode_master:command([Coordinator],
+                                   Op,
+                                   {fsm, undefined, self()},
+                                   bigset_vnode_master).
+
+%% @doc handle the downstream replication operation
+replicate(PrefList, Req=?REPLICATE_REQ{}) ->
+    riak_core_vnode_master:command(PrefList,
+                                   Req,
+                                   {fsm, undefined, self()},
+                                   bigset_vnode_master).
 
 init([Partition]) ->
     DataDir = integer_to_list(Partition),
@@ -52,158 +74,102 @@ init([Partition]) ->
     {ok, #state {vnodeid=VnodeId,  partition=Partition, db=DB},
      [{pool, bigset_vnode_worker, PoolSize, []}]}.
 
+
 %% COMMANDS(denosneold!)
+handle_command(ping, _Sender, State) ->
+     {reply, {pong, State#state.partition}, State};
 handle_command(?OP{set=Set, inserts=Inserts, removes=Removes, ctx=Ctx}, Sender, State) ->
-    %% Store elements in the set. NOTE: you need a dot per insert,
-    %% since this is a delta orswot, and remove means sending only
-    %% dot(s) for removed element(s)
+    %% Store elements in the set.
     #state{db=DB, partition=Partition, vnodeid=Id} = State,
     ClockKey = clock_key(Set),
     Clock = clock(eleveldb:get(DB, ClockKey, ?READ_OPTS)),
-    {Clock2, Inserts, ReplicationPayload} = gen_inserts(Set, Inserts, Id, Clock),
+    {Clock2, InsertWrites, ReplicationPayload} = gen_inserts(Set, Inserts, Id, Clock),
 
-    Deferred = deferred(Ctx, Clock),
-
-    Deletes = gen_removes(Set, Removes, Ctx, Deferred),
+    %% with a context we write {Set, Element, Actor, ActorCnt, TSB=1}
+    %% for each element to remove, for each actor in the context,
+    %% where cnt is count(actor, Clock) This is like a tombstone for
+    %% that element, for that actor, at that count. This works 'cos of
+    %% extrinsic set of events.
+    DeleteWrites = gen_removes(Set, Removes, Clock, Ctx),
 
     BinClock = to_bin(Clock2),
-    Writes = lists:append([[{put, ClockKey, BinClock}],  Inserts, Deletes]),
+
+    Writes = lists:append([[{put, ClockKey, BinClock}],  InsertWrites, DeleteWrites]),
     eleveldb:writes(DB, Writes, ?WRITE_OPTS),
-    riak_core_vnode:reply(Sender, {dw, Partition, ReplicationPayload}),
+    riak_core_vnode:reply(Sender, {dw, Partition, ReplicationPayload, DeleteWrites}),
     {noreply, State};
 handle_command(?REPLICATE_REQ{set=Set,
-                              elements_dots=Elements},
+                              inserts=Ins,
+                              removes=Rems},
                Sender, State) ->
     #state{db=DB, partition=Partition} = State,
-    %% fire and forget? It's fair? Should DW to be fair in a benchmark, eh?
+    %% fire and forget? It's fair? Should DW to be fair in a
+    %% benchmark, eh?
     riak_core_vnode:reply(Sender, {w, Partition}),
     %% Read local clock
     ClockKey = clock_key(Set),
-    {Clock, Writes} = replica_writes(eleveldb:get(DB, ClockKey, ?READ_OPTS), Elements, DB),
+    {Clock, Inserts} = replica_writes(eleveldb:get(DB, ClockKey, ?READ_OPTS), Ins),
     BinClock = to_bin(Clock),
+    Writes = lists:append([[{put, ClockKey, BinClock}], Inserts, Rems]),
     ok = eleveldb:write(DB, [{put, ClockKey, BinClock} | Writes], ?WRITE_OPTS),
     riak_core_vnode:reply(Sender, {dw, Partition}),
-    {noreply, State};
-handle_command(?READ_REQ{set=Set}, Sender, State) ->
-    #state{db=DB, partition=Partition} = State,
-    %% clock is first key
-    %% read all the way to last element
-    FirstKey = clock_key(Set),
-
-    FoldFun = fun({Key, Value}, Acc) ->
-                      {s, S, K} = sext:decode(Key),
-                      if S == Set, K == clock ->
-                              %% Set clock
-                              {from_bin(Value), dict:new()};
-                         S == Set, is_binary(K) ->
-                              {Clock, Dict} = Acc,
-                              {Clock, dict:store(K, from_bin(Value), Dict)};
-                         true ->
-                              {throw, Acc}
-                      end
-              end,
-    Folder = fun() ->
-                     try
-                         eleveldb:fold(DB, FoldFun, [], [FirstKey | ?FOLD_OPTS])
-                     catch
-                         {break, AccFinal} ->
-                             riak_core_vnode:reply(Sender, {r, Partition, AccFinal})
-                     end
-             end,
-    {async, {get, Folder}, Sender, State};
-handle_command(?CONTAINS_REQ{set=Set, elements=Elements}, Sender, State) ->
-    #state{db=DB, partition=Partition} = State,
-    %% You need to materialize the set (in part) to see if Element(s) is/are
-    %% present. Contains means, read Element + Clock and send to FSM
-    %% where a sort of delta merge can decide if Element is present
-    ClockKey = clock_key(Set),
-    Reply = case eleveldb:get(DB, ClockKey, ?READ_OPTS) of
-                not_found ->
-                    not_found;
-                {ok, ClockBin} ->
-                    Clock = from_bin(ClockBin),
-                    {ok, Itr} = eleveldb:iterator(DB, ?FOLD_OPTS),
-                    ElemsAndKeys = lists:sort([{elem_key(Set, E), E} || E <- Elements]),
-                    Set = lists:foldl(fun({Key, Elem}, Acc) ->
-                                              case eleveldb:iterator_move(Itr, Key) of
-                                                  {ok, Key, DotsBin} ->
-                                                      Dots = from_bin(DotsBin),
-                                                      dict:store(Elem, Dots, Acc);
-                                                  {ok, _OtherKey, _OtherVal} ->
-                                                      Acc
-                                              end
-                                      end,
-                                      dict:new(),
-                                      ElemsAndKeys),
-                    eleveldb:iterator_close(Itr),
-                    {Clock, Set}
-            end,
-    riak_core_vnode:reply(Sender, {r, Partition, Reply}),
-    {noreply, State};
-handle_command(?REMOVE_REQ{set=Set, elements=Elements, ctx=undefined}, Sender, State) ->
-    %% This is like "coordinate remove" see a replicate command for
-    %% downstream remove.
-
-    %% No context remove is a dirty "just do it" remove, so just do
-    %% it, nothing to replicate
-    #state{db=DB, partition=Partition} = State,
-
-    %% An "ack" of the delete
-    riak_core_vnode:reply(Sender, {d, Partition, ok}),
-
-    riak_core_vnode:reply(Sender, {d, Partition, ok}),
-    Writes = lists:foldl(fun(E, A) ->
-                                 [{delete, elem_key(Set, E)} | A]
-                         end,
-                         [],
-                         Elements),
-    eleveldb:writes(DB, Writes, ?WRITE_OPTS),
-
-    %% dd == durable delete
-    riak_core_vnode:reply(Sender, {dd, Partition, ok}),
     {noreply, State}.
-%% handle_command(?REMOVE_REQ{set=Set, elements=Elements, ctx=Ctx}, Sender, State) ->
-%%     %% This is like "coordinate remove" see a replicate command for
-%%     %% downstream remove.
-
-%%     %% we need to send the removed dots downstream, but if we send the
-%%     %% whole removed elements that is simpler (since we operate in a
-%%     %% element->dot mapped world) If we stored things dot->element
-%%     %% then just sending dots is enough I wonder if we can have a
-%%     %% reverse index so we can have both!  In other words some scope
-%%     %% for optimisation clearly exists here, it seems a waste to send
-%%     %% elements across the network just to delete them from disk!
+%% handle_command(?READ_REQ{set=Set}, Sender, State) ->
 %%     #state{db=DB, partition=Partition} = State,
-%%     riak_core_vnode:reply(Sender, {d, Partition, ok}),
-%%     Writes = lists:foldl(fun(E, A) ->
-%%                                  [{delete, elem_key(Set, E)} | A]
-%%                          end,
-%%                          [],
-%%                          Elements),
+%%     %% clock is first key
+%%     %% read all the way to last element
+%%     FirstKey = clock_key(Set),
 
-%%     {ok, Itr} = eleveldb:iterator(DB, ?FOLD_OPTS),
-%%     ElemsAndKeys = lists:sort([{elem_key(Set, E), E} || E <- Elements]),
-%%     {Dels, Reps} = lists:foldl(fun({Key, Elem}, {Del, Rep}=Acc) ->
-%%                                        case eleveldb:iterator_move(Itr, Key) of
-%%                                            {ok, Key, DotsBin} ->
-%%                                                Dots = from_bin(DotsBin),
-%%                                                {[{delete, Key} | Del],
-%%                                                 [{Elem, Dots} | Rep]};
-%%                                            {ok, _OtherKey, _OtherVal} ->
-%%                                                Acc
-%%                                        end
-%%                                end,
-%%                                {[], []},
-%%                                ElemsAndKeys),
-
-%%     eleveldb:iterator_close(Itr),
-
+%%     FoldFun = fun({Key, Value}, Acc) ->
+%%                       {s, S, K} = sext:decode(Key),
+%%                       if S == Set, K == clock ->
+%%                               %% Set clock
+%%                               {from_bin(Value), dict:new()};
+%%                          S == Set, is_binary(K) ->
+%%                               {Clock, Dict} = Acc,
+%%                               {Clock, dict:store(K, from_bin(Value), Dict)};
+%%                          true ->
+%%                               {throw, Acc}
+%%                       end
+%%               end,
+%%     Folder = fun() ->
+%%                      try
+%%                          eleveldb:fold(DB, FoldFun, [], [FirstKey | ?FOLD_OPTS])
+%%                      catch
+%%                          {break, AccFinal} ->
+%%                              riak_core_vnode:reply(Sender, {r, Partition, AccFinal})
+%%                      end
+%%              end,
+%%     {async, {get, Folder}, Sender, State};
+%% handle_command(?CONTAINS_REQ{set=Set, elements=Elements}, Sender, State) ->
+%%     #state{db=DB, partition=Partition} = State,
+%%     %% You need to materialize the set (in part) to see if Element(s) is/are
+%%     %% present. Contains means, read Element + Clock and send to FSM
+%%     %% where a sort of delta merge can decide if Element is present
+%%     ClockKey = clock_key(Set),
+%%     Reply = case eleveldb:get(DB, ClockKey, ?READ_OPTS) of
+%%                 not_found ->
+%%                     not_found;
+%%                 {ok, ClockBin} ->
+%%                     Clock = from_bin(ClockBin),
+%%                     {ok, Itr} = eleveldb:iterator(DB, ?FOLD_OPTS),
+%%                     ElemsAndKeys = lists:sort([{elem_key(Set, E), E} || E <- Elements]),
+%%                     Set = lists:foldl(fun({Key, Elem}, Acc) ->
+%%                                               case eleveldb:iterator_move(Itr, Key) of
+%%                                                   {ok, Key, DotsBin} ->
+%%                                                       Dots = from_bin(DotsBin),
+%%                                                       dict:store(Elem, Dots, Acc);
+%%                                                   {ok, _OtherKey, _OtherVal} ->
+%%                                                       Acc
+%%                                               end
+%%                                       end,
+%%                                       dict:new(),
+%%                                       ElemsAndKeys),
+%%                     eleveldb:iterator_close(Itr),
+%%                     {Clock, Set}
+%%             end,
 %%     riak_core_vnode:reply(Sender, {r, Partition, Reply}),
-
-%%     eleveldb:writes(DB, Writes, ?WRITE_OPTS),
-%%     riak_core_vnode:reply(Sender, {dd, Partition, ok}),
 %%     {noreply, State}.
-
 
 -spec handle_handoff_command(term(), term(), state()) ->
                                     {noreply, state()}.
@@ -240,14 +206,12 @@ handle_exit(_Pid, _Reason, State) ->
 terminate(_Reason, _State) ->
     ok.
 
-
-
 %%%%% priv
 %%% So much cut and paste, maybe vnode_status_mgr (or vnode
 %%% manage???) should do the ID management
 vnode_id(Partition) ->
     File = vnode_status_filename(Partition),
-    Status = read_vnode_status(File),
+    {ok, Status} = read_vnode_status(File),
     case get_status_item(vnodeid, Status, undefined) of
         undefined ->
             {Id, NewStatus} = assign_vnodeid(Status),
@@ -323,10 +287,22 @@ clock_key(Set) ->
     sext:encode({s, Set, clock}).
 
 %% @private sext encodes the element key so it is in order, on disk,
-%% with the other elements.
--spec elem_key(binary(), binary()) -> binary().
-elem_key(Set, Elem) ->
-    sext:encode({s, Set, Elem}).
+%% with the other elements. Use the actor ID and counter (dot)
+%% too. This means at some extra storage, but makes for no reads
+%% before writes on replication/delta merge. See read for how the
+%% leveldb merge magic will work. Essentially every key {s, Set, E, A,
+%% Cnt, 0} that has some key {s, Set, E, A, Cnt', 0} where Cnt' > Cnt
+%% can be removed in compaction, as can every key {s, Set, E, A, Cnt,
+%% 0} which has some key {s, Set, E, A, Cnt', 1} whenre Cnt' >=
+%% Cnt. As can every key {s, Set, E, A, Cnt, 1} where the VV portion
+%% of the set clock >= {A, Cnt}. Crazy!!
+-spec insert_member_key(set(), member(), actor(), counter()) -> key().
+insert_member_key(Set, Elem, Actor, Cnt) ->
+    sext:encode({s, Set, Elem, Actor, Cnt, <<0:1>>}).
+
+-spec remove_member_key(set(), member(), actor(), counter()) -> key().
+remove_member_key(Set, Element, Actor, Cnt) ->
+    sext:encode({s, Set, Element, Actor, Cnt, <<1:1>>}).
 
 -spec clock(not_found | {ok, binary()}) -> bigset_clock:clock().
 clock(not_found) ->
@@ -340,16 +316,6 @@ from_bin(ClockOrDot) ->
 to_bin(Dot) ->
     term_to_binary(Dot).
 
-%% @private deferred: does the operation have any deferred components,
-%% that is, is the Set Clock not descended from the `Ctx' `undefined'
-%% as riak_dt_vclock:fresh().
--spec deferred(riak_dt_vclock:vclock() | undefined,
-               riak_dt_vclock:vclock()) ->
-                      boolean().
-deferred(undefined, _Clock) ->
-    false;
-deferred(Ctx, Clock) ->
-    riak_dt_vclock:descends(Clock, Ctx).
 
 %% @private gen_inserts: generate the list of writes for an insert
 %% operation, given the elements, set, and clock
@@ -363,15 +329,13 @@ deferred(Ctx, Clock) ->
                           ReplicationDeltas :: [delta_element()]}.
 
 gen_inserts(Set, Inserts, Id, Clock) ->
-    lists:fold(fun(Element, {C, W, R}) ->
-                       ElemKey = elem_key(Set, Element),
+    lists:foldl(fun(Element, {C, W, R}) ->
                        %% Generate a dot per insert
-                       {Dot, C2} = bigset_clock:increment(Id, C),
-                       %% Store as a list for simpler merging later.
-                       ElemValue = to_bin([Dot]),
+                       {{Id, Cnt}=Dot, C2} = bigset_clock:increment(Id, C),
+                       ElemKey = insert_member_key(Set, Element, Id, Cnt),
                        {
                          C2, %% New Clock
-                         [{put, ElemKey, ElemValue} | W], %% To write
+                         [{put, ElemKey, <<>>} | W], %% To write
                          [{ElemKey, Dot} | R] %% To replicate
                        }
                end,
@@ -379,66 +343,64 @@ gen_inserts(Set, Inserts, Id, Clock) ->
                Inserts).
 
 %% @private gen_removes: generate the writes needed to for a delete.
-
+%% When there is no context, use the local, coordinating clock (we can
+%% bike shed this later!)
 -spec gen_removes(Set :: binary(),
                   Removes :: [binary()],
-                  Context :: riak_dt_vclock:vclock() | undefined,
-                  ReadFirst :: boolean()) ->
-                         [level_delete()].
-gen_removes(Set, Removes, _Ctx, _Deferred=false) ->
-                      %% if the Ctx decends the Set Clock, then every element on disk in
-                      %% `Removes' can be straight deleted.
-                      %% No context remove is a dirty "just do it" remove, so just do
-                      lists:foldl(fun(E, A) ->
-                                          [{delete, elem_key(Set, E)} | A]
-                                  end,
-                                  [],
-                                  Removes);
-gen_removes(Set, Removes, Ctx, _Deferred=true) ->
-    %% This is all together harder, and way less efficient. @TODO(rdb)
-    %% find a more efficient way, this involves reading every element
-    %% in `Removes' and seeing if it's dot is covered by Ctx
-    ok.
+                  SetClock :: riak_dt_vclock:vclock(),
+                  Context :: riak_dt_vclock:vclock() | undefined) ->
+                         [level_put()].
+gen_removes(_Set, []=_Removes, _SetClock, _Ctx) ->
+    [];
+gen_removes(Set, Removes, SetClock, undefined) ->
+    gen_removes(Set, Removes, SetClock);
+gen_removes(Set, Removes, _SetClock, Ctx) ->
+    Clock = context_to_clock(Ctx),
+    gen_removes(Set, Removes, Clock).
 
-%% fold funs for replicate
-%% returns {clock, writes}
-    replica_writes(not_found, Elements, _DB) ->
-                                       F = fun({Key, Dot}, {Clock, Writes}) ->
-                                                   Value = to_bin([Dot]),
-                                                   C2 = bigset_clock:strip_dots(Dot, Clock),
-                                                   {C2, [{put, Key, Value} | Writes]}
-                                           end,
-                                       lists:fold(F, {bigset_clock:fresh(), []}, Elements);
-        replica_writes({ok, BinClock}, Elements, DB) ->
-                                       Clock0 = from_bin(BinClock),
-                                       %% Use iterator? Or multiple Gets?  This needs benchmarking, and
-                                       %% maybe have an adaptive strategy based on sparseness/size of new
-                                       %% write set.
-                                       {ok, Itr} = eleveldb:iterator(DB, ?FOLD_OPTS),
-                                       F = fun({Key, Dot}, {Clock, Writes}) ->
-                                                   case bigset_clock:seen(Clock, Dot) of
-                                                       true ->
-                                                           %% No op, skip it/discard
-                                                           {Clock, Writes};
-                                                       false ->
-                                                           %% Strip the dot
-                                                           C2 = bigset_clock:strip_dots(Dot, Clock),
-                                                           case eleveldb:iterator_move(Itr, Key) of
-                                                               {ok, Key, LocalDotsBin} ->
-                                                                   %% local present && dot unseen
-                                                                   %% merge with local elements dots
-                                                                   %% store new element dots, store clock
-                                                                   LocalDots = from_bin(LocalDotsBin),
-                                                                   Dots = riak_dt_vclock:merge([Dot], LocalDots),
-                                                                   DotsBin = to_bin(Dots),
-                                                                   {C2, [{put, Key, DotsBin} | Writes]};
-                                                               {ok, _OtherKey, _OtherVal} ->
-                                                                   %% Not present, not seen, just store it
-                                                                   DotBin = to_bin(Dot),
-                                                                   {C2, [{put, Key, DotBin} | Writes]}
-                                                           end
-                                                   end
-                                           end,
-                                       {C, W} = lists:foldl(F, {Clock0, []}, Elements),
-                                       eleveldb:iterator_close(Itr),
-                                       {C, W}.
+context_to_clock(Ctx) ->
+    VV = from_bin(Ctx),
+    bigset_clock:from_vv(VV).
+
+gen_removes(Set, Removes, Clock) ->
+    Actors = bigset_clock:all_nodes(Clock),
+    %% eugh, I hate this elements*actors iteration
+    lists:foldl(fun(E, A) ->
+                        Deletes = [{put, remove_member_key(Set, E, Actor, counter(Actor, Clock))} ||
+                                      Actor <- Actors],
+                        [Deletes | A]
+                end,
+                [],
+                Removes).
+
+%% @private just a wrapper (yo!)
+-spec counter(actor(), bigset_clock:clock()) -> pos_integer().
+counter(Actor, Clock) ->
+    bigset_clock:get_contiguous_counter(Actor, Clock).
+
+%% @private generate the write set, don't write stuff you wrote
+%% already. Returns {clock, writes}
+-spec replica_writes(not_found | {ok, binary()},
+                     [delta_element()]) ->
+                            [level_put()].
+replica_writes(not_found, Elements) ->
+    F = fun({Key, Dot}, {Clock, Writes}) ->
+                C2 = bigset_clock:strip_dots(Dot, Clock),
+                {C2, [{put, Key, <<>>} | Writes]}
+        end,
+    lists:fold(F, {bigset_clock:fresh(), []}, Elements);
+replica_writes({ok, BinClock}, Elements) ->
+    Clock0 = from_bin(BinClock),
+    F = fun({Key, Dot}, {Clock, Writes}) ->
+                case bigset_clock:seen(Clock, Dot) of
+                    true ->
+                        %% No op, skip it/discard
+                        {Clock, Writes};
+                    false ->
+                        %% Strip the dot
+                        C2 = bigset_clock:strip_dots(Dot, Clock),
+                        {C2, [{put, Key, <<>>} | Writes]}
+                end
+        end,
+    lists:foldl(F, {Clock0, []}, Elements).
+

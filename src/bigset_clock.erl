@@ -34,6 +34,27 @@ increment(Actor, {Clock, Seen}) ->
 get_dot(Actor, {Clock, _Dots}) ->
     {Actor, riak_dt_vclock:get_counter(Actor, Clock)}.
 
+all_nodes({Clock, _Dots}) ->
+    riak_dt_vclock:all_nodes(Clock).
+
+%% @doc get the counter for `Actor' where `counter' is the maximum
+%% _contiguous_ event sent by this clock (i.e. not including
+%% exceptions.)
+-spec get_contiguous_counter(riak_dt_vclock:actor(), clock()) ->
+                                    pos_integer() | no_return().
+get_contiguous_counter(Actor, {Clock, _Dots}=C) ->
+    case riak_dt_vclock:get_counter(Actor, Clock) of
+        0 ->
+            error({badarg, actor_not_in_clock}, [Actor, C]);
+        Cnt ->
+            Cnt
+    end.
+
+%% @doc make a bigset clock from a version vector
+-spec from_vv(riak_dt_vclock:vclock()) -> clock().
+from_vv(Clock) ->
+    {Clock, []}.
+
 %% @doc given a `Dot :: riak_dt_vclock:dot()' and a `Clock::clock()',
 %% add the dot to the clock. If the dot is contiguous with events
 %% summerised by the clocks VV it will be added to the VV, if it is an
