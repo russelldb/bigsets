@@ -41,12 +41,12 @@ init_worker(VNodeIndex, _Args, _Props) ->
     {ok, #state{index=VNodeIndex}}.
 
 %% @doc Perform the asynchronous fold operation.
-handle_work({fold, FoldFun, FinishFun}, _Sender, State) ->
+handle_work({get, FoldFun}, _Sender, State) ->
     try
-        FinishFun(FoldFun())
+        FoldFun()
     catch
         throw:receiver_down -> ok;
         throw:stop_fold     -> ok;
-        throw:PrematureAcc  -> FinishFun(PrematureAcc)
+        throw:_PrematureAcc  -> ok %%FinishFun(PrematureAcc)
     end,
     {noreply, State}.

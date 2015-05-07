@@ -5,6 +5,7 @@
 -export([
          ping/0,
          update/3,
+         update/2,
          read/2
         ]).
 
@@ -16,6 +17,7 @@
 -type member() :: binary().
 %% an opaque binary riak_dt_vclock:vclock()
 -type context() :: binary() | undefined.
+-type remove() :: {member(), context()}.
 
 
 %% Public API
@@ -27,26 +29,31 @@ ping() ->
     [{IndexNode, _Type}] = PrefList,
     riak_core_vnode_master:sync_spawn_command(IndexNode, ping, bigset_vnode_master).
 
+%% @TODO rmeoves for elements with out a context
+
+-spec update(set(), Adds :: [member()]) ->
+                    ok | {error, Reason :: term()}.
+update(Set, Adds) ->
+    update(Set, Adds, [], []).
 
 %% @doc update a Set
 -spec update(set(),
              Adds :: [member()],
-             Removes :: [member()]) ->
+             Removes :: [remove()]) ->
                     ok | {error, Reason :: term()}.
 update(Set, Adds, Removes) ->
-    update(Set, Adds, Removes, undefined, []).
+    update(Set, Adds, Removes, []).
 
 %% @doc update a Set
 -spec update(set(),
              Adds :: [member()],
-             Removes :: [member()],
-             Ctx :: context(),
+             Removes :: [remove()],
              Options :: proplists:proplist()) ->
                     ok | {error, Reason :: term()}.
-update(Set, Adds, Removes, Ctx, Options) ->
+update(Set, Adds, Removes, Options) ->
     Me = self(),
     ReqId = mk_reqid(),
-    Op = ?OP{set=Set, inserts=Adds, removes=Removes, ctx=Ctx},
+    Op = ?OP{set=Set, inserts=Adds, removes=Removes},
     bigset_write_fsm:start_link(ReqId, Me, Set, Op, Options),
     Timeout = recv_timeout(Options),
     wait_for_reqid(ReqId, Timeout).

@@ -22,7 +22,7 @@
 
 -record(state,
         {
-          actors :: [#actor{}]
+          actors=orddict:new() :: [#actor{}]
         }).
 
 -ifdef(TEST).
@@ -71,7 +71,7 @@ get_actor(Partition, State) ->
     case orddict:find(Partition, Actors) of
         error ->
             #actor{partition=Partition};
-        Actor ->
+        {ok, Actor} ->
             Actor
     end.
 

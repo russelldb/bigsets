@@ -58,8 +58,19 @@ from_vv(Clock) ->
 %% only, it does not say what you've seen.
 -spec tombstone_context(clock()) -> riak_dt_vclock:vclock().
 tombstone_context({Clock, Dots}) ->
-    %% @TODO(rdb|implement)
-    ok.
+    %% reverse dots so get_value will get highest counter since dots
+    %% is kept sorted
+    Stod = lists:reverse(Dots),
+    Nodes = lists:umerge(lists:sort(proplists:get_keys(Dots)),
+                         riak_dt_vclock:all_nodes(Clock)),
+    TS = lists:foldl(fun(Actor, MaxClock) ->
+                             [{Actor, max(riak_dt_vclock:get_counter(Actor, Clock),
+                                          proplists:get_value(Actor, Stod, 0))}
+                              | MaxClock]
+                     end,
+                     [],
+                     Nodes),
+    lists:reverse(TS).
 
 %% @doc given a `Dot :: riak_dt_vclock:dot()' and a `Clock::clock()',
 %% add the dot to the clock. If the dot is contiguous with events
@@ -212,5 +223,9 @@ merge_test() ->
     %% assoc
     ?assertEqual(merge(merge(Clock3, Clock), Clock5),
                  merge(merge(Clock, Clock5), Clock3)).
+
+tombstone_context_test() ->
+    Clock = {[{a, 2}, {b, 9}, {z, 4}], [{a, 7}, {c, 99}]},
+    ?assertEqual([{a, 7}, {b, 9}, {c, 99}, {z, 4}], tombstone_context(Clock)).
 
 -endif.

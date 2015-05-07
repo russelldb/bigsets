@@ -57,8 +57,7 @@ init([ReqId, From, Set, Options]) ->
 prepare(timeout, State) ->
     #state{options=Options, set=Set} = State,
     Hash = riak_core_util:chash_key({bigset, Set}),
-    UpNodes = riak_core_node_watcher:nodes(bigset),
-    PL = riak_core_apl:get_apl_ann(Hash, 3, UpNodes),
+    PL = riak_core_apl:get_apl(Hash, 3, bigset),
     Timeout = proplists:get_value(timeout, Options, ?DEFAULT_TIMEOUT),
     TRef = schedule_timeout(Timeout),
     {next_state, validate, State#state{preflist=PL, timer=TRef}, 0}.
@@ -93,8 +92,8 @@ await_reps(request_timeout, State) ->
 await_reps(Res, State) ->
     #state{logic=Core} = State,
     Core2 = bigset_read_core:result(Res, Core),
-    State2 = #state{logic=Core2},
-    case bigset_read_core:done(Core2) of
+    State2 = State#state{logic=Core2},
+    case bigset_read_core:is_done(Core2) of
         true ->
             Reply = {ok, Core2},
             {next_state, reply, State2#state{reply=Reply}, 0};
@@ -128,17 +127,6 @@ code_change(_OldVsn, StateName, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-
--spec pick_coordinator(riak_core_apl:preflist()) -> {partition(), node()}.
-pick_coordinator(PL) ->
-    {ListPos, _} = random:uniform_s(length(PL), os:timestamp()),
-    {Coord, _Type} = lists:nth(ListPos, PL),
-    Coord.
-
--spec replica_pl(riak_core_apl:preflist(), partition()) -> any().
-replica_pl(PL, CoordPartition) ->
-    [{Idx, Node} || {{Idx, Node}, _Type} <- PL, Idx /= CoordPartition].
-
 schedule_timeout(infinity) ->
     undefined;
 schedule_timeout(Timeout) ->
