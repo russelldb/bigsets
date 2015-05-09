@@ -62,6 +62,23 @@ is_done(N, [{_P, #actor{done=true}} | Rest]) ->
 is_done(N, [_ | Rest]) ->
     is_done(N, Rest).
 
+%% @perform a CRDT orswot merge
+finalise(#state{actors=Actors}) ->
+    merge(Actors, undefined).
+
+merge([], Elements) ->
+    Elements;
+merge([Actor | Rest], undefined) ->
+    merge(Rest, Actor);
+merge([Actor | Rest], Mergedest) ->
+    M2 = orswot_merge(Actor, Mergedest),
+    merge(Rest, M2).
+
+orswot_merge(A1, A2) ->
+    #actor{elements=E1} = A1,
+    #actor{elements=E2} = A2,
+    lists:umerge(E1, E2).
+
 set_actor(Partition, Actor, State) ->
     #state{actors=Actors} = State,
     State#state{actors=orddict:store(Partition, Actor,  Actors)}.

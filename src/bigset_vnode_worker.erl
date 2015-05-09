@@ -18,8 +18,9 @@
 %%
 %% -------------------------------------------------------------------
 
-%% @doc This module uses the riak_core_vnode_worker behavior to perform
-%% different riak_kv tasks asynchronously.
+%% @doc This module uses the riak_core_vnode_worker behavior to
+%% perform different tasks asynchronously. Worth noting: it is the
+%% side effects of `handle_work/3' that matter.
 
 -module(bigset_vnode_worker).
 -behaviour(riak_core_vnode_worker).
@@ -29,19 +30,26 @@
 
 -include_lib("bigset.hrl").
 
--record(state, {index :: pos_integer()}).
+-record(state, {partition :: pos_integer(),
+               batch_size :: pos_integer()}).
+
+-define(DEFAULT_BATCH_SIZE, 10000).
 
 %% ===================================================================
 %% Public API
 %% ===================================================================
 
-%% @doc Initialize the worker. Currently only the VNode index
-%% parameter is used.
-init_worker(VNodeIndex, _Args, _Props) ->
-    {ok, #state{index=VNodeIndex}}.
+%% @doc Initialize the worker.
+init_worker(VNodeIndex, Args, _Props) ->
+    BatchSize = proplists:get_value(batch_size, Args, ?DEFAULT_BATCH_SIZE),
+    {ok, #state{partition=VNodeIndex, batch_size=BatchSize}}.
 
-%% @doc Perform the asynchronous fold operation.
-handle_work({get, FoldFun}, _Sender, State) ->
+%% @doc Perform the asynchronous fold operation.  State is the state
+%% returned from init return {noreply, State} or {replay, Reply,
+%% State} the latter sends `Reply' to `Sender' using
+%% riak_core_vnode:reply(Sender, Reply)
+%% No need for lots of indirection here, is there?
+handle_work({get, FoldFun, _BufferMod}, _Sender, State=#state{partition=Partition}) ->
     try
         FoldFun()
     catch
@@ -49,4 +57,4 @@ handle_work({get, FoldFun}, _Sender, State) ->
         throw:stop_fold     -> ok;
         throw:_PrematureAcc  -> ok %%FinishFun(PrematureAcc)
     end,
-    {noreply, State}.
+    {reply, {r, Partition, done}, State}.

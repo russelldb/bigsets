@@ -95,7 +95,7 @@ await_reps(Res, State) ->
     State2 = State#state{logic=Core2},
     case bigset_read_core:is_done(Core2) of
         true ->
-            Reply = {ok, Core2},
+            Reply = {ok, bigset_read_core:finalise(Core2)},
             {next_state, reply, State2#state{reply=Reply}, 0};
         false ->
             {next_state, await_reps, State2}

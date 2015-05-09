@@ -83,7 +83,7 @@ init([Partition]) ->
     PoolSize = app_helper:get_env(bigset, worker_pool_size, 100),
     VnodeId = vnode_id(Partition),
     {ok, #state {vnodeid=VnodeId,  partition=Partition, db=DB},
-     [{pool, bigset_vnode_worker, PoolSize, []}]}.
+     [{pool, bigset_vnode_worker, PoolSize, [{batch_size, 1000}]}]}.
 
 %% COMMANDS(denosneold!)
 handle_command(ping, _Sender, State) ->
@@ -135,7 +135,6 @@ handle_command(?READ_REQ{set=Set}, Sender, State) ->
     FirstKey = clock_key(Set),
 
     %% @todo this is a mess, need to rewrite, and needs acks, and batches etc
-
     FoldFun = fun({Key, Value}, Acc) ->
                       case decode_key(Key) of
                           {s, Set, clock} ->
@@ -144,30 +143,29 @@ handle_command(?READ_REQ{set=Set}, Sender, State) ->
                               riak_core_vnode:reply(Sender,
                                                     {r, Partition, clock, Clock}),
                               %% there is a clock, so change to real acc from `not_found'
-                              [];
-                          {s, Set, _Element, _Actor, _Cnt, _TSB}=K ->
+                              bigset_fold_acc:new();
+                          {s, Set, Element, Actor, Cnt, TSB} ->
                               %% @TODO buffer, flush, ack backpressure, stop etc!
-                              [K | Acc];
+                              bigset_fold_acc:add(Element, Actor, Cnt, TSB, Acc);
                           _ ->
                               throw({break, Acc})
                       end
               end,
     Folder = fun() ->
-                     try
-                         AccFinal = eleveldb:fold(DB, FoldFun, not_found, [FirstKey | ?FOLD_OPTS]),
-                         Elements = lists:reverse(AccFinal),
-                         riak_core_vnode:reply(Sender, {r, Partition, elements, Elements}),
-                         riak_core_vnode:reply(Sender, {r, Partition, done})
-                     catch
-                         {break, Final} ->
-                             if is_list(Final) ->
-                                     Res = lists:reverse(Final),
-                                     riak_core_vnode:reply(Sender, {r, Partition, elements, Res}),
-                                     riak_core_vnode:reply(Sender, {r, Partition, done});
-                                true ->
-                                     riak_core_vnode:reply(Sender, {r, Partition, not_found}),
-                                     riak_core_vnode:reply(Sender, {r, Partition, done})
-                             end
+                     AccFinal =
+                         try
+                             eleveldb:fold(DB, FoldFun, not_found, [FirstKey | ?FOLD_OPTS])
+                         catch
+                             {break, Res} ->
+                                 Res
+                         end,
+                     if AccFinal==not_found ->
+                             riak_core_vnode:reply(Sender, {r, Partition, not_found}),
+                             riak_core_vnode:reply(Sender, {r, Partition, done});
+                        true ->
+                             Elements = bigset_fold_acc:finalise(AccFinal),
+                             riak_core_vnode:reply(Sender, {r, Partition, elements, Elements}),
+                             riak_core_vnode:reply(Sender, {r, Partition, done})
                      end
              end,
     {async, {get, Folder}, Sender, State}.
