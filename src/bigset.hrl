@@ -1,3 +1,13 @@
+-type set() :: binary().
+-type member() :: binary().
+-type actor() :: binary().
+-type counter() :: pos_integer().
+-type key() :: binary().
+-type clock_key() :: {s, set(), clock}.
+%% TombStoneBit, 0 for added, 1 for removed.
+-type tsb() :: <<_:1>>.
+-type member_key() :: {s, set(), member(), actor(), counter(), tsb()}.
+
 -type delta_element() :: {ElementKey :: binary(),
                           Dot :: riak_dt_vclock:dot()}.
 

@@ -29,15 +29,6 @@
                 db %% eleveldb handle
                }).
 
--type set() :: binary().
--type member() :: binary().
--type actor() :: binary().
--type counter() :: pos_integer().
--type key() :: binary().
--type clock_key() :: {s, set(), clock}.
-%% TombStoneBit, 0 for added, 1 for removed.
--type tsb() :: <<_:1>>.
--type member_key() :: {s, set(), member(), actor(), counter(), tsb()}.
 -type state() :: #state{}.
 -type status() :: orddict:orddict().
 -type level_put() :: {put, Key :: binary(), Value :: binary()}.
@@ -91,7 +82,7 @@ handle_command(ping, _Sender, State) ->
 handle_command(?OP{set=Set, inserts=Inserts, removes=Removes}, Sender, State) ->
     %% Store elements in the set.
     #state{db=DB, partition=Partition, vnodeid=Id} = State,
-    ClockKey = clock_key(Set),
+    ClockKey = bigset:clock_key(Set),
     Clock = clock(eleveldb:get(DB, ClockKey, ?READ_OPTS)),
     {Clock2, InsertWrites, ReplicationPayload} = gen_inserts(Set, Inserts, Id, Clock),
 
@@ -106,7 +97,7 @@ handle_command(?OP{set=Set, inserts=Inserts, removes=Removes}, Sender, State) ->
     %% right now, if you wanted (in fact deletes can be broadcast
     %% without a coordinator, how cool!)
 
-    BinClock = to_bin(Clock2),
+    BinClock = bigset:to_bin(Clock2),
 
     Writes = lists:append([[{put, ClockKey, BinClock}],  InsertWrites, DeleteWrites]),
     eleveldb:write(DB, Writes, ?WRITE_OPTS),
@@ -121,54 +112,18 @@ handle_command(?REPLICATE_REQ{set=Set,
     %% benchmark, eh?
     riak_core_vnode:reply(Sender, {w, Partition}),
     %% Read local clock
-    ClockKey = clock_key(Set),
+    ClockKey = bigset:clock_key(Set),
     {Clock, Inserts} = replica_writes(eleveldb:get(DB, ClockKey, ?READ_OPTS), Ins),
-    BinClock = to_bin(Clock),
+    BinClock = bigset:to_bin(Clock),
     Writes = lists:append([[{put, ClockKey, BinClock}], Inserts, Rems]),
     ok = eleveldb:write(DB, Writes, ?WRITE_OPTS),
     riak_core_vnode:reply(Sender, {dw, Partition}),
     {noreply, State};
 handle_command(?READ_REQ{set=Set}, Sender, State) ->
-    #state{db=DB, partition=Partition} = State,
-    %% clock is first key
-    %% read all the way to last element
-    FirstKey = clock_key(Set),
-
-    %% @todo this is a mess, need to rewrite, and needs acks, and batches etc
-    FoldFun = fun({Key, Value}, Acc) ->
-                      case decode_key(Key) of
-                          {s, Set, clock} ->
-                              %% Set clock, send at once!
-                              Clock = from_bin(Value),
-                              riak_core_vnode:reply(Sender,
-                                                    {r, Partition, clock, Clock}),
-                              %% there is a clock, so change to real acc from `not_found'
-                              bigset_fold_acc:new();
-                          {s, Set, Element, Actor, Cnt, TSB} ->
-                              %% @TODO buffer, flush, ack backpressure, stop etc!
-                              bigset_fold_acc:add(Element, Actor, Cnt, TSB, Acc);
-                          _ ->
-                              throw({break, Acc})
-                      end
-              end,
-    Folder = fun() ->
-                     AccFinal =
-                         try
-                             eleveldb:fold(DB, FoldFun, not_found, [FirstKey | ?FOLD_OPTS])
-                         catch
-                             {break, Res} ->
-                                 Res
-                         end,
-                     if AccFinal==not_found ->
-                             riak_core_vnode:reply(Sender, {r, Partition, not_found}),
-                             riak_core_vnode:reply(Sender, {r, Partition, done});
-                        true ->
-                             Elements = bigset_fold_acc:finalise(AccFinal),
-                             riak_core_vnode:reply(Sender, {r, Partition, elements, Elements}),
-                             riak_core_vnode:reply(Sender, {r, Partition, done})
-                     end
-             end,
-    {async, {get, Folder}, Sender, State}.
+    %% read is an async fold operation
+    %% @see bigset_vnode_worker for that code.
+    #state{db=DB} = State,
+    {async, {get, DB, Set}, Sender, State}.
 
 -spec handle_handoff_command(term(), term(), state()) ->
                                     {noreply, state()}.
@@ -206,6 +161,13 @@ terminate(_Reason, _State) ->
     ok.
 
 %%%%% priv
+
+-spec clock(not_found | {ok, binary()}) -> bigset_clock:clock().
+clock(not_found) ->
+    bigset_clock:fresh();
+clock({ok, ClockBin}) ->
+    bigset:from_bin(ClockBin).
+
 %%% So much cut and paste, maybe vnode_status_mgr (or vnode
 %%% manage???) should do the ID management
 vnode_id(Partition) ->
@@ -281,48 +243,6 @@ write_vnode_status(Status, File) ->
     ok = riak_core_util:replace_file(File, io_lib:format("~p.",
                                                          [orddict:to_list(VersionedStatus)])).
 
-%%% codec
-clock_key(Set) ->
-    sext:encode({s, Set, clock}).
-
-%% @private sext encodes the element key so it is in order, on disk,
-%% with the other elements. Use the actor ID and counter (dot)
-%% too. This means at some extra storage, but makes for no reads
-%% before writes on replication/delta merge. See read for how the
-%% leveldb merge magic will work. Essentially every key {s, Set, E, A,
-%% Cnt, 0} that has some key {s, Set, E, A, Cnt', 0} where Cnt' > Cnt
-%% can be removed in compaction, as can every key {s, Set, E, A, Cnt,
-%% 0} which has some key {s, Set, E, A, Cnt', 1} whenre Cnt' >=
-%% Cnt. As can every key {s, Set, E, A, Cnt, 1} where the VV portion
-%% of the set clock >= {A, Cnt}. Crazy!!
--spec insert_member_key(set(), member(), actor(), counter()) -> key().
-insert_member_key(Set, Elem, Actor, Cnt) ->
-    sext:encode({s, Set, Elem, Actor, Cnt, <<0:1>>}).
-
--spec remove_member_key(set(), member(), actor(), counter()) -> key().
-remove_member_key(Set, Element, Actor, Cnt) ->
-    sext:encode({s, Set, Element, Actor, Cnt, <<1:1>>}).
-
-%% @private decode a binary key
--spec decode_key(key()) -> clock_key() | member_key().
-decode_key(Bin) when is_binary(Bin) ->
-    sext:decode(Bin);
-decode_key(Bin) ->
-    Bin.
-
-
--spec clock(not_found | {ok, binary()}) -> bigset_clock:clock().
-clock(not_found) ->
-    bigset_clock:fresh();
-clock({ok, ClockBin}) ->
-    from_bin(ClockBin).
-
-from_bin(B) ->
-    binary_to_term(B).
-
-to_bin(T) ->
-    term_to_binary(T).
-
 %% @private gen_inserts: generate the list of writes for an insert
 %% operation, given the elements, set, and clock
 
@@ -338,7 +258,7 @@ gen_inserts(Set, Inserts, Id, Clock) ->
     lists:foldl(fun(Element, {C, W, R}) ->
                        %% Generate a dot per insert
                        {{Id, Cnt}=Dot, C2} = bigset_clock:increment(Id, C),
-                       ElemKey = insert_member_key(Set, Element, Id, Cnt),
+                       ElemKey = bigset:insert_member_key(Set, Element, Id, Cnt),
                        {
                          C2, %% New Clock
                          [{put, ElemKey, <<>>} | W], %% To write
@@ -359,8 +279,8 @@ gen_removes(_Set, []=_Removes) ->
 gen_removes(Set, Removes) ->
     %% eugh, I hate this elements*actors iteration
     lists:foldl(fun({E, CtxBin}, A) ->
-                        Ctx = from_bin(CtxBin),
-                        Deletes = [{put, remove_member_key(Set, E, Actor, Cnt), <<>>} ||
+                        Ctx = bigset:from_bin(CtxBin),
+                        Deletes = [{put, bigset:remove_member_key(Set, E, Actor, Cnt), <<>>} ||
                                       {Actor, Cnt} <- Ctx],
                         [Deletes | A]
                 end,
@@ -379,7 +299,7 @@ replica_writes(not_found, Elements) ->
         end,
     lists:foldl(F, {bigset_clock:fresh(), []}, Elements);
 replica_writes({ok, BinClock}, Elements) ->
-    Clock0 = from_bin(BinClock),
+    Clock0 = bigset:from_bin(BinClock),
     F = fun({Key, Dot}, {Clock, Writes}) ->
                 case bigset_clock:seen(Clock, Dot) of
                     true ->

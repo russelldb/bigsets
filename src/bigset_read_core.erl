@@ -2,7 +2,8 @@
 %%% @author Russell Brown <russelldb@basho.com>
 %%% @copyright (C) 2015, Russell Brown
 %%% @doc
-%%% logic for reading a set
+%%% logic for mergig a streamed set of values
+%%% defaults to r=2, n=3, basic_quorum=false, notfound_ok=true
 %%% @end
 %%% Created :  6 May 2015 by Russell Brown <russelldb@basho.com>
 %%%-------------------------------------------------------------------
@@ -22,45 +23,70 @@
 
 -record(state,
         {
-          actors=orddict:new() :: [#actor{}]
+          r :: pos_integer(),
+          actors=orddict:new() :: [#actor{}],
+          clocks = 0 :: non_neg_integer(),
+          not_founds = 0 :: non_neg_integer(),
+          done = 0 :: non_neg_integer()
         }).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
-new() ->
-    #state{}.
+new(R) ->
+    #state{r=R}.
 
-result({r, Partition, not_found}, State) ->
-    Actor = get_actor(Partition, State),
-    Actor2 = set_not_found(Actor),
-    set_actor(Partition, Actor2, State);
-result({r, Partition, clock, Clock}, State) ->
-    Actor = get_actor(Partition, State),
+
+%% @doc call when a clock is received
+clock(Partition, Clock, Core) ->
+    Actor = get_actor(Partition, Core),
     Actor2 = add_clock(Actor, Clock),
-    set_actor(Partition, Actor2, State);
-result({r, Partition, elements, Elements}, State) ->
-    Actor = get_actor(Partition, State),
-    Actor2 = append_elements(Actor, Elements),
-    set_actor(Partition, Actor2, State);
-result({r, Partition, done}, State) ->
-    Actor = get_actor(Partition, State),
-    Actor2 = set_done(Actor),
-    set_actor(Partition, Actor2, State).
+    Core2=#state{clocks=Clocks} = set_actor(Partition, Actor2, Core),
+    Core2#state{clocks=Clocks+1}.
 
-is_done(State) ->
-    #state{actors=Actors} = State,
-    is_done(2, Actors).
-
-is_done(0, _) ->
-    true;
-is_done(_N, []) ->
+%% @doc do we have enough clocks?  this is R clocks, with
+%% notfound_ok. So if first answer was notfound and second was a
+%% clock, we have R, and if first and second was a clock, we have
+%% R. Else we don't!
+r_clocks(#state{clocks=0}) ->
     false;
-is_done(N, [{_P, #actor{done=true}} | Rest]) ->
-    is_done(N-1, Rest);
-is_done(N, [_ | Rest]) ->
-    is_done(N, Rest).
+r_clocks(#state{clocks=Clocks, not_founds=NotFounds, r=R}) when Clocks + NotFounds >= R ->
+    true;
+r_clocks(_S) ->
+    false.
+
+%% @doc update the state with a notfound_result for `Partition'
+not_found(Partition, Core) ->
+    Actor = get_actor(Partition, Core),
+    Actor2 = set_not_found(Actor),
+    Core2=#state{not_founds=NF} = set_actor(Partition, Actor2, Core),
+    Core2#state{not_founds=NF+1}.
+
+%% @doc is the set a notfound? This means the first two results
+%% received were notfound
+not_found(#state{not_founds=R, r=R}) ->
+    true;
+not_found(_S) ->
+    false.
+
+%% @doc add elements for a partition
+elements(Partition, Elements, Core) ->
+    Actor = get_actor(Partition, Core),
+    Actor2 = append_elements(Actor, Elements),
+    set_actor(Partition, Actor2, Core).
+
+%% @doc set a partition as done
+done(Partition, Core) ->
+    Actor = get_actor(Partition, Core),
+    Actor2 = set_done(Actor),
+    Core2=#state{done=Done}=set_actor(Partition, Actor2, Core),
+    Core2#state{done=Done+1}.
+
+is_done(#state{not_founds=NF, done=Done, r=R}) when NF+Done == R ->
+    true;
+is_done(_S) ->
+    false.
 
 %% @perform a CRDT orswot merge
 finalise(#state{actors=Actors}) ->
@@ -68,16 +94,25 @@ finalise(#state{actors=Actors}) ->
 
 merge([], Elements) ->
     Elements;
-merge([Actor | Rest], undefined) ->
+merge([{_, Actor} | Rest], undefined) ->
     merge(Rest, Actor);
-merge([Actor | Rest], Mergedest) ->
+merge([{_P, Actor} | Rest], Mergedest) ->
     M2 = orswot_merge(Actor, Mergedest),
     merge(Rest, M2).
 
 orswot_merge(A1, A2) ->
-    #actor{elements=E1} = A1,
-    #actor{elements=E2} = A2,
-    lists:umerge(E1, E2).
+    #actor{elements=E1, clock=C1} = A1,
+    #actor{elements=E2, clock=C2} = A2,
+    #actor{clock=merge_clocks(C1, C2), elements=lists:umerge(E1, E2)}.
+
+merge_clocks(undefined, undefined) ->
+    undefined;
+merge_clocks(C1, undefined) ->
+    C1;
+merge_clocks(undefined, C2) ->
+    C2;
+merge_clocks(C1, C2) ->
+    bigset_clock:merge(C1, C2).
 
 set_actor(Partition, Actor, State) ->
     #state{actors=Actors} = State,

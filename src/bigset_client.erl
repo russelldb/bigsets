@@ -11,10 +11,6 @@
 
 -define(DEFAULT_TIMEOUT, 60000).
 
-%% A set key
--type set() :: binary().
-%% and element to add/remove from a set
--type member() :: binary().
 %% an opaque binary riak_dt_vclock:vclock()
 -type context() :: binary() | undefined.
 -type remove() :: {member(), context()}.

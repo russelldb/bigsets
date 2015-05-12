@@ -31,7 +31,9 @@
 -include_lib("bigset.hrl").
 
 -record(state, {partition :: pos_integer(),
-               batch_size :: pos_integer()}).
+                batch_size :: pos_integer()}).
+
+-define(FOLD_OPTS, [{iterator_refresh, true}]).
 
 -define(DEFAULT_BATCH_SIZE, 10000).
 
@@ -45,16 +47,29 @@ init_worker(VNodeIndex, Args, _Props) ->
     {ok, #state{partition=VNodeIndex, batch_size=BatchSize}}.
 
 %% @doc Perform the asynchronous fold operation.  State is the state
-%% returned from init return {noreply, State} or {replay, Reply,
+%% returned from init return {noreply, State} or {reply, Reply,
 %% State} the latter sends `Reply' to `Sender' using
 %% riak_core_vnode:reply(Sender, Reply)
 %% No need for lots of indirection here, is there?
-handle_work({get, FoldFun, _BufferMod}, _Sender, State=#state{partition=Partition}) ->
+handle_work({get, DB, Set}, Sender, State=#state{partition=Partition, batch_size=BatchSize}) ->
+
+    %% clock is first key
+    %% read all the way to last element
+    FirstKey = bigset:clock_key(Set),
+    Buffer = bigset_fold_acc:new(Set, Sender, BatchSize, Partition),
+
     try
-        FoldFun()
+        AccFinal =
+            try
+                eleveldb:fold(DB, fun bigset_fold_acc:fold/2, Buffer, [FirstKey | ?FOLD_OPTS])
+            catch
+                {break, Res} ->
+                    Res
+            end,
+        bigset_fold_acc:finalise(AccFinal)
     catch
         throw:receiver_down -> ok;
         throw:stop_fold     -> ok;
         throw:_PrematureAcc  -> ok %%FinishFun(PrematureAcc)
     end,
-    {reply, {r, Partition, done}, State}.
+    {noreply, State}.

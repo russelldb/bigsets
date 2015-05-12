@@ -17,7 +17,7 @@
 
 %% gen_fsm callbacks
 -export([init/1, prepare/2,  validate/2, read/2,
-         await_reps/2, reply/2, handle_event/3,
+         await_clocks/2, await_elements/2, reply/2, handle_event/3,
          handle_sync_event/4, handle_info/3, terminate/3, code_change/4]).
 
 -define(SERVER, ?MODULE).
@@ -26,15 +26,21 @@
                 from :: pid(),
                 set :: binary(),
                 preflist :: riak_core_apl:preflist(),
-                logic = bigset_read_core:new(),
+                %% default to r=2 for demo/proto, defaults to
+                %% basic_quorum=false and notfound_ok=true, too
+                logic = bigset_read_core:new(2),
                 options=[] :: list(),
                 timer=undefined :: reference() | undefined,
                 reply = undefined
                }).
 
 -type state() :: #state{}.
--type result() :: {r, partition(), clock, Clock :: binary()} | {r, partition(), [res()]}.
--type res() :: {Member :: binary(), Dot :: riak_dt_vclock:dot()}.
+-type result() :: {message(), partition(), from()}.
+-type message() :: not_found | {clock, clock()} |
+                   done | {elements, elements()}.
+-type from() :: {pid(), reference()}.
+-type elements() :: [{Member :: binary(), [Dot :: riak_dt_vclock:dot()]}].
+-type clock() :: bigset_clock:clock().
 -type partition() :: non_neg_integer().
 -type reqid() :: term().
 
@@ -75,30 +81,78 @@ validate(timeout, State) ->
             {next_state, read, State, 0}
     end.
 
--spec read(timeout, state()) -> {next_state, await_reps, state()}.
+-spec read(timeout, state()) -> {next_state, await_clocks, state()}.
 read(request_timeout, State) ->
     {next_state, reply, State#state{reply={error, timeout}}, 0};
 read(timeout, State) ->
     #state{preflist=PL, set=Set} = State,
     Req = ?READ_REQ{set=Set},
     bigset_vnode:read(PL, Req),
-    {next_state, await_reps, State}.
+    {next_state, await_clocks, State}.
 
--spec await_reps(result(), state()) ->
-                        {next_state, reply, state(), 0} |
-                        {next_state, await_reps, state()}.
-await_reps(request_timeout, State) ->
+-spec await_clocks(result(), state()) -> {next_state, reply, state(), 0} |
+                                         {next_state, await_clocks, state()} |
+                                         {next_state, await_elements, state()}.
+await_clocks(request_timeout, State) ->
     {next_state, reply, State#state{reply={error, timeout}}, 0};
-await_reps(Res, State) ->
+await_clocks({{clock, Clock}, Partition, From}, State) ->
+    ack(From),
     #state{logic=Core} = State,
-    Core2 = bigset_read_core:result(Res, Core),
+    Core2 = bigset_read_core:clock(Partition, Clock, Core),
+    case bigset_read_core:r_clocks(Core2) of
+        true ->
+            {next_state, await_elements, State#state{logic=Core2}};
+        false ->
+            {next_state, await_clocks, State#state{logic=Core2}}
+    end;
+await_clocks({{elements, Elements}, Partition, From}, State) ->
+    ack(From),
+    #state{logic=Core} = State,
+    Core2 = bigset_read_core:elements(Partition, Elements, Core),
+    {next_state, await_clocks, State#state{logic=Core2}};
+await_clocks({done, Partition, _From}, State) ->
+    #state{logic=Core} = State,
+    Core2 = bigset_read_core:done(Partition, Core),
+    {next_state, await_clocks, State#state{logic=Core2}};
+await_clocks({not_found, Partition, _From}, State) ->
+    #state{logic=Core} = State,
+    Core2 = bigset_read_core:not_found(Partition, Core),
+    case bigset_read_core:not_found(Core2) of
+        true ->
+            {next_state, reply, State#state{reply={error, not_found}}, 0};
+        false ->
+            {next_state, await_clocks, State#state{logic=Core2}}
+    end.
+
+-spec await_elements(result(), state()) ->
+                        {next_state, reply, state(), 0} |
+                        {next_state, await_elements, state()}.
+await_elements(request_timeout, State) ->
+    {next_state, reply, State#state{reply={error, timeout}}, 0};
+await_elements({not_found, _Partition, _From}, State) ->
+    %% quite literally do not care!
+    {next_state, await_elements, State};
+await_elements({{clock, _Clock}, _Partition, From}, State) ->
+    %% Too late to take part in R, stop folding, buddy!
+    stop_fold(From),
+    {next_state, await_elements, State};
+await_elements({{elements, Elements}, Partition, From}, State) ->
+    ack(From),
+    #state{logic=Core} = State,
+    Core2 = bigset_read_core:elements(Partition, Elements, Core),
+    %% @TODO Maybe handle flushing/streaming results here? Like in SMS in 2i
+    State2 = State#state{logic=Core2},
+    {next_state, await_elements, State2};
+await_elements({done, Partition, _From}, State) ->
+    #state{logic=Core} = State,
+    Core2 = bigset_read_core:done(Partition, Core),
     State2 = State#state{logic=Core2},
     case bigset_read_core:is_done(Core2) of
         true ->
             Reply = {ok, bigset_read_core:finalise(Core2)},
             {next_state, reply, State2#state{reply=Reply}, 0};
         false ->
-            {next_state, await_reps, State2}
+            {next_state, await_elements, State2}
     end.
 
 -spec reply(timeout, State) -> {stop, normal, State}.
@@ -131,3 +185,10 @@ schedule_timeout(infinity) ->
     undefined;
 schedule_timeout(Timeout) ->
     erlang:send_after(Timeout, self(), request_timeout).
+
+-spec ack(From::{pid(), reference()}) -> term().
+ack({Pid, Ref}) ->
+    Pid ! {Ref, ok}.
+
+stop_fold({Pid, Ref}) ->
+    Pid ! {Ref, stop_fold}.
