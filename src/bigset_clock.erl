@@ -86,6 +86,13 @@ strip_dots(Dot, {Clock, Seen}) ->
 seen({Clock, Seen}, Dot) ->
     (riak_dt_vclock:descends(Clock, [Dot]) orelse lists:member(Dot, Seen)).
 
+subtract_seen(Clock, Dots) ->
+    %% @TODO(rdb|optimise) this is maybe a tad inefficient.
+    lists:filter(fun(Dot) ->
+                         not seen(Clock, Dot)
+                 end,
+                 Dots).
+
 %% @doc get the counter for `Actor' where `counter' is the maximum
 %% _contiguous_ event sent by this clock (i.e. not including
 %% exceptions.)
