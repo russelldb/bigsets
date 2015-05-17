@@ -31,7 +31,8 @@
                 logic = bigset_read_core:new(2),
                 options=[] :: list(),
                 timer=undefined :: reference() | undefined,
-                reply = undefined
+                reply = undefined,
+                encoder %% for encoding context and dots
                }).
 
 -type state() :: #state{}.
@@ -99,29 +100,44 @@ await_clocks({{clock, Clock}, Partition, From}, State) ->
     ack(From),
     #state{logic=Core} = State,
     Core2 = bigset_read_core:clock(Partition, Clock, Core),
+    lager:debug("ac::: got clock from ~p~n", [Partition]),
     case bigset_read_core:r_clocks(Core2) of
         true ->
-            {next_state, await_elements, State#state{logic=Core2}};
+            lager:debug("ac::: nuff clocks, moving to elements~n"),
+            {CtxClock, Core3} = bigset_read_core:get_clock(Core2),
+            CtxDict = bigset_ctx_codec:new_encoder(CtxClock),
+            ReplyCtx = bigset_ctx_codec:dict_ctx(CtxDict),
+            send_reply({ok, {ctx, ReplyCtx}}, State),
+            {next_state, await_elements, State#state{logic=Core3, encoder=CtxDict}};
         false ->
+            lager:debug("ac::: need more clocks~n"),
             {next_state, await_clocks, State#state{logic=Core2}}
     end;
 await_clocks({{elements, Elements}, Partition, From}, State) ->
+    lager:debug("ac::: got ~p elements from ~p~n", [length(Elements), Partition]),
     ack(From),
     #state{logic=Core} = State,
-    Core2 = bigset_read_core:elements(Partition, Elements, Core),
+    {undefined, Core2} = bigset_read_core:elements(Partition, Elements, Core),
     {next_state, await_clocks, State#state{logic=Core2}};
 await_clocks({done, Partition, _From}, State) ->
     #state{logic=Core} = State,
     Core2 = bigset_read_core:done(Partition, Core),
+    lager:debug("ac::: done ~p~n", [Partition]),
     {next_state, await_clocks, State#state{logic=Core2}};
 await_clocks({not_found, Partition, _From}, State) ->
+    lager:debug("ac::: notfound  ~p~n", [Partition]),
     #state{logic=Core} = State,
     Core2 = bigset_read_core:not_found(Partition, Core),
-    case bigset_read_core:not_found(Core2) of
-        true ->
+    %% @TODO(rdb|ugly) eugh, maybe read_core should return the state,
+    %% eh?
+    case {bigset_read_core:not_found(Core2),
+          bigset_read_core:r_clocks(Core2)} of
+        {true, false} ->
             {next_state, reply, State#state{reply={error, not_found}}, 0};
-        false ->
-            {next_state, await_clocks, State#state{logic=Core2}}
+        {false, false} ->
+            {next_state, await_clocks, State#state{logic=Core2}};
+        {false, true} ->
+            {next_state, await_elements, State#state{logic=Core2}}
     end.
 
 -spec await_elements(result(), state()) ->
@@ -129,35 +145,76 @@ await_clocks({not_found, Partition, _From}, State) ->
                         {next_state, await_elements, state()}.
 await_elements(request_timeout, State) ->
     {next_state, reply, State#state{reply={error, timeout}}, 0};
-await_elements({not_found, _Partition, _From}, State) ->
+await_elements({not_found, Partition, _From}, State) ->
     %% quite literally do not care!
+    lager:debug("ae::: notfound  ~p~n", [Partition]),
     {next_state, await_elements, State};
-await_elements({{clock, _Clock}, _Partition, From}, State) ->
+await_elements({{clock, _Clock}, Partition, From}, State) ->
     %% Too late to take part in R, stop folding, buddy!
+    lager:debug("ae::: got clock from ~p~n", [Partition]),
     stop_fold(From),
     {next_state, await_elements, State};
 await_elements({{elements, Elements}, Partition, From}, State) ->
     ack(From),
+    lager:debug("ae::: got ~p elements from ~p~n", [length(Elements), Partition]),
     #state{logic=Core} = State,
-    Core2 = bigset_read_core:elements(Partition, Elements, Core),
-    %% @TODO Maybe handle flushing/streaming results here? Like in SMS in 2i
+    {Send, Core2} = bigset_read_core:elements(Partition, Elements, Core),
+    lager:debug("ae:: I can send ~p~n", [message_length(Send)]),
+    maybe_send_results(Send, State),
     State2 = State#state{logic=Core2},
     {next_state, await_elements, State2};
 await_elements({done, Partition, _From}, State) ->
     #state{logic=Core} = State,
+    lager:debug("ae::: done ~p~n", [Partition]),
     Core2 = bigset_read_core:done(Partition, Core),
     State2 = State#state{logic=Core2},
     case bigset_read_core:is_done(Core2) of
         true ->
-            Reply = {ok, bigset_read_core:finalise(Core2)},
+            FinalElements = bigset_read_core:finalise(Core2),
+            lager:debug("sending final elements ~p~n",[FinalElements]),
+            maybe_send_results(FinalElements, State),
+            Reply = done,
             {next_state, reply, State2#state{reply=Reply}, 0};
         false ->
             {next_state, await_elements, State2}
     end.
 
+message_length(undefined) ->
+    0;
+message_length(L) when is_list(L) ->
+    length(L).
+
+maybe_send_results(undefined, _State) ->
+    ok;
+maybe_send_results([], _State) ->
+    ok;
+maybe_send_results(Results, State) ->
+    %% @TODO(rdb|optimise) It's a shame to have to iterate the list of
+    %% elements AGAIN here to encode the per element ctx
+    #state{encoder=Dict} = State,
+    lager:debug("fsm:: encoding results"),
+    Encoded = lists:map(fun({E, Dots}) ->
+                                %% We have a complete encoder dict
+                                %% from the clock, so we do not need
+                                %% to keep the updated state,
+                                %% otherwise would use a fold
+                                lager:debug("encoding ~p", [{E, Dots}]),
+                                {DotsBin, _NewEncoder} = bigset_ctx_codec:encode_dots(Dots, Dict),
+                                lager:debug("encoded ~p", [{E, DotsBin}]),
+                                {E, DotsBin}
+                        end,
+                        Results),
+    lager:debug("fsm::: send encoded elems"),
+    send_reply({ok, {elems, Encoded}}, State).
+
+send_reply(Reply, State) ->
+    #state{from=From, req_id=ReqId} = State,
+    From ! {ReqId, Reply}.
+
 -spec reply(timeout, State) -> {stop, normal, State}.
 reply(_, State) ->
     #state{from=From, req_id=ReqId, reply=Reply} = State,
+    lager:debug("reply::: sending"),
     From ! {ReqId, Reply},
     {stop, normal, State}.
 

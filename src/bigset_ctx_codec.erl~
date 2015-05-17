@@ -1,0 +1,3 @@
+-module(bigset_ctx_codec).
+
+%% Simple dictionary coding for per element context

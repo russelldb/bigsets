@@ -11,20 +11,64 @@ add_read(E) ->
     add_read(<<"m">>, E).
 
 add_read(S, E) ->
-    io:format("Adding to set~n"),
-    ok = bigset_client:update(S, [E], []),
-    io:format("reading from set~n"),
+    lager:debug("Adding to set~n"),
+    ok = bigset_client:update(S, [E]),
+    lager:debug("reading from set~n"),
     Res = bigset_client:read(S, []),
-    io:format("Read result ~p~n", [Res]).
+    lager:debug("Read result ~p~n", [Res]).
 
 add_all(Es) ->
     add_all(<<"m">>, Es).
 
 add_all(S, Es) ->
-    ok = bigset_client:update(S, Es, []),
-    io:format("reading from set~n"),
+    ok = bigset_client:update(S, Es),
+    lager:debug("reading from set~n"),
     Res = bigset_client:read(S, []),
-    io:format("Read result ~p~n", [Res]).
+    lager:debug("Read result ~p~n", [Res]).
+
+add() ->
+    add(<<"rdb">>).
+
+add(E) ->
+    add(<<"m">>, E).
+
+add(S, E) ->
+    lager:debug("Adding to set~n"),
+    ok = bigset_client:update(S, [E]).
+
+stream_read() ->
+    stream_read(<<"m">>).
+
+stream_read(S) ->
+    lager:debug("stream reading from set~n"),
+    {ok, ReqId, Pid} = bigset_client:stream_read(S, []),
+    Monitor = erlang:monitor(process, Pid),
+    stream_receive_loop(ReqId, Pid, Monitor, {0, undefined}).
+
+stream_receive_loop(ReqId, Pid, Monitor, {Cnt, Ctx}) ->
+    receive
+        {ReqId, done} ->
+            erlang:demonitor(Monitor, [flush]),
+            lager:debug("done!.~n"),
+            {ok, Ctx, Cnt};
+        {ReqId, {error, Error}} ->
+            erlang:demonitor(Monitor, [flush]),
+            lager:debug("error ~p~n", [Error]),
+            {error, Error};
+        {ReqId, {ok, {ctx, Res}}} ->
+            lager:debug("XX CTX XX:::~n ~p~n", [Res]),
+            stream_receive_loop(ReqId, Pid, Monitor, {Cnt, Res});
+        {ReqId, {ok, {elems, Res}}} ->
+            lager:debug("XX RESULT XX:::~n ~p~n", [length(Res)]),
+            stream_receive_loop(ReqId, Pid, Monitor, {Cnt+length(Res), Ctx});
+        {'DOWN', Monitor, process, Pid, Info} ->
+            lager:debug("Got DOWN message ~p~n", [Info]),
+            {error, Info}
+    after 10000 ->
+            erlang:demonitor(Monitor, [flush]),
+            lager:debug("Error, timeout~n"),
+            {error, timeout}
+    end.
 
 %%% codec
 clock_key(Set) ->

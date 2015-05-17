@@ -10,5 +10,5 @@
                   riak_core
                  ]},
   {mod, { bigset_app, []}},
-  {env, []}
+  {env, [{batch_size, 1000}]}
  ]}.

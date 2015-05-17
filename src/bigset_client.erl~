@@ -41,7 +41,7 @@ update(Set, Adds, Removes, Options) ->
     Me = self(),
     ReqId = mk_reqid(),
     %% if there are removes, there must a Ctx
-    Ctx = validate_ctx(Removes, proplists:get_value(ctx, Options)),
+    Ctx = validate_ctx(Removes, proplist:get_value(ctx, Options)),
     Op = ?OP{set=Set, inserts=Adds, removes=Removes, ctx=Ctx},
     bigset_write_fsm:start_link(ReqId, Me, Set, Op, Options),
     Timeout = recv_timeout(Options),

@@ -17,9 +17,11 @@
 
 -type clock() :: {riak_dt_vclock:vclock(), [riak_dt:dot()]}.
 
+-define(DICT, orddict).
+
 -spec fresh() -> clock().
 fresh() ->
-    {riak_dt_vclock:fresh(), []}.
+    {riak_dt_vclock:fresh(), ?DICT:new()}.
 
 %% @doc increment the entry in `Clock' for `Actor'. Return the new
 %% Clock, and the `Dot' of the event of this increment. Works because
@@ -38,39 +40,25 @@ increment(Actor, {Clock, Seen}) ->
 get_dot(Actor, {Clock, _Dots}) ->
     {Actor, riak_dt_vclock:get_counter(Actor, Clock)}.
 
-all_nodes({Clock, _Dots}) ->
-    riak_dt_vclock:all_nodes(Clock).
-
+all_nodes({Clock, Dots}) ->
+    %% NOTE the riak_dt_vclock:all_nodes/1 returns a sorted list
+    lists:umerge(riak_dt_vclock:all_nodes(Clock),
+                 ?DICT:fetch_keys(Dots)).
 
 -spec merge(clock(), clock()) -> clock().
 merge({VV1, Seen1}, {VV2, Seen2}) ->
     VV = riak_dt_vclock:merge([VV1, VV2]),
-    Seen = lists:umerge(Seen1, Seen2),
+    Seen = ?DICT:merge(fun(_Key, S1, S2) ->
+                               lists:umerge(S1, S2)
+                       end,
+                       Seen1,
+                       Seen2),
     compress_seen(VV, Seen).
 
 %% @doc make a bigset clock from a version vector
 -spec from_vv(riak_dt_vclock:vclock()) -> clock().
 from_vv(Clock) ->
-    {Clock, []}.
-
-%% @doc the highest count seen for each actor, as a version
-%% vector. Warning, NOT a version vector. It is used for tombstoning
-%% only, it does not say what you've seen.
--spec tombstone_context(clock()) -> riak_dt_vclock:vclock().
-tombstone_context({Clock, Dots}) ->
-    %% reverse dots so get_value will get highest counter since dots
-    %% is kept sorted
-    Stod = lists:reverse(Dots),
-    Nodes = lists:umerge(lists:sort(proplists:get_keys(Dots)),
-                         riak_dt_vclock:all_nodes(Clock)),
-    TS = lists:foldl(fun(Actor, MaxClock) ->
-                             [{Actor, max(riak_dt_vclock:get_counter(Actor, Clock),
-                                          proplists:get_value(Actor, Stod, 0))}
-                              | MaxClock]
-                     end,
-                     [],
-                     Nodes),
-    lists:reverse(TS).
+    {Clock, ?DICT:new()}.
 
 %% @doc given a `Dot :: riak_dt_vclock:dot()' and a `Clock::clock()',
 %% add the dot to the clock. If the dot is contiguous with events
@@ -79,12 +67,26 @@ tombstone_context({Clock, Dots}) ->
 %% gapped dots. If adding this dot closes some gaps, the seen set is
 %% compressed onto the clock.
 -spec strip_dots(riak_dt_vclock:dot(), clock()) -> clock().
-strip_dots(Dot, {Clock, Seen}) ->
-    Seen2 = lists:umerge([Dot], Seen),
+strip_dots({Actor, Cnt}, {Clock, Seen}) ->
+    Seen2 = ?DICT:update(Actor,
+                         fun(Dots) ->
+                                 lists:umerge([Cnt], Dots)
+                         end,
+                         [Cnt],
+                         Seen),
     compress_seen(Clock, Seen2).
 
-seen({Clock, Seen}, Dot) ->
-    (riak_dt_vclock:descends(Clock, [Dot]) orelse lists:member(Dot, Seen)).
+seen({Clock, Seen}, {Actor, Cnt}=Dot) ->
+    (riak_dt_vclock:descends(Clock, [Dot]) orelse
+     lists:member(Cnt, fetch_dot_list(Actor, Seen))).
+
+fetch_dot_list(Actor, Seen) ->
+    case ?DICT:find(Actor, Seen) of
+        error ->
+            [];
+        {ok, L} ->
+            L
+    end.
 
 subtract_seen(Clock, Dots) ->
     %% @TODO(rdb|optimise) this is maybe a tad inefficient.
@@ -106,34 +108,31 @@ get_contiguous_counter(Actor, {Clock, _Dots}=C) ->
             Cnt
     end.
 
-
 compress_seen(Clock, Seen) ->
-    lists:foldl(fun(Node, {ClockAcc, SeenAcc}) ->
+    ?DICT:fold(fun(Node, Cnts, {ClockAcc, SeenAcc}) ->
                         Cnt = riak_dt_vclock:get_counter(Node, Clock),
-                        Cnts = proplists:lookup_all(Node, Seen),
                         case compress(Cnt, Cnts) of
                             {Cnt, Cnts} ->
-                                {ClockAcc, lists:umerge(Cnts, SeenAcc)};
+                                {ClockAcc, ?DICT:store(Node, lists:sort(Cnts), SeenAcc)};
                             {Cnt2, []} ->
                                 {riak_dt_vclock:merge([[{Node, Cnt2}], ClockAcc]),
                                  SeenAcc};
                             {Cnt2, Cnts2} ->
                                 {riak_dt_vclock:merge([[{Node, Cnt2}], ClockAcc]),
-                                 lists:umerge(SeenAcc, Cnts2)}
+                                 ?DICT:store(Node, lists:sort(Cnts2), SeenAcc)}
                         end
                 end,
-                {Clock, []},
-                proplists:get_keys(Seen)).
+               {Clock, ?DICT:new()},
+               Seen).
 
 compress(Cnt, []) ->
     {Cnt, []};
-compress(Cnt, [{_A, Cntr} | Rest]) when Cnt >= Cntr ->
+compress(Cnt, [Cntr | Rest]) when Cnt >= Cntr ->
     compress(Cnt, Rest);
-compress(Cnt, [{_A, Cntr} | Rest]) when Cntr - Cnt == 1 ->
+compress(Cnt, [Cntr | Rest]) when Cntr - Cnt == 1 ->
     compress(Cnt+1, Rest);
 compress(Cnt, Cnts) ->
     {Cnt, Cnts}.
-
 
 
 -ifdef(TEST).
@@ -168,39 +167,39 @@ all_nodes_test() ->
 
 
 strip_dots_test() ->
-    Clock = {[], []},
+    Clock = fresh(),
     Dot = {a, 1},
     ?assertEqual({[{a,1}], []}, strip_dots(Dot, Clock)),
-    Clock1 = {[], []},
+    Clock1 = fresh(),
     Dot1 = {a, 34},
-    ?assertEqual({[], [{a, 34}]}, strip_dots(Dot1, Clock1)),
+    ?assertEqual({[], [{a, [34]}]}, strip_dots(Dot1, Clock1)),
     Clock2 = {[{a, 3}, {b, 1}], []},
     Dot2 = {c, 2},
     Clock3 = strip_dots(Dot2, Clock2),
-    ?assertEqual({[{a, 3}, {b, 1}], [{c, 2}]}, Clock3),
+    ?assertEqual({[{a, 3}, {b, 1}], [{c, [2]}]}, Clock3),
     Dot3 = {a, 5},
     Clock4 = strip_dots(Dot3, Clock3),
-    ?assertEqual({[{a, 3}, {b, 1}], [{a, 5}, {c, 2}]}, Clock4),
+    ?assertEqual({[{a, 3}, {b, 1}], [{a, [5]}, {c, [2]}]}, Clock4),
     Dot4 = {a, 4},
     Clock5 = strip_dots(Dot4, Clock4),
-    ?assertEqual({[{a, 5}, {b, 1}], [{c, 2}]}, Clock5),
+    ?assertEqual({[{a, 5}, {b, 1}], [{c, [2]}]}, Clock5),
     Dot5 = {c, 1},
     Clock6 = strip_dots(Dot5, Clock5),
     ?assertEqual({[{a, 5}, {b, 1},{c, 2}], []}, Clock6),
-    Clock7 = {[{a, 1}], [{a, 3}, {a, 4}, {a, 9}]},
+    Clock7 = {[{a, 1}], [{a, [3, 4, 9]}]},
     Dot6 = {a, 2},
     Clock8 = strip_dots(Dot6, Clock7),
-    ?assertEqual({[{a, 4}], [{a, 9}]}, Clock8).
+    ?assertEqual({[{a, 4}], [{a, [9]}]}, Clock8).
 
 %% in the case where seen dots are lower than the actual actors in the
 %% VV (Say after a merge)
 strip_dots_low_dot_test() ->
-    Clock = {[{a, 4}, {b, 9}], [{a, 1}, {b, 7}]},
+    Clock = {[{a, 4}, {b, 9}], [{a, [1]}, {b, [7]}]},
     Clock2 = strip_dots({a, 3}, Clock),
     ?assertEqual({[{a, 4}, {b, 9}], []}, Clock2).
 
 seen_test() ->
-    Clock = {[{a, 2}, {b, 9}, {z, 4}], [{a, 7}, {c, 99}]},
+    Clock = {[{a, 2}, {b, 9}, {z, 4}], [{a, [7]}, {c, [99]}]},
     ?assert(seen(Clock, {a, 1})),
     ?assert(seen(Clock, {z, 4})),
     ?assert(seen(Clock, {c, 99})),
@@ -209,21 +208,21 @@ seen_test() ->
     ?assertNot(seen(Clock, {c, 1})).
 
 contiguous_counter_test() ->
-    Clock = {[{a, 2}, {b, 9}, {z, 4}], [{a, 7}, {c, 99}]},
+    Clock = {[{a, 2}, {b, 9}, {z, 4}], [{a, [7]}, {c, [99]}]},
     ?assertEqual(2, get_contiguous_counter(a, Clock)),
     ?assertError({badarg, actor_not_in_clock}, get_contiguous_counter(c, Clock)).
 
 merge_test() ->
-    Clock = {[{a, 2}, {b, 9}, {z, 4}], [{a, 7}, {c, 99}]},
+    Clock = {[{a, 2}, {b, 9}, {z, 4}], [{a, [7]}, {c, [99]}]},
     Clock2 = fresh(),
     %% Idempotent
     ?assertEqual(Clock, merge(Clock, Clock)),
     ?assertEqual(Clock, merge(Clock, Clock2)),
-    Clock3 = {[], [{a, 3}, {a, 4}, {a, 5}, {a, 6}, {d, 2}, {z, 6}]},
+    Clock3 = {[], [{a, [3, 4, 5, 6]}, {d, [2]}, {z, [6]}]},
     Clock4 = merge(Clock3, Clock),
-    ?assertEqual({[{a, 7}, {b, 9}, {z, 4}], [{c, 99}, {d, 2}, {z, 6}]},
+    ?assertEqual({[{a, 7}, {b, 9}, {z, 4}], [{c, [99]}, {d, [2]}, {z, [6]}]},
                  Clock4),
-    Clock5 = {[{a, 5}, {c, 100}, {d, 1}], [{d, 3}, {z, 5}]},
+    Clock5 = {[{a, 5}, {c, 100}, {d, 1}], [{d, [3]}, {z, [5]}]},
     ?assertEqual({[{a, 7}, {b, 9}, {c, 100}, {d, 3}, {z, 6}], []}, merge(Clock4, Clock5)),
     %% commute
     ?assertEqual(merge(Clock3, Clock), merge(Clock, Clock3)),
@@ -231,8 +230,5 @@ merge_test() ->
     ?assertEqual(merge(merge(Clock3, Clock), Clock5),
                  merge(merge(Clock, Clock5), Clock3)).
 
-tombstone_context_test() ->
-    Clock = {[{a, 2}, {b, 9}, {z, 4}], [{a, 7}, {c, 99}]},
-    ?assertEqual([{a, 7}, {b, 9}, {c, 99}, {z, 4}], tombstone_context(Clock)).
 
 -endif.

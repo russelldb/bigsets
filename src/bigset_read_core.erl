@@ -15,7 +15,7 @@
 -record(actor,
         {
           partition :: pos_integer(),
-          clock=bigset_clock:fresh() :: bigset_clock:clock(),
+          clock=undefined :: undefined | bigset_clock:clock(),
           elements=[]:: [{binary(), riak_dt_vclock:dot()}],
           not_found = true :: boolean(),
           done = false :: boolean()
@@ -27,7 +27,8 @@
           actors=orddict:new() :: [#actor{}],
           clocks = 0 :: non_neg_integer(),
           not_founds = 0 :: non_neg_integer(),
-          done = 0 :: non_neg_integer()
+          done = 0 :: non_neg_integer(),
+          clock
         }).
 
 -ifdef(TEST).
@@ -44,6 +45,11 @@ clock(Partition, Clock, Core) ->
     Actor2 = add_clock(Actor, Clock),
     Core2=#state{clocks=Clocks} = set_actor(Partition, Actor2, Core),
     Core2#state{clocks=Clocks+1}.
+
+%% @doc only call if `r_clocks/1' is `true'
+get_clock(Core) ->
+    Clock = merge_clocks(Core),
+    {Clock, Core#state{clock=Clock}}.
 
 %% @doc do we have enough clocks?  this is R clocks, with
 %% notfound_ok. So if first answer was notfound and second was a
@@ -74,7 +80,8 @@ not_found(_S) ->
 elements(Partition, Elements, Core) ->
     Actor = get_actor(Partition, Core),
     Actor2 = append_elements(Actor, Elements),
-    set_actor(Partition, Actor2, Core).
+    Core2 = set_actor(Partition, Actor2, Core),
+    maybe_merge_and_flush(Core2).
 
 %% @doc set a partition as done
 done(Partition, Core) ->
@@ -88,12 +95,81 @@ is_done(#state{not_founds=NF, done=Done, r=R}) when NF+Done == R ->
 is_done(_S) ->
     false.
 
+%% @private see if we have enough results to merge a subset and send
+%% it to the client
+-spec maybe_merge_and_flush(#state{}) -> {[#actor{}], #state{}}.
+maybe_merge_and_flush(Core=#state{not_founds=NF, clocks=C, r=R}) when NF+C < R ->
+    {undefined, Core};
+maybe_merge_and_flush(Core) ->
+    %% need to be R before we proceed
+    %% if any actor has a clock, but no values, and is not 'done' we
+    %% can't proceed
+    #state{actors=Actors} = Core,
+
+    case mergable(Actors, undefined, []) of
+        false ->
+            {undefined, Core};
+        {true, LeastLastElement, MergableActors} ->
+            SplitFun = split_fun(LeastLastElement),
+            %% of the actors that are mergable, split their lists
+            %% fold instead so that you can merge+update the Core to return in one pass!!
+            {MergedActor, NewActors} =lists:foldl(fun({Partition, Actor}, {MergedSet, NewCore}) ->
+                                                          #actor{elements=Elements} = Actor,
+                                                          {Merge, Keep} = lists:splitwith(SplitFun, Elements),
+                                                          {
+                                                            merge([{Partition, Actor#actor{elements=Merge}}], MergedSet),
+                                                            orddict:store(Partition, Actor#actor{elements=Keep}, NewCore)
+                                                          }
+                                                  end,
+                                                  {undefined, Actors},
+                                                  MergableActors),
+            {MergedActor#actor.elements, Core#state{actors=NewActors}}
+    end.
+
+split_fun(LeastLastElement) ->
+    fun(E) ->
+            E =< LeastLastElement
+    end.
+
+mergable([], LeastLast, MergeActors) ->
+    {true, LeastLast, MergeActors};
+mergable([{_Partition, #actor{not_found=true}} | Rest], LeastLast, MergeActors) ->
+    mergable(Rest, LeastLast, MergeActors);
+mergable([{Partition, #actor{done=false, elements=[]}} | _Rest], _Acc, _MergeActors) ->
+    %% We can't do anything, some partition has no elements
+    %% and is not 'done'
+    lager:debug("no elements for some vnode ~p~n", [Partition]),
+    false;
+mergable([{_P, #actor{done=true, elements=[]}}=Actor | Rest], LeastLast, MergeActors) ->
+    mergable(Rest, LeastLast, [Actor | MergeActors]);
+mergable([{_P, #actor{elements=E}}=Actor | Rest], undefined, MergeActors) ->
+    mergable(Rest, lists:last(E), [Actor | MergeActors]);
+mergable([{_P, #actor{elements=E}}=Actor | Rest], LeastLast, MergeActors) ->
+    mergable(Rest, min(LeastLast, lists:last(E)), [Actor | MergeActors]).
+
 %% @perform a CRDT orswot merge
 finalise(#state{actors=Actors}) ->
-    merge(Actors, undefined).
+    case merge(Actors, undefined) of
+        #actor{elements=Elements} ->
+            Elements;
+        undefined ->
+            undefined
+    end.
 
-merge([], Elements) ->
-    Elements;
+%% @private assumes that all actors with a clock's clocks are being
+%% merged to a single clock
+merge_clocks(#state{actors=Actors}) ->
+    merge_clocks(Actors, bigset_clock:fresh()).
+
+merge_clocks([], Clock) ->
+    Clock;
+merge_clocks([{_P, #actor{clock=undefined}} | Rest], Acc) ->
+    merge_clocks(Rest, Acc);
+merge_clocks([{_P, #actor{clock=Clock}} | Rest], Acc) ->
+    merge_clocks(Rest, bigset_clock:merge(Clock, Acc)).
+
+merge([], Actor) ->
+    Actor;
 merge([{_, Actor} | Rest], undefined) ->
     merge(Rest, Actor);
 merge([{_P, Actor} | Rest], Mergedest) ->
@@ -111,10 +187,10 @@ orswot_merge(A1, A2) ->
                             false ->
                                 %% Only present on one side, filter
                                 %% the dots
-                                Acc2 = filter_element(E, Dots, C2, Acc, Clock),
+                                Acc2 = filter_element(E, Dots, C2, Acc),
                                 {E2Remains, Acc2};
                             {value, {E, Dots2}, NewE2} ->
-                                Acc2 = merge_element(E, {Dots, C1}, {Dots2, C2}, Acc, Clock),
+                                Acc2 = merge_element(E, {Dots, C1}, {Dots2, C2}, Acc),
                                 {NewE2, Acc2}
                         end
                 end,
@@ -129,18 +205,6 @@ orswot_merge(A1, A2) ->
                           E2Unique),
     Elements = lists:umerge(lists:reverse(Keeps), lists:reverse(E2Keeps)),
     #actor{clock=Clock, elements=Elements}.
-
-acc_fun(Acc, Clock) ->
-    %% A fun to compress dots for an element if needed
-    fun({Element, Dots}) ->
-            case bigset_clock:subtract_base_seen(Clock, Dots) of
-                [] ->
-                    [{Element, <<>>} | Acc];
-                PerElemDots ->
-                    [{Element, rle_dots(Clock, PerElemDots)} | Acc]
-            end
-    end.
-
 
 
 %% @private if `Clock' as seen all `Dots' return Acc, otherwise add
@@ -207,12 +271,16 @@ append_elements(Actor, Elements) ->
     Actor#actor{elements=lists:umerge(Elements, E)}.
 
 add_clock(Actor, Clock) ->
-    Actor#actor{clock=Clock}.
+    Actor#actor{clock=Clock, not_found=false}.
 
 -ifdef(TEST).
 
 done_test() ->
-    State = #state{actors=[{P, #actor{done=true, partition=P}} || P <- [1, 2]]},
-    ?assert(is_done(State)).
+    ?assert(is_done(#state{done=2, not_founds=0, r=2})),
+    ?assert(is_done(#state{done=1, not_founds=1, r=2})),
+    ?assert(is_done(#state{done=0, not_founds=2, r=2})),
+    ?assertNot(is_done(#state{done=1, not_founds=0, r=2})),
+    ?assertNot(is_done(#state{done=0, not_founds=0, r=2})),
+    ?assertNot(is_done(#state{done=0, not_founds=1, r=2})).
 
 -endif.
