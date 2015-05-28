@@ -26,6 +26,17 @@ add_all(S, Es) ->
     Res = bigset_client:read(S, []),
     lager:debug("Read result ~p~n", [Res]).
 
+make_bigset(Set, N) ->
+    Res = [bigset_client:update(Set, [crypto:rand_bytes(100)]) || _N <- lists:seq(1, N)],
+    case lists:all(fun(E) ->
+                           E == ok end,
+                   Res) of
+        true ->
+            ok;
+        false ->
+            some_errors
+    end.
+
 add() ->
     add(<<"rdb">>).
 
