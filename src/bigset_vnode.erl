@@ -91,7 +91,9 @@ handle_command(?OP{set=Set, inserts=Inserts, removes=Removes, ctx=Ctx}, Sender, 
     %% tombstones for those dots.
 
     %% @TODO(rdb|correctness) can you strip dots from removes? I think
-    %% so, maybe.
+    %% so, maybe. I think you _have_ to infact (see replicate command
+    %% below) it says you have seen that dot and you no longer store
+    %% it
     DeleteWrites = gen_removes(Set, Removes, Ctx),
 
     %% @TODO(rdb|optimise) technically you could ship the deletes
@@ -118,6 +120,9 @@ handle_command(?REPLICATE_REQ{set=Set,
     {Clock, Inserts} = replica_writes(eleveldb:get(DB, ClockKey, ?READ_OPTS), Ins),
     BinClock = bigset:to_bin(Clock),
     lager:debug("Dels is ~p~n", [Rems]),
+    %% @TODO(rdb|correctness) doesn't the clock have to add the
+    %% tombstone dots? Other wise we can re-surface a write if we've
+    %% seen the tombstone but not the write itself!!
     Writes = lists:append([[{put, ClockKey, BinClock}], Inserts, Rems]),
     ok = eleveldb:write(DB, Writes, ?WRITE_OPTS),
     riak_core_vnode:reply(Sender, {dw, Partition}),
