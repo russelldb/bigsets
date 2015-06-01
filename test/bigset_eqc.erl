@@ -177,6 +177,8 @@ context_remove(From, To, Element) ->
     Ctx = riak_dt_orswot:precondition_context(FromORSWOT),
     {ok, ToORSWOT2} = riak_dt_orswot:update({remove, Element}, To, ToORSWOT, Ctx),
 
+    dump_node(From, FromBigset),
+
     ets:insert(?MODULE, {To, ToBigset2, ToORSWOT2}),
     RemoveKeys.
 
@@ -193,7 +195,7 @@ context_remove_next(S=#state{delta_buffers=DBs}, Keys, [_From, To, _RemovedEleme
 %% @doc replicate_args - Choose a From and To for replication
 replicate_args(#state{replicas=Replicas, delta_buffers=DBs}) ->
     [?LET({Rep, Buffer}, elements(DBs),
-          {Rep, subset(Buffer)}),
+          {Rep, Buffer}), %% @TODO(rdb) what about a subset/1 of the buffer?
      elements(Replicas)].
 
 %% @doc replicate_pre - There must be at least on replica to replicate
@@ -414,5 +416,10 @@ write_tombstones(RemoveKeys, Bigset) ->
                 end,
                 Bigset,
                 RemoveKeys).
+
+dump_node(Replica, {Clock, Elements}) ->
+    io:format("Replica ~p~n", [Replica]),
+    io:format("Clock ~p~n", [Clock]),
+    io:format("Elements ~p~n", [Elements]).
 
 %%-endif.
