@@ -20,6 +20,8 @@
          handle_coverage/4,
          handle_exit/3]).
 
+-compile([export_all]).
+
 -ignore_xref([
              start_vnode/1
              ]).
@@ -51,6 +53,19 @@ coordinate(Coordinator, Op=?OP{}) ->
                                    {fsm, undefined, self()},
                                    bigset_vnode_master).
 
+get_db(VNode) ->
+    riak_core_vnode_master:command([VNode],
+                                   get_db,
+                                   {fsm, undefined, self()},
+                                   bigset_vnode_master).
+
+dump_db(Set) ->
+    PL = bigset:preflist(Set),
+    riak_core_vnode_master:command(PL,
+                                   dump_db,
+                                   {fsm, undefined, self()},
+                                   bigset_vnode_master).
+
 %% @doc handle the downstream replication operation
 replicate(PrefList, Req=?REPLICATE_REQ{}) ->
     riak_core_vnode_master:command(PrefList,
@@ -78,8 +93,19 @@ init([Partition]) ->
      [{pool, bigset_vnode_worker, PoolSize, [{batch_size, BatchSize}]}]}.
 
 %% COMMANDS(denosneold!)
-handle_command(ping, _Sender, State) ->
-    {reply, {pong, State#state.partition}, State};
+handle_command(get_db, _Sender, State) ->
+    #state{db=DB} = State,
+    {reply, {ok, DB}, State};
+handle_command(dump_db, _Sender, State) ->
+    #state{db=DB, partition=P} = State,
+
+    FoldFun = fun({K, <<>>}, Acc) ->
+                      [sext:decode(K) | Acc];
+                 ({K, V}, Acc) ->
+                      [{sext:decode(K), binary_to_term(V)} | Acc]
+              end,
+    Acc =  eleveldb:fold(DB, FoldFun, [], [?FOLD_OPTS]),
+    {reply, {ok, P, lists:reverse(Acc)}, State};
 handle_command(?OP{set=Set, inserts=Inserts, removes=Removes, ctx=Ctx}, Sender, State) ->
     %% Store elements in the set.
     #state{db=DB, partition=Partition, vnodeid=Id} = State,
@@ -101,8 +127,8 @@ handle_command(?OP{set=Set, inserts=Inserts, removes=Removes, ctx=Ctx}, Sender, 
     BinClock = bigset:to_bin(Clock2),
 
     Writes = lists:append([[{put, ClockKey, BinClock}],  InsertWrites, DeleteWrites]),
-    lager:debug("Writes ~p~n", [Writes]),
     ok = eleveldb:write(DB, Writes, ?WRITE_OPTS),
+%%    lager:debug("I wrote ~p~n", [decode_writes(Writes, [])]),
     riak_core_vnode:reply(Sender, {dw, Partition, ReplicationPayload, DeleteWrites}),
     {noreply, State};
 handle_command(?REPLICATE_REQ{set=Set,
@@ -117,9 +143,9 @@ handle_command(?REPLICATE_REQ{set=Set,
     ClockKey = bigset:clock_key(Set),
     {Clock, Inserts} = replica_writes(eleveldb:get(DB, ClockKey, ?READ_OPTS), Ins),
     BinClock = bigset:to_bin(Clock),
-    lager:debug("Dels is ~p~n", [Rems]),
     Writes = lists:append([[{put, ClockKey, BinClock}], Inserts, Rems]),
     ok = eleveldb:write(DB, Writes, ?WRITE_OPTS),
+%%    lager:debug("I wrote ~p~n", [decode_writes(Writes, [])]),
     riak_core_vnode:reply(Sender, {dw, Partition}),
     {noreply, State};
 handle_command(?READ_REQ{set=Set}, Sender, State) ->
@@ -127,6 +153,14 @@ handle_command(?READ_REQ{set=Set}, Sender, State) ->
     %% @see bigset_vnode_worker for that code.
     #state{db=DB} = State,
     {async, {get, DB, Set}, Sender, State}.
+
+
+decode_writes([], Acc) ->
+    Acc;
+decode_writes([{put, K, <<>>} | Rest], Acc) ->
+    decode_writes(Rest, [sext:decode(K) | Acc]);
+decode_writes([{put, K ,V} | Rest], Acc) ->
+    decode_writes(Rest, [{sext:decode(K), binary_to_term(V)} | Acc]).
 
 -spec handle_handoff_command(term(), term(), state()) ->
                                     {noreply, state()}.

@@ -3,11 +3,15 @@
 -include_lib("riak_core/include/riak_core_vnode.hrl").
 
 -export([
-         ping/0,
+         new/0,
+         new/1,
          update/2,
+         update/3,
+         update/5,
          read/2,
+         read/3,
          stream_read/2,
-         update/4
+         stream_read/3
         ]).
 
 -define(DEFAULT_TIMEOUT, 60000).
@@ -15,35 +19,53 @@
 %% an opaque binary riak_dt_vclock:vclock()
 -type context() :: binary() | undefined.
 -type remove() :: {member(), context()}.
-
+-type client() ::{bigset_client,  node()}.
 
 %% Public API
 
-%% @doc Pings a random vnode to make sure communication is functional
-ping() ->
-    DocIdx = riak_core_util:chash_key({<<"ping">>, term_to_binary(now())}),
-    PrefList = riak_core_apl:get_primary_apl(DocIdx, 1, bigset),
-    [{IndexNode, _Type}] = PrefList,
-    riak_core_vnode_master:sync_spawn_command(IndexNode, ping, bigset_vnode_master).
+%% Added param module style client code, for the sake of being like
+%% riak for fairness in Benching
+
+-spec new() -> client().
+new() ->
+    new(node()).
+
+-spec new(node()) -> client().
+new(Node) ->
+    {?MODULE, Node}.
+
+
 
 -spec update(set(), Adds :: [member()]) ->
                     ok | {error, Reason :: term()}.
 update(Set, Adds) ->
-    update(Set, Adds, [], []).
+    update(Set, Adds, [], [], new()).
+
+
+-spec update(set(), Adds :: [member()], client()) ->
+                    ok | {error, Reason :: term()}.
+update(Set, Adds, {?MODULE, _Node}=This) ->
+    update(Set, Adds, [], [], This).
 
 %% @doc update a Set
 -spec update(set(),
              Adds :: [member()],
              Removes :: [remove()],
-             Options :: proplists:proplist()) ->
+             Options :: proplists:proplist(),
+             client()) ->
                     ok | {error, Reason :: term()}.
-update(Set, Adds, Removes, Options) ->
+update(Set, Adds, Removes, Options, {?MODULE, Node}) ->
     Me = self(),
     ReqId = mk_reqid(),
     %% if there are removes, there must a Ctx
     Ctx = validate_ctx(Removes, proplists:get_value(ctx, Options)),
     Op = ?OP{set=Set, inserts=Adds, removes=Removes, ctx=Ctx},
-    bigset_write_fsm:start_link(ReqId, Me, Set, Op, Options),
+    case node() of
+        Node ->
+            bigset_write_fsm:start_link(ReqId, Me, Set, Op, Options);
+        _ ->
+            proc_lib:spawn_link(Node, bigset_write_fsm, start_link, [ReqId, Me, Set, Op, Options])
+    end,
     Timeout = recv_timeout(Options),
     wait_for_reqid(ReqId, Timeout).
 
@@ -56,19 +78,53 @@ validate_ctx(_Removes, Ctx) when not is_binary(Ctx) ->
 validate_ctx(_Removes, Ctx) ->
     Ctx.
 
+-spec read(set(),
+           Options :: proplists:proplist()) ->
+                  {ok, {ctx, binary()}, {elems, [{binary(), binary()}]}} |
+                  {error, Reason :: term()}.
 read(Set, Options) ->
+    read(Set, Options, new()).
+
+-spec read(set(),
+           Options :: proplists:proplist(),
+           client()) ->
+                  {ok, {ctx, binary()}, {elems, [{binary(), binary()}]}} |
+                  {error, Reason :: term()}.
+read(Set, Options, {?MODULE, Node}) ->
     Me = self(),
     ReqId = mk_reqid(),
-    bigset_read_fsm:start_link(ReqId, Me, Set, Options),
+    case node() of
+        Node ->
+            bigset_read_fsm:start_link(ReqId, Me, Set, Options);
+        _ ->
+            proc_lib:spawn_link(Node, bigset_read_fsm, start_link,
+                                [ReqId, Me, Set, Options])
+    end,
     Timeout = recv_timeout(Options),
     wait_for_read(ReqId, Timeout).
 
+-spec stream_read(set(),
+                  Options :: proplists:proplist()) ->
+                         {ok, ReqId :: term(), Pid :: pid()}.
 stream_read(Set, Options) ->
-     Me = self(),
-    ReqId = mk_reqid(),
-    {ok, Pid} = bigset_read_fsm:start_link(ReqId, Me, Set, Options),
-    {ok, ReqId, Pid}.
+    stream_read(Set, Options, new()).
 
+-spec stream_read(set(),
+                  Options :: proplists:proplist(),
+                  client()) ->
+                         {ok, ReqId :: term(), Pid :: pid()}.
+stream_read(Set, Options, {?MODULE, Node}) ->
+    Me = self(),
+    ReqId = mk_reqid(),
+    Pid = case node() of
+              Node ->
+                  {ok, P} = bigset_read_fsm:start_link(ReqId, Me, Set, Options),
+                  P;
+              _ ->
+                  proc_lib:spawn_link(Node, bigset_read_fsm, start_link,
+                                    [ReqId, Me, Set, Options])
+          end,
+    {ok, ReqId, Pid}.
 
 recv_timeout(Options) ->
     case proplists:get_value(recv_timeout, Options) of
@@ -96,12 +152,13 @@ wait_for_reqid(ReqId, Timeout) ->
             {error, timeout}
     end.
 
--record(read_acc, {ctx,elements}).
+-record(read_acc, {ctx,elements=[]}).
 
 %% How to stream??  Ideally the process calling the client calls
 %% receive!
 wait_for_read(ReqId, Timeout) ->
     wait_for_read(ReqId, Timeout, #read_acc{}).
+
 %% @private
 wait_for_read(ReqId, Timeout, Acc) ->
     receive

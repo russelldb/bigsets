@@ -192,19 +192,15 @@ maybe_send_results(Results, State) ->
     %% @TODO(rdb|optimise) It's a shame to have to iterate the list of
     %% elements AGAIN here to encode the per element ctx
     #state{encoder=Dict} = State,
-    lager:debug("fsm:: encoding results"),
     Encoded = lists:map(fun({E, Dots}) ->
                                 %% We have a complete encoder dict
                                 %% from the clock, so we do not need
                                 %% to keep the updated state,
                                 %% otherwise would use a fold
-                                lager:debug("encoding ~p", [{E, Dots}]),
                                 {DotsBin, _NewEncoder} = bigset_ctx_codec:encode_dots(Dots, Dict),
-                                lager:debug("encoded ~p", [{E, DotsBin}]),
                                 {E, DotsBin}
                         end,
                         Results),
-    lager:debug("fsm::: send encoded elems"),
     send_reply({ok, {elems, Encoded}}, State).
 
 send_reply(Reply, State) ->

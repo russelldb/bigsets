@@ -1,0 +1,15 @@
+#!/bin/bash
+
+for d in dev/*; do
+    $d/bin/bigset start
+    $d/bin/bigset ping
+done
+
+for d in dev/dev{2,3,4}; do
+    $d/bin/bigset-admin cluster join 'bigset1@127.0.0.1'
+done
+
+dev/dev1/bin/bigset-admin cluster plan
+dev/dev1/bin/bigset-admin cluster commit
+
+echo "started, pinged, clustered"

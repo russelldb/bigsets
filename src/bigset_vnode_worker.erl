@@ -33,7 +33,7 @@
 -record(state, {partition :: pos_integer(),
                 batch_size :: pos_integer()}).
 
--define(FOLD_OPTS, [{iterator_refresh, true}]).
+-define(FOLD_OPTS, [{iterator_refresh, true}, {fold_method, streaming}]).
 
 %% ===================================================================
 %% Public API
@@ -59,11 +59,13 @@ handle_work({get, DB, Set}, Sender, State=#state{partition=Partition, batch_size
     try
         AccFinal =
             try
-                eleveldb:fold(DB, fun bigset_fold_acc:fold/2, Buffer, [FirstKey | ?FOLD_OPTS])
+                eleveldb:fold(DB, fun bigset_fold_acc:fold/2, Buffer, [{first_key, FirstKey} | ?FOLD_OPTS])
             catch
                 {break, Res} ->
                     Res
             end,
+
+        lager:debug("finalising on ~p", [Partition]),
         bigset_fold_acc:finalise(AccFinal)
     catch
         throw:receiver_down -> ok;

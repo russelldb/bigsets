@@ -4,6 +4,16 @@
 
 -compile([export_all]).
 
+preflist(Set) ->
+    Hash = riak_core_util:chash_key({bigset, Set}),
+    riak_core_apl:get_apl(Hash, 3, bigset).
+
+dev_client() ->
+    make_client('bigset1@127.0.0.1').
+
+make_client(Node) ->
+    bigset_client:new(Node).
+
 add_read() ->
     add_read(<<"rdb">>).
 
@@ -27,7 +37,10 @@ add_all(S, Es) ->
     lager:debug("Read result ~p~n", [Res]).
 
 make_bigset(Set, N) ->
-    Res = [bigset_client:update(Set, [crypto:rand_bytes(100)]) || _N <- lists:seq(1, N)],
+    Words = read_words(N),
+    Limit = length(Words),
+    Res = [bigset_client:update(Set, [lists:nth(crypto:rand_uniform(1, Limit), Words)]) ||
+              _N <- lists:seq(1, N)],
     case lists:all(fun(E) ->
                            E == ok end,
                    Res) of
@@ -51,8 +64,11 @@ stream_read() ->
     stream_read(<<"m">>).
 
 stream_read(S) ->
+    stream_read(S, bigset_client:new()).
+
+stream_read(S, Client) ->
     lager:debug("stream reading from set~n"),
-    {ok, ReqId, Pid} = bigset_client:stream_read(S, []),
+    {ok, ReqId, Pid} = bigset_client:stream_read(S, [], Client),
     Monitor = erlang:monitor(process, Pid),
     stream_receive_loop(ReqId, Pid, Monitor, {0, undefined}).
 
@@ -71,10 +87,11 @@ stream_receive_loop(ReqId, Pid, Monitor, {Cnt, Ctx}) ->
             stream_receive_loop(ReqId, Pid, Monitor, {Cnt, Res});
         {ReqId, {ok, {elems, Res}}} ->
             lager:debug("XX RESULT XX:::~n ~p~n", [length(Res)]),
-            stream_receive_loop(ReqId, Pid, Monitor, {Cnt+length(Res), Ctx});
-        {'DOWN', Monitor, process, Pid, Info} ->
-            lager:debug("Got DOWN message ~p~n", [Info]),
-            {error, Info}
+            stream_receive_loop(ReqId, Pid, Monitor, {Cnt+length(Res), Ctx})
+     %%% @TODO(rdb|wut?) why does this message get fired first for remote node?
+        %% {'DOWN', Monitor, process, Pid, Info} ->
+        %%     lager:debug("Got DOWN message ~p~n", [Info]),
+        %%     {error, down, Info}
     after 10000 ->
             erlang:demonitor(Monitor, [flush]),
             lager:debug("Error, timeout~n"),
@@ -83,7 +100,8 @@ stream_receive_loop(ReqId, Pid, Monitor, {Cnt, Ctx}) ->
 
 %%% codec
 clock_key(Set) ->
-    sext:encode({s, Set, clock}).
+    %% Must be same length as element key!
+    sext:encode({s, Set, clock, <<>>, 0, <<0:1>>}).
 
 %% @private decode a binary key
 decode_key(Bin) when is_binary(Bin) ->
@@ -115,4 +133,38 @@ from_bin(B) ->
 to_bin(T) ->
     term_to_binary(T).
 
+-define(WORD_FILE, "/usr/share/dict/words").
 
+read_words(N) ->
+    {ok, FD} = file:open(?WORD_FILE, [raw, read_ahead]),
+    words_to_list(file:read_line(FD), FD, N, []).
+
+words_to_list(_, FD, 0, Acc) ->
+    file:close(FD),
+    lists:reverse(Acc);
+words_to_list(eof, FD, _N, Acc) ->
+    file:close(FD),
+    lists:reverse(Acc);
+words_to_list({error, Reason}, FD, _N, Acc) ->
+    file:close(FD),
+    io:format("Error ~p Got ~p words~n", [Reason, length(Acc)]),
+    lists:reverse(Acc);
+words_to_list({ok, Word0}, FD, N ,Acc) ->
+    Word = strip_cr(Word0),
+    words_to_list(file:read_line(FD), FD, N-1, [Word | Acc]).
+
+strip_cr(Word) ->
+    list_to_binary(lists:reverse(tl(lists:reverse(Word)))).
+
+
+
+%% PL = bigset:preflist(<<"rdb-test-bm-2">>).
+%%  NPL = {1004782375664995756265033322492444576013453623296,
+%% bigset_vnode:get_db(NPL).
+%% DB = receive {_, {ok, DB}} -> DB end.
+%% {ok, Itr} = eleveldb:iterator(DB,  [{iterator_refresh, true}]).
+%% Decode = fun({ok, K, <<>>}) -> sext:decode(K);({ok, K, V}) -> {sext:decode(K) , binary_to_term(V)};(Other) -> Other end.
+
+%%  Frst = eleveldb:iterator_move(Itr, first).
+%%  Decode(Frst).
+%%  Rss = [Decode( eleveldb:iterator_move(Itr, prefetch)) || _N <- lists:seq(1, 1000)].

@@ -43,7 +43,7 @@ new(Set, Sender, BufferSize, Partition) ->
 fold({Key, Value}, Acc) ->
     #fold_acc{set=Set} = Acc,
     case bigset:decode_key(Key) of
-        {s, Set, clock} ->
+        {s, Set, clock, _, _, _} ->
             %% Set clock, send at once!
             Clock = bigset:from_bin(Value),
             send({clock, Clock}, Acc),
@@ -59,7 +59,14 @@ fold({Key, Value}, Acc) ->
 %% always have lower `Cnt' writes for any `Actor' or a tombstone for
 %% any write, we only accumulate writes for an `Element' that are the
 %% highst `Cnt' for that `Element' and `Actor' and that are not
-%% deleted, which is shown as a `TSB' (Tombstone Bit) of `1'
+%% deleted, which is shown as a `TSB' (Tombstone Bit) of `1' NOTE
+%% @TODO(rdb|corrrectness) tombstone cannot be removed by compaction
+%% until it is seen by the VV portion of the clock (the contiguous
+%% clock) other wise some gapped write could re-surface. Imagine
+%% writes {a, 1}, {a, 2}, {a,3}. Some replica sees {a,3} and
+%% tombstones it. If the ts is compacted away, and later the replica
+%% gets {a, 1} well technicall {a, 3} removes {a, 1} but instead it
+%% re-surfaces. @TODO(rdb) tell Paulo
 add(Element, Actor, Cnt, TSB, Acc=#fold_acc{current_elem=Element,
                                             current_actor=Actor}) ->
     %% If this Element is the same as current and this actor is the
@@ -121,6 +128,7 @@ flush(Acc) ->
     %% acked, seems to me this gives us time to fold while message is
     %% in flight, read, acknowledged)
     #fold_acc{elements=Elements, monitor=Monitor, partition=Partition} = Acc,
+    lager:debug("flushing ~p ~p elements", [Partition, length(Elements)]),
     receive
         {Monitor, ok} ->
             send({elements, lists:reverse(Elements)}, Acc),
@@ -144,7 +152,11 @@ finalise(Acc=#fold_acc{current_tsb=?REM}) ->
     done(Acc);
 finalise(Acc=#fold_acc{current_tsb=?ADD}) ->
     AccFinal = store_element(Acc),
-    done(AccFinal).
+    done(AccFinal);
+finalise(Acc) ->
+    %% the empty set
+    done(Acc).
+
 
 %% @private let the caller know we're done.
 done(Acc0) ->
