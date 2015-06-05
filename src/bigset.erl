@@ -37,7 +37,7 @@ add_all(S, Es) ->
     lager:debug("Read result ~p~n", [Res]).
 
 make_bigset(Set, N) ->
-    Words = read_words(N),
+    Words = read_words(N*2),
     Limit = length(Words),
     Res = [bigset_client:update(Set, [lists:nth(crypto:rand_uniform(1, Limit), Words)]) ||
               _N <- lists:seq(1, N)],

@@ -91,8 +91,13 @@ read(Set, Options) ->
                   {ok, {ctx, binary()}, {elems, [{binary(), binary()}]}} |
                   {error, Reason :: term()}.
 read(Set, Options, {?MODULE, Node}) ->
+
+
     Me = self(),
     ReqId = mk_reqid(),
+
+    dyntrace:p(1),
+
     case node() of
         Node ->
             bigset_read_fsm:start_link(ReqId, Me, Set, Options);
@@ -101,7 +106,9 @@ read(Set, Options, {?MODULE, Node}) ->
                                 [ReqId, Me, Set, Options])
     end,
     Timeout = recv_timeout(Options),
-    wait_for_read(ReqId, Timeout).
+    Res = wait_for_read(ReqId, Timeout),
+    dyntrace:p(2),
+    Res.
 
 -spec stream_read(set(),
                   Options :: proplists:proplist()) ->
@@ -166,7 +173,7 @@ wait_for_read(ReqId, Timeout, Acc) ->
             #read_acc{ctx=Ctx, elements=Elems} = Acc,
             {ok, {ctx, Ctx}, {elems, lists:flatten(Elems)}};
         {ReqId, {ok, {ctx, Ctx}}} ->
-                wait_for_read(ReqId, Timeout, Acc#read_acc{ctx=Ctx});
+            wait_for_read(ReqId, Timeout, Acc#read_acc{ctx=Ctx});
         {ReqId, {ok, {elems, Res}}} ->
             #read_acc{elements=Elems} = Acc,
             wait_for_read(ReqId, Timeout, Acc#read_acc{elements=[Res|Elems]});

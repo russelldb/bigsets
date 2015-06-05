@@ -89,6 +89,7 @@ read(timeout, State) ->
     #state{preflist=PL, set=Set} = State,
     Req = ?READ_REQ{set=Set},
     bigset_vnode:read(PL, Req),
+
     {next_state, await_clocks, State}.
 
 -spec await_clocks(result(), state()) -> {next_state, reply, state(), 0} |
