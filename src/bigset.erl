@@ -98,6 +98,15 @@ stream_receive_loop(ReqId, Pid, Monitor, {Cnt, Ctx}) ->
             {error, timeout}
     end.
 
+bm_read(Set, N) ->
+    Times = [begin
+                 {Time, _} = timer:tc(bigset_client, read, [Set, []]),
+                 Time
+             end || _ <- lists:seq(1, N)],
+    [{max, lists:max(Times)},
+     {min, lists:min(Times)},
+     {avg, lists:sum(Times) div length(Times)}].
+
 %%% codec
 clock_key(Set) ->
     %% Must be same length as element key!

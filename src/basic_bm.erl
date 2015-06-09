@@ -1,7 +1,7 @@
 -module(basic_bm).
 -compile([export_all]).
 
--include("/Users/russell/dev/e/basho/proto/riak-2.1/deps/riak_kv/include/riak_kv_types.hrl").
+-include("/Users/russell/dev/e/basho/proto/riak/deps/riak_kv/include/riak_kv_types.hrl").
 
 %% Should I do something weird here with cookies? Connect to bigset,
 %% run bm, change cookie, connect to riak, run bm?

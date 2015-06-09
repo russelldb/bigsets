@@ -1,0 +1,1 @@
+-define(CLIENT_READ, 1).

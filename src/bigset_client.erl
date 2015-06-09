@@ -1,5 +1,6 @@
 -module(bigset_client).
 -include("bigset.hrl").
+-include("bigset_trace.hrl").
 -include_lib("riak_core/include/riak_core_vnode.hrl").
 
 -export([
@@ -33,8 +34,6 @@ new() ->
 -spec new(node()) -> client().
 new(Node) ->
     {?MODULE, Node}.
-
-
 
 -spec update(set(), Adds :: [member()]) ->
                     ok | {error, Reason :: term()}.
@@ -96,7 +95,7 @@ read(Set, Options, {?MODULE, Node}) ->
     Me = self(),
     ReqId = mk_reqid(),
 
-    dyntrace:p(1),
+    dyntrace:p(1, ?CLIENT_READ),
 
     case node() of
         Node ->
@@ -107,7 +106,7 @@ read(Set, Options, {?MODULE, Node}) ->
     end,
     Timeout = recv_timeout(Options),
     Res = wait_for_read(ReqId, Timeout),
-    dyntrace:p(2),
+    dyntrace:p(2, ?CLIENT_READ),
     Res.
 
 -spec stream_read(set(),
