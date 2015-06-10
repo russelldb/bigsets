@@ -1,7 +1,8 @@
 #pragma D option quiet
-int p[string,string, int];
+uint64_t  p[string, string, int];
+self uint64_t vp[string, string, int];
 
-/* See bigset_dtrace.hrl for string tags */
+/* See bigset_dtrace.hrl for int tags */
 
 /* Process entered measured section. */
 erlang$target:::user_trace-i4s4
@@ -10,27 +11,28 @@ erlang$target:::user_trace-i4s4
   this->proc = copyinstr(arg0);
   this->tag = arg3;
   p[this->proc, "start", this->tag] = timestamp;
-  p[this->proc, "vstart", this->tag] = vtimestamp;
+  self->vp[this->proc, "vstart", this->tag] = vtimestamp;
 }
 
 /* Process exits measured section */
 erlang$target:::user_trace-i4s4
-/arg2 == 2 && p[copyinstr(arg0), "start", arg3] != 0 /
+/ arg2 == 2 && p[copyinstr(arg0), "start", arg3] != 0 && self->vp[copyinstr(arg0), "vstart", arg3] != 0 /
 {
   this->proc = copyinstr(arg0);
   this->tag = arg3;
   this->start = p[this->proc, "start", this->tag];
   this->elapsed = (timestamp - this->start) / 1000;
 
-  this->vstart = p[this->proc, "vstart", this->tag];
-  this->rolling_elapsed = p[this->proc, "velapsed", this->tag];
+  this->vstart = self->vp[this->proc, "vstart", this->tag];
+  this->rolling_elapsed = self->vp[this->proc, "velapsed", this->tag];
+
   this->velapsed = ((vtimestamp - this->vstart) + this->rolling_elapsed) / 1000;
 
   p[this->proc, "start", this->tag] = 0;
   p[this->proc, "elapsed", this->tag] = 0;
 
-  p[this->proc, "vstart", this->tag] = 0;
-  p[this->proc, "velapsed", this->tag] = 0;
+  self->vp[this->proc, "vstart", this->tag] = 0;
+  self->vp[this->proc, "velapsed", this->tag] = 0;
 
   @lmin = min(this->elapsed);
   @lmax = max(this->elapsed);
@@ -49,8 +51,8 @@ erlang$target:::process-unscheduled
   {
       this->proc = copyinstr(arg0);
       this->tag = arg3;
-      this->vstart = p[this->proc, "vstart", this->tag];
-      p[this->proc, "velapsed", this->tag] += (vtimestamp - this->vstart);
+      this->vstart = self->vp[this->proc, "vstart", this->tag];
+      self->vp[this->proc, "velapsed", this->tag] += (vtimestamp - this->vstart);
       @unscheduled = count();
   }
 
@@ -60,7 +62,7 @@ erlang$target:::process-scheduled
   {
       this->proc = copyinstr(arg0);
       this->tag = arg3;
-      p[this->proc, "vstart", this->tag] = vtimestamp;
+      self->vp[this->proc, "vstart", this->tag] = vtimestamp;
   }
 
 BEGIN {

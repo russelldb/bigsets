@@ -82,8 +82,8 @@ bs_bm(Set, Size, WFile, RFile, Node, Words) ->
     io:format("BS wrote ~p unique entries ~n", [sets:size(sets:from_list(Vals))]).
 
 dt_bm(Set, Size, Node) ->
-    WFile = filename:join(["bms","bs",  binary_to_list(Set) ++  ".writes"]),
-    RFile = filename:join(["bms", "bs", binary_to_list(Set) ++ ".reads"]),
+    WFile = filename:join(["bms","dt",  binary_to_list(Set) ++  ".writes"]),
+    RFile = filename:join(["bms", "dt", binary_to_list(Set) ++ ".reads"]),
     Words = bigset:read_words(Size*2),
     dt_bm(Set, Size, WFile, RFile, Node, Words).
 
@@ -94,6 +94,8 @@ dt_bm(Set, Size, WFile, RFile, Node, Words) ->
         false ->
             make_sets_bucket(Node)
     end,
+
+    io:format("bucket type made~n"),
 
     Limit = length(Words),
 

@@ -36,7 +36,7 @@
 -define(REPLICATE_REQ, #bigset_replicate_req_v1).
 -define(READ_REQ, #bigset_read_req_v1).
 
--define(DEFAULT_BATCH_SIZE, 100).
+-define(DEFAULT_BATCH_SIZE, 1000).
 -define(DEFAULT_WORKER_POOL, 100).
 
 

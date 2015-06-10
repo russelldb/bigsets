@@ -112,6 +112,9 @@ clock_key(Set) ->
     %% Must be same length as element key!
     sext:encode({s, Set, clock, <<>>, 0, <<0:1>>}).
 
+end_key(Set) ->
+    {s, <<Set/binary, 0:1>>, a, <<>>, 0, <<0:1>>}.
+
 %% @private decode a binary key
 decode_key(Bin) when is_binary(Bin) ->
     sext:decode(Bin);

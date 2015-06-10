@@ -2,6 +2,8 @@
 
 -compile([export_all]).
 
+-include("bigset_trace.hrl").
+
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
@@ -42,18 +44,20 @@ new(Set, Sender, BufferSize, Partition) ->
 %% Acc})' to break out of fold when last key is read.
 fold({Key, Value}, Acc) ->
     #fold_acc{set=Set} = Acc,
-    case bigset:decode_key(Key) of
-        {s, Set, clock, _, _, _} ->
-            %% Set clock, send at once!
-            Clock = bigset:from_bin(Value),
-            send({clock, Clock}, Acc),
-            Acc#fold_acc{not_found=false};
-        {s, Set, Element, Actor, Cnt, TSB} ->
-            add(Element, Actor, Cnt, TSB, Acc);
-        _ ->
-            %% Can finalise here, you know?!
-            throw({break, Acc})
-    end.
+    Res = case bigset:decode_key(Key) of
+              {s, Set, clock, _, _, _} ->
+                  %% Set clock, send at once!
+                  Clock = bigset:from_bin(Value),
+                  send({clock, Clock}, Acc),
+                  Acc#fold_acc{not_found=false};
+              {s, Set, Element, Actor, Cnt, TSB} ->
+                  add(Element, Actor, Cnt, TSB, Acc);
+              _ ->
+                  %% Can finalise here, you know?!
+                  throw({break, Acc})
+          end,
+    Res.
+
 
 %% @private leveldb compaction will do this too, but since we may
 %% always have lower `Cnt' writes for any `Actor' or a tombstone for
@@ -129,19 +133,22 @@ flush(Acc) ->
     %% in flight, read, acknowledged)
     #fold_acc{elements=Elements, monitor=Monitor, partition=Partition} = Acc,
     lager:debug("flushing ~p ~p elements", [Partition, length(Elements)]),
-    receive
-        {Monitor, ok} ->
-            send({elements, lists:reverse(Elements)}, Acc),
-            Acc#fold_acc{size=0, elements=[]};
-        {Monitor, stop_fold} ->
-            lager:debug("told to stop~p~n", [Partition]),
-            close(Acc),
-            throw(stop_fold);
-        {'DOWN', Monitor, process, _Pid, _Reson} ->
-            lager:debug("got down~p~n", [Partition]),
-            close(Acc),
-            throw(receiver_down)
-    end.
+    dyntrace:p(1, ?FOLD),
+    Res = receive
+              {Monitor, ok} ->
+                  send({elements, lists:reverse(Elements)}, Acc),
+                  Acc#fold_acc{size=0, elements=[]};
+              {Monitor, stop_fold} ->
+                  lager:debug("told to stop~p~n", [Partition]),
+                  close(Acc),
+                  throw(stop_fold);
+              {'DOWN', Monitor, process, _Pid, _Reson} ->
+                  lager:debug("got down~p~n", [Partition]),
+                  close(Acc),
+                  throw(receiver_down)
+          end,
+    dyntrace:p(2, ?FOLD),
+    Res.
 
 %% @private folding is over (if it ever really began!), call this with
 %% the final Accumulator.
