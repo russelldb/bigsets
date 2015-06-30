@@ -2,8 +2,6 @@
 #pragma D option aggsize=8m
 #pragma D option bufsize=16m
 #pragma D option dynvarsize=16m
-#pragma D option aggrate=0
-#pragma D option cleanrate=50Hz
 
 uint64_t  p[string, string, int];
 
@@ -33,17 +31,18 @@ erlang$target:::user_trace-i4s4
   @lmin = min(this->elapsed);
   @lmax = max(this->elapsed);
   @lavg = avg(this->elapsed);
+  @lsum = sum(this->elapsed);
 
   @cnt = count();
 }
 
 BEGIN {
-    printf("%10s, %10s, %10s, %10s\n", "Count", "Min", "Avg", "Max");
+  printf("%10s, %10s, %10s, %10s, %10s\n", "Count", "Min", "Avg", "Max", "Total");
 }
 
 profile:::tick-1s
 {
-   printa("%@10u, %@10u, %@10u, %@10u\n", @cnt, @lmin , @lavg , @lmax);
+  printa("%@10u, %@10u, %@10u, %@10u, %@10u\n", @cnt, @lmin , @lavg , @lmax, @lsum);
 
    /* trunc(@lmin); trunc(@lmax); trunc(@lavg); */
    /* trunc(@cnt); */

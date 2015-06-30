@@ -43,15 +43,21 @@ new(Set, Sender, BufferSize, Partition) ->
 %% @doc called by eleveldb:fold per key read. Uses `throw({break,
 %% Acc})' to break out of fold when last key is read.
 fold({Key, Value}, Acc) ->
+    dyntrace:p(1, ?FOLD),
+
     #fold_acc{set=Set} = Acc,
     Res = case bigset:decode_key(Key) of
               {s, Set, clock, _, _, _} ->
                   %% Set clock, send at once!
                   Clock = bigset:from_bin(Value),
                   send({clock, Clock}, Acc),
+                  dyntrace:p(2, ?FOLD),
+
                   Acc#fold_acc{not_found=false};
               {s, Set, Element, Actor, Cnt, TSB} ->
-                  add(Element, Actor, Cnt, TSB, Acc);
+                  A2 = add(Element, Actor, Cnt, TSB, Acc),
+                  dyntrace:p(2, ?FOLD),
+                  A2;
               _ ->
                   %% Can finalise here, you know?!
                   throw({break, Acc})
@@ -133,7 +139,6 @@ flush(Acc) ->
     %% in flight, read, acknowledged)
     #fold_acc{elements=Elements, monitor=Monitor, partition=Partition} = Acc,
     lager:debug("flushing ~p ~p elements", [Partition, length(Elements)]),
-    dyntrace:p(1, ?FOLD),
     Res = receive
               {Monitor, ok} ->
                   send({elements, lists:reverse(Elements)}, Acc),
@@ -147,7 +152,6 @@ flush(Acc) ->
                   close(Acc),
                   throw(receiver_down)
           end,
-    dyntrace:p(2, ?FOLD),
     Res.
 
 %% @private folding is over (if it ever really began!), call this with
