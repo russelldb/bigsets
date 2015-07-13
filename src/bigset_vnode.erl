@@ -117,7 +117,7 @@ handle_command(?OP{set=Set, inserts=Inserts, removes=Removes, ctx=Ctx}, Sender, 
     %% tombstones for those dots.
 
     %% @TODO(rdb|correctness) can you strip dots from removes? I think
-    %% so, maybe.
+    %% so, maybe. Carlos/Paulo say you can. In fact, maybe you _have_ to!
     DeleteWrites = gen_removes(Set, Removes, Ctx),
 
     %% @TODO(rdb|optimise) technically you could ship the deletes
