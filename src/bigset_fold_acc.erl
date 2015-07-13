@@ -10,6 +10,7 @@
 
 -record(fold_acc,
         {
+          set_list :: list(),
           not_found = true,
           partition :: pos_integer(),
           set :: binary(),
@@ -34,36 +35,31 @@ send(Message, Acc) ->
 
 new(Set, Sender, BufferSize, Partition) ->
     Monitor = riak_core_vnode:monitor(Sender),
-    #fold_acc{set=Set,
-              sender=Sender,
-              monitor=Monitor,
-              buffer_size=BufferSize-1,
-              partition=Partition}.
+    #fold_acc{
+       set_list = binary_to_list(Set),
+       set=Set,
+       sender=Sender,
+       monitor=Monitor,
+       buffer_size=BufferSize-1,
+       partition=Partition}.
 
 %% @doc called by eleveldb:fold per key read. Uses `throw({break,
 %% Acc})' to break out of fold when last key is read.
 fold({Key, Value}, Acc) ->
-    dyntrace:p(1, ?FOLD),
-
     #fold_acc{set=Set} = Acc,
-    Res = case bigset:decode_key(Key) of
-              {s, Set, clock, _, _, _} ->
-                  %% Set clock, send at once!
-                  Clock = bigset:from_bin(Value),
-                  send({clock, Clock}, Acc),
-                  dyntrace:p(2, ?FOLD),
-
-                  Acc#fold_acc{not_found=false};
-              {s, Set, Element, Actor, Cnt, TSB} ->
-                  A2 = add(Element, Actor, Cnt, TSB, Acc),
-                  dyntrace:p(2, ?FOLD),
-                  A2;
-              _ ->
-                  %% Can finalise here, you know?!
-                  throw({break, Acc})
-          end,
-    Res.
-
+    case bigset:decode_key(Key) of
+        {s, Set, clock, _, _, _} ->
+            %% Set clock, send at once!
+            Clock = bigset:from_bin(Value),
+            send({clock, Clock}, Acc),
+            Acc#fold_acc{not_found=false};
+        {s, Set, Element, Actor, Cnt, TSB} ->
+            A2 = add(Element, Actor, Cnt, TSB, Acc),
+            A2;
+        _ ->
+            %% Can finalise here, you know?!
+            throw({break, Acc})
+    end.
 
 %% @private leveldb compaction will do this too, but since we may
 %% always have lower `Cnt' writes for any `Actor' or a tombstone for

@@ -113,7 +113,9 @@ clock_key(Set) ->
     sext:encode({s, Set, clock, <<>>, 0, <<0:1>>}).
 
 end_key(Set) ->
-    {s, <<Set/binary, 0:1>>, a, <<>>, 0, <<0:1>>}.
+    %% we don't know the last key for this set, but a binary that is
+    %% the set name with a single 0bit appended sounds about right.
+    sext:encode({s, <<Set/binary, 0:1>>, a, <<>>, 0, <<0:1>>}).
 
 %% @private decode a binary key
 decode_key(Bin) when is_binary(Bin) ->

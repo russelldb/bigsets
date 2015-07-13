@@ -27,6 +27,7 @@ xref: all
 stage : rel
 	$(foreach dep,$(wildcard deps/*), rm -rf rel/bigset/lib/$(shell basename $(dep))-* && ln -sf $(abspath $(dep)) rel/bigset/lib;)
 	$(foreach app,$(wildcard apps/*), rm -rf rel/bigset/lib/$(shell basename $(app))-* && ln -sf $(abspath $(app)) rel/bigset/lib;)
+	rm -rf rel/bigset/lib/bigset-1/ebin && ln -sf $(abspath ebin) rel/bigset/lib/bigset-1/ebin
 
 
 ##
