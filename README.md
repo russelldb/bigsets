@@ -38,6 +38,16 @@ don't store everything in one key. Use a logical clock that we read
 per write to generate dots, and then append the new elements and dots
 to the set. Take advantage of Level for this.
 
+As a taster, here are some current results:
+
+![10k inserts](doc/bs-add.png)
+
+And here is that 100k insert run in basho-bench
+
+![100k inserts](doc/bs-100k.png)
+
+I think that shows enough promise to work on.
+
 # When?
 
 I'm working on it. Current sticking points
