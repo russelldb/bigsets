@@ -176,26 +176,36 @@ merge([{_P, Actor} | Rest], Mergedest) ->
     M2 = orswot_merge(Actor, Mergedest),
     merge(Rest, M2).
 
+orswot_merge(A1, A1) ->
+    dyntrace:p(1),
+    dyntrace:p(2),
+    A1;
+orswot_merge(#actor{clock=C1, elements=E}, A=#actor{clock=C2, elements=E}) ->
+    dyntrace:p(1),
+    dyntrace:p(2),
+    A#actor{clock=bigset_clock:merge(C1, C2)};
 orswot_merge(A1, A2) ->
+    lager:info("oops, real merge"),
+    dyntrace:p(1),
     #actor{elements=E1, clock=C1} = A1,
     #actor{elements=E2, clock=C2} = A2,
     Clock = bigset_clock:merge(C1, C2),
 
     %% ugly cut and paste from before
     {E2Unique, Keeps} = lists:foldl(fun({E, Dots}, {E2Remains, Acc}) ->
-                        case lists:keytake(E, 1, E2Remains) of
-                            false ->
-                                %% Only present on one side, filter
-                                %% the dots
-                                Acc2 = filter_element(E, Dots, C2, Acc),
-                                {E2Remains, Acc2};
-                            {value, {E, Dots2}, NewE2} ->
-                                Acc2 = merge_element(E, {Dots, C1}, {Dots2, C2}, Acc),
-                                {NewE2, Acc2}
-                        end
-                end,
-                {E2, []},
-                E1),
+                                            case lists:keytake(E, 1, E2Remains) of
+                                                false ->
+                                                    %% Only present on one side, filter
+                                                    %% the dots
+                                                    Acc2 = filter_element(E, Dots, C2, Acc),
+                                                    {E2Remains, Acc2};
+                                                {value, {E, Dots2}, NewE2} ->
+                                                    Acc2 = merge_element(E, {Dots, C1}, {Dots2, C2}, Acc),
+                                                    {NewE2, Acc2}
+                                            end
+                                    end,
+                                    {E2, []},
+                                    E1),
     E2Keeps = lists:foldl(fun({E, Dots}, Acc) ->
                                   %% Only present on one side, filter
                                   %% the dots
@@ -204,6 +214,7 @@ orswot_merge(A1, A2) ->
                           [],
                           E2Unique),
     Elements = lists:umerge(lists:reverse(Keeps), lists:reverse(E2Keeps)),
+    dyntrace:p(2),
     #actor{clock=Clock, elements=Elements}.
 
 
@@ -215,10 +226,8 @@ filter_element(Element, Dots, Clock, Acc) ->
             %% Removed, do not keep
             Acc;
         SurvivingDots ->
-            %% @TODO in this proto 2 is the
-            %% must sets we will merge, so
-            %% we can binary/compress dots
-            %% here
+            %% @TODO in this proto 2 is the most sets we will merge,
+            %% so we can binary/compress dots here
             [{Element, SurvivingDots} | Acc]
     end.
 

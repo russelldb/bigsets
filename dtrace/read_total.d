@@ -13,7 +13,6 @@ erlang$target:::user_trace-i4s4
   p[this->proc, "start", this->tag] = timestamp;
   self->vp[this->proc, "vstart", this->tag] = vtimestamp;
 }
-
 /* Process exits measured section */
 erlang$target:::user_trace-i4s4
 / arg2 == 2 && p[copyinstr(arg0), "start", arg3] != 0 && self->vp[copyinstr(arg0), "vstart", arg3] != 0 /

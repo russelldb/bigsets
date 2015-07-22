@@ -95,7 +95,6 @@ read(Set, Options, {?MODULE, Node}) ->
     Me = self(),
     ReqId = mk_reqid(),
 
-    %% dyntrace:p(1, ?CLIENT_READ),
 
     case node() of
         Node ->
@@ -106,7 +105,6 @@ read(Set, Options, {?MODULE, Node}) ->
     end,
     Timeout = recv_timeout(Options),
     Res = wait_for_read(ReqId, Timeout),
-    %% dyntrace:p(2, ?CLIENT_READ),
     Res.
 
 -spec stream_read(set(),

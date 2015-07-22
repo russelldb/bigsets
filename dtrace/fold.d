@@ -1,9 +1,12 @@
 #pragma D option quiet
-#pragma D option aggsize=8m
-#pragma D option bufsize=16m
-#pragma D option dynvarsize=16m
+#pragma D option aggsize=16m
+#pragma D option bufsize=32m
+#pragma D option dynvarsize=64m
 
 uint64_t  p[string, string, int];
+
+inline int EXPECTED_MAX = 300000;
+inline int BUCKET_SIZE = 1000;
 
 /* See bigset_dtrace.hrl for int tags */
 
@@ -32,6 +35,7 @@ erlang$target:::user_trace-i4s4
   @lmax = max(this->elapsed);
   @lavg = avg(this->elapsed);
   @lsum = sum(this->elapsed);
+  @lq = lquantize(this->elapsed, 0, EXPECTED_MAX, BUCKET_SIZE);
 
   @cnt = count();
 }
@@ -42,13 +46,19 @@ BEGIN {
 
 profile:::tick-1s
 {
-  printa("%@10u, %@10u, %@10u, %@10u, %@10u\n", @cnt, @lmin , @lavg , @lmax, @lsum);
 
    /* trunc(@lmin); trunc(@lmax); trunc(@lavg); */
    /* trunc(@cnt); */
 }
 
+profile:::tick-10s
+{
+  printa(@lq);
+  trunc(@lq);
+}
 END
 {
+  printf("%10s, %10s, %10s, %10s, %10s\n", "Count", "Min", "Avg", "Max", "Total");
+  printa("%@10u, %@10u, %@10u, %@10u, %@10u\n", @cnt, @lmin , @lavg , @lmax, @lsum);
   printf("done\n");
 }

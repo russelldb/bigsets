@@ -47,19 +47,20 @@ new(Set, Sender, BufferSize, Partition) ->
 %% Acc})' to break out of fold when last key is read.
 fold({Key, Value}, Acc) ->
     #fold_acc{set=Set} = Acc,
-    case bigset:decode_key(Key) of
-        {s, Set, clock, _, _, _} ->
-            %% Set clock, send at once!
-            Clock = bigset:from_bin(Value),
-            send({clock, Clock}, Acc),
-            Acc#fold_acc{not_found=false};
-        {s, Set, Element, Actor, Cnt, TSB} ->
-            A2 = add(Element, Actor, Cnt, TSB, Acc),
-            A2;
-        _ ->
-            %% Can finalise here, you know?!
-            throw({break, Acc})
-    end.
+    Res = case bigset:decode_key(Key) of
+              {s, Set, clock, _, _, _} ->
+                  %% Set clock, send at once!
+                  Clock = bigset:from_bin(Value),
+                  send({clock, Clock}, Acc),
+                  Acc#fold_acc{not_found=false};
+              {s, Set, Element, Actor, Cnt, TSB} ->
+                  A2 = add(Element, Actor, Cnt, TSB, Acc),
+                  A2;
+              _ ->
+                  %% Can finalise here, you know?!
+                  throw({break, Acc})
+          end,
+    Res.
 
 %% @private leveldb compaction will do this too, but since we may
 %% always have lower `Cnt' writes for any `Actor' or a tombstone for
