@@ -47,7 +47,10 @@ new(Set, Sender, BufferSize, Partition) ->
 %% Acc})' to break out of fold when last key is read.
 fold({Key, Value}, Acc) ->
     #fold_acc{set=Set} = Acc,
-    Res = case bigset:decode_key(Key) of
+    dyntrace:p(1),
+    Dec = bigset:decode_key(Key),
+
+    Res = case Dec of
               {s, Set, clock, _, _, _} ->
                   %% Set clock, send at once!
                   Clock = bigset:from_bin(Value),
@@ -60,6 +63,7 @@ fold({Key, Value}, Acc) ->
                   %% Can finalise here, you know?!
                   throw({break, Acc})
           end,
+    dyntrace:p(2),
     Res.
 
 %% @private leveldb compaction will do this too, but since we may
@@ -133,7 +137,8 @@ flush(Acc) ->
     %% last message is acked (saves cluster resources maybe) or
     %% 2. continue fold, but do not send result until message is
     %% acked, seems to me this gives us time to fold while message is
-    %% in flight, read, acknowledged)
+    %% in flight, read, acknowledged), and what about if the last
+    %% message was a clock?? We should send, right?
     #fold_acc{elements=Elements, monitor=Monitor, partition=Partition} = Acc,
     lager:debug("flushing ~p ~p elements", [Partition, length(Elements)]),
     Res = receive

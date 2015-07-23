@@ -28,7 +28,7 @@
                 preflist :: riak_core_apl:preflist(),
                 %% default to r=2 for demo/proto, defaults to
                 %% basic_quorum=false and notfound_ok=true, too
-                logic = bigset_read_core:new(2),
+                logic = bigset_read_core:new(1), %% test with r=1
                 options=[] :: list(),
                 timer=undefined :: reference() | undefined,
                 reply = undefined,

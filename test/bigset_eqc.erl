@@ -177,7 +177,7 @@ context_remove(From, To, Element) ->
     Ctx = riak_dt_orswot:precondition_context(FromORSWOT),
     {ok, ToORSWOT2} = riak_dt_orswot:update({remove, Element}, To, ToORSWOT, Ctx),
 
-    dump_node(From, FromBigset),
+%%    dump_node(From, FromBigset),
 
     ets:insert(?MODULE, {To, ToBigset2, ToORSWOT2}),
     RemoveKeys.

@@ -99,6 +99,7 @@ is_done(_S) ->
 %% it to the client
 -spec maybe_merge_and_flush(#state{}) -> {[#actor{}], #state{}}.
 maybe_merge_and_flush(Core=#state{not_founds=NF, clocks=C, r=R}) when NF+C < R ->
+    %% Not enough responses yet
     {undefined, Core};
 maybe_merge_and_flush(Core) ->
     %% need to be R before we proceed
@@ -177,16 +178,10 @@ merge([{_P, Actor} | Rest], Mergedest) ->
     merge(Rest, M2).
 
 orswot_merge(A1, A1) ->
-    dyntrace:p(1),
-    dyntrace:p(2),
     A1;
 orswot_merge(#actor{clock=C1, elements=E}, A=#actor{clock=C2, elements=E}) ->
-    dyntrace:p(1),
-    dyntrace:p(2),
     A#actor{clock=bigset_clock:merge(C1, C2)};
 orswot_merge(A1, A2) ->
-    lager:info("oops, real merge"),
-    dyntrace:p(1),
     #actor{elements=E1, clock=C1} = A1,
     #actor{elements=E2, clock=C2} = A2,
     Clock = bigset_clock:merge(C1, C2),
@@ -214,7 +209,6 @@ orswot_merge(A1, A2) ->
                           [],
                           E2Unique),
     Elements = lists:umerge(lists:reverse(Keeps), lists:reverse(E2Keeps)),
-    dyntrace:p(2),
     #actor{clock=Clock, elements=Elements}.
 
 
