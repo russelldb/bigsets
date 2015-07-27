@@ -28,6 +28,7 @@
 
 -record(state, {partition,
                 vnodeid=undefined, %% actor
+                epoch_size=?DEFAULT_EPOCH_SIZE, %% @TODO what if this changes?
                 db %% eleveldb handle
                }).
 
@@ -89,7 +90,8 @@ init([Partition]) ->
     PoolSize = app_helper:get_env(bigset, worker_pool_size, ?DEFAULT_WORKER_POOL),
     VnodeId = vnode_id(Partition),
     BatchSize  = app_helper:get_env(bigset, batch_size, ?DEFAULT_BATCH_SIZE),
-    {ok, #state {vnodeid=VnodeId,  partition=Partition, db=DB},
+    EpochSize =  app_helper:get_env(bigset, batch_size, ?DEFAULT_EPOCH_SIZE),
+    {ok, #state {vnodeid=VnodeId,  partition=Partition, db=DB, epoch_size=EpochSize},
      [{pool, bigset_vnode_worker, PoolSize, [{batch_size, BatchSize}]}]}.
 
 %% COMMANDS(denosneold!)
@@ -108,10 +110,11 @@ handle_command(dump_db, _Sender, State) ->
     {reply, {ok, P, lists:reverse(Acc)}, State};
 handle_command(?OP{set=Set, inserts=Inserts, removes=Removes, ctx=Ctx}, Sender, State) ->
     %% Store elements in the set.
-    #state{db=DB, partition=Partition, vnodeid=Id} = State,
+    #state{db=DB, partition=Partition, vnodeid=Id, epoch_size=EpochSize} = State,
     ClockKey = bigset:clock_key(Set),
     Clock = clock(eleveldb:get(DB, ClockKey, ?READ_OPTS)),
-    {Clock2, InsertWrites, ReplicationPayload} = gen_inserts(Set, Inserts, Id, Clock),
+    Epoch = write_epoch(Id, Clock, EpochSize),
+    {Clock2, InsertWrites, ReplicationPayload} = gen_inserts(Set, Inserts, Id, Clock, Epoch),
 
     %% Each element has the context it was read with, generate
     %% tombstones for those dots.
@@ -131,9 +134,16 @@ handle_command(?OP{set=Set, inserts=Inserts, removes=Removes, ctx=Ctx}, Sender, 
 
     Writes = lists:append([[{put, ClockKey, BinClock}],  InsertWrites, DeleteWrites]),
     ok = eleveldb:write(DB, Writes, ?WRITE_OPTS),
-%%    lager:debug("I wrote ~p~n", [decode_writes(Writes, [])]),
+    %%    lager:debug("I wrote ~p~n", [decode_writes(Writes, [])]),
     riak_core_vnode:reply(Sender, {dw, Partition, ReplicationPayload, DeleteWrites}),
-    {noreply, State};
+    NewEpoch = write_epoch(Id, Clock2, EpochSize),
+    if NewEpoch /= Epoch ->
+            %% Spawn aysnc rollup of old epoch
+            {async, {rollup, DB, Set, Epoch}, Sender, State};
+       true ->
+            %% just return
+            {noreply, State}
+    end;
 handle_command(?REPLICATE_REQ{set=Set,
                               inserts=Ins,
                               removes=Rems},
@@ -154,7 +164,7 @@ handle_command(?REPLICATE_REQ{set=Set,
 
     Writes = lists:append([[{put, ClockKey, BinClock}], Inserts, Rems]),
     ok = eleveldb:write(DB, Writes, ?WRITE_OPTS),
-%%    lager:debug("I wrote ~p~n", [decode_writes(Writes, [])]),
+    %%    lager:debug("I wrote ~p~n", [decode_writes(Writes, [])]),
     riak_core_vnode:reply(Sender, {dw, Partition}),
     {noreply, State};
 handle_command(?READ_REQ{set=Set}, Sender, State) ->
@@ -301,16 +311,17 @@ write_vnode_status(Status, File) ->
 -spec gen_inserts(Set :: binary(),
                   Inserts :: [binary()],
                   Actor :: binary(),
-                  Clock :: riak_dt_vclock:vclock()) ->
+                  Clock :: riak_dt_vclock:vclock(),
+                  epoch()) ->
                          {NewClock :: riak_dt_vclock:vclock(),
                           Writes :: [level_put()],
                           ReplicationDeltas :: [delta_element()]}.
 
-gen_inserts(Set, Inserts, Id, Clock) ->
+gen_inserts(Set, Inserts, Id, Clock, Epoch) ->
     lists:foldl(fun(Element, {C, W, R}) ->
                        %% Generate a dot per insert
                        {{Id, Cnt}=Dot, C2} = bigset_clock:increment(Id, C),
-                       ElemKey = bigset:insert_member_key(Set, Element, Id, Cnt),
+                       ElemKey = bigset:insert_member_key(Set, Epoch, Element, Id, Cnt),
                        {
                          C2, %% New Clock
                          [{put, ElemKey, <<>>} | W], %% To write
@@ -394,3 +405,8 @@ open_db(DataDir, Opts, RetriesLeft, _) ->
         {error, Reason} ->
             {error, Reason}
     end.
+
+%% @private figure out the epoch for this set of writes
+write_epoch(Actor, Clock, EpochSize) ->
+    Cntr = bigset_clock:get_counter(Actor, Clock),
+    Cntr div EpochSize.

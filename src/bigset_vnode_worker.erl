@@ -71,4 +71,8 @@ handle_work({get, DB, Set}, Sender, State=#state{partition=Partition, batch_size
         throw:stop_fold     -> ok;
         throw:_PrematureAcc  -> ok %%FinishFun(PrematureAcc)
     end,
-    {noreply, State}.
+    {noreply, State};
+handle_work({rollup, DB, Set, Epoch, Clock}, Sender, State) ->
+    
+    ok.
+

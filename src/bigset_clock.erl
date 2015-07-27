@@ -40,6 +40,9 @@ increment(Actor, {Clock, Seen}) ->
 get_dot(Actor, {Clock, _Dots}) ->
     {Actor, riak_dt_vclock:get_counter(Actor, Clock)}.
 
+gte_counter(Actor, {Clock, _Dots}) ->
+    riak_dt_vclock:get_counter(Actor, Clock).
+
 all_nodes({Clock, Dots}) ->
     %% NOTE the riak_dt_vclock:all_nodes/1 returns a sorted list
     lists:umerge(riak_dt_vclock:all_nodes(Clock),

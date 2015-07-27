@@ -1,4 +1,5 @@
 -type set() :: binary().
+-type epoch() :: non_neg_integer().
 -type member() :: binary().
 -type actor() :: binary().
 -type counter() :: pos_integer().
@@ -38,8 +39,4 @@
 
 -define(DEFAULT_BATCH_SIZE, 1000).
 -define(DEFAULT_WORKER_POOL, 100).
-
-
-
-
-
+-define(DEFAULT_EPOCH_SIZE, ?DEFAULT_BATCH_SIZE).
