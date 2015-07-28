@@ -28,7 +28,7 @@
                 preflist :: riak_core_apl:preflist(),
                 %% default to r=2 for demo/proto, defaults to
                 %% basic_quorum=false and notfound_ok=true, too
-                logic = bigset_read_core:new(2),
+                logic = bigset_read_core:new(1),
                 options=[] :: list(),
                 timer=undefined :: reference() | undefined,
                 reply = undefined,
@@ -183,7 +183,9 @@ await_elements({done, Partition, _From}, State) ->
 message_length(undefined) ->
     0;
 message_length(L) when is_list(L) ->
-    length(L).
+    length(L);
+message_length(B) when is_binary(B) ->
+    byte_size(B).
 
 maybe_send_results(undefined, _State) ->
     ok;

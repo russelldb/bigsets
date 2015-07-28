@@ -12,8 +12,18 @@ doit() ->
 
 make_clock_key(Set) when is_binary(Set) ->
     Len = byte_size(Set),
-    ClockElement = <<0:1, 0:1>>,
-    %% <<Set length, Set, Element Length, Element, Actor lentgh, actor, counter, Tsb>>
-    %% for the clock the element is zero bit, the actor is one zero bit, and the counter is zero.
-    %5 The clock should always be the first element in the set
-    <<Len:32/integer, Set:Len/binary, 2:32/integer, ClockElement:2, 1:32/integer , 0:1, 0:32/integer, 0:1>>.
+    %% <<Set length, Set>>
+    <<Len:32/integer, Set:Len/binary>>.
+
+make_elem_key(Set, Elem, Actor, Dot, add) ->
+    make_elem_key(Set, Elem, Actor, Dot, 0);
+make_elem_key(Set, Elem, Actor, Dot, remove) ->
+    make_elem_key(Set, Elem, Actor, Dot, 1);
+make_elem_key(Set, Elem, Actor, Cntr, TSB) ->
+    SetLen = byte_size(Set),
+    ElemLen = byte_size(Elem),
+    ActorLen = byte_size(Actor),
+    <<SetLen:32/integer, Set:SetLen/binary,
+      ElemLen:32/integer, Elem:ElemLen/binary,
+      ActorLen:32/integer, Actor:ActorLen/binary,
+      Cntr:32/integer, TSB:1>>.

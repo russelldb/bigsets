@@ -86,8 +86,8 @@ stream_receive_loop(ReqId, Pid, Monitor, {Cnt, Ctx}) ->
             lager:debug("XX CTX XX:::~n ~p~n", [Res]),
             stream_receive_loop(ReqId, Pid, Monitor, {Cnt, Res});
         {ReqId, {ok, {elems, Res}}} ->
-            lager:debug("XX RESULT XX:::~n ~p~n", [length(Res)]),
-            stream_receive_loop(ReqId, Pid, Monitor, {Cnt+length(Res), Ctx})
+            lager:debug("XX RESULT XX:::~n ~p~n", [byte_size(Res)]),
+            stream_receive_loop(ReqId, Pid, Monitor, {Cnt+byte_size(Res), Ctx})
      %%% @TODO(rdb|wut?) why does this message get fired first for remote node?
         %% {'DOWN', Monitor, process, Pid, Info} ->
         %%     lager:debug("Got DOWN message ~p~n", [Info]),
@@ -137,9 +137,28 @@ decode_key(K) ->
 insert_member_key(Set, Elem, Actor, Cnt) ->
     sext:encode({s, Set, Elem, Actor, Cnt, <<0:1>>}).
 
+insert_member_value(Elem, Actor, Cnt) ->
+    ElemLen = byte_size(Elem),
+    ActorLen = byte_size(Actor),
+    <<ElemLen:32/integer, Elem:ElemLen/binary,
+      ActorLen:32/integer, Actor:ActorLen/binary,
+      Cnt:32/integer, 0:8/integer>>.
+
 -spec remove_member_key(set(), member(), actor(), counter()) -> key().
 remove_member_key(Set, Element, Actor, Cnt) ->
     sext:encode({s, Set, Element, Actor, Cnt, <<1:1>>}).
+
+remove_member_value(Elem, Actor, Cnt) ->
+    ElemLen = byte_size(Elem),
+    ActorLen = byte_size(Actor),
+    <<ElemLen:32/integer, Elem:ElemLen/binary,
+      ActorLen:32/integer, Actor:ActorLen/binary,
+      Cnt:32/integer, 1>>.
+
+decode_val(<<ElemLen:32/integer, Rest/binary>>) ->
+    <<Elem:ElemLen/binary, ActorLen:32/integer, Rest1/binary>> = Rest,
+    <<Actor:ActorLen/binary, Cnt:32/integer, TSB/binary>> = Rest1,
+    {Elem, Actor, Cnt, TSB}.
 
 from_bin(B) ->
     binary_to_term(B).

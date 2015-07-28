@@ -23,12 +23,13 @@
           current_actor :: binary(),
           current_cnt :: pos_integer(),
           current_tsb :: <<_:1>>,
-          elements = [],
-          prefix=undefined
+          elements = <<>>,
+          prefix=undefined,
+          prefix_len=0
         }).
 
--define(ADD, <<0:1>>).
--define(REM, <<1:1>>).
+-define(ADD, 0).
+-define(REM, 1).
 
 send(Message, Acc) ->
     #fold_acc{sender=Sender, me=Me, monitor=Mon, partition=Partition} = Acc,
@@ -46,29 +47,33 @@ new(Set, Sender, BufferSize, Partition) ->
 
 %% @doc called by eleveldb:fold per key read. Uses `throw({break,
 %% Acc})' to break out of fold when last key is read.
-fold({Key, <<>>}, Acc=#fold_acc{not_found=false}) ->
+fold({Key, Val}, Acc=#fold_acc{not_found=false, prefix=Pref, prefix_len=PrefLen}) ->
     %% an element key, we've sent the clock (nf=false)
-    %%#fold_acc{set=Set} = Acc,
-    %%    {s, Set, Element, Actor, Cnt, TSB} = bigset:decode_key(Key),
-                                                %5    add(Element, Actor, Cnt, TSB, Acc);
-    %% NOTE: this is a hack to see if encoding costs time, much
-    add(Key, Acc);
-fold({_Key, _Value}, Acc=#fold_acc{not_found=false}) ->
-    %% A clock key, so a new set, break!
-    throw({break, Acc});
-fold({Key, Value}, Acc=#fold_acc{set=Set, not_found=true}) when Value /= <<>> ->
+    %%    #fold_acc{set=Set} = Acc,
+    case Key of
+        <<Pref:PrefLen/binary, _Rest/binary>> ->
+%%            {Element, Actor, Cnt, TSB} = bigset:decode_val(Val),
+            add(Val, Acc);
+        _ ->
+            %% A clock key, so a new set, break!
+            throw({break, Acc})
+    end;
+fold({Key, Value}, Acc=#fold_acc{set=Set, not_found=true}) ->
     %% The first call for this acc, (nf=true!)
     {s, Set, clock, _ ,_, _} = bigset:decode_key(Key),
     Prefix = sext:prefix({s, Set, '_', '_', '_', '_'}),
     %% Set clock, send at once!
     Clock = bigset:from_bin(Value),
     send({clock, Clock}, Acc),
-    Acc#fold_acc{not_found=false, prefix=Prefix}.
+    Acc#fold_acc{not_found=false, prefix=Prefix, prefix_len=byte_size(Prefix)}.
 
-add(Element, Acc) ->
-    #fold_acc{elements=E, size=Size} = Acc,
-    Acc2 = Acc#fold_acc{elements=[Element | E], size=Size+1},
-    maybe_flush(Acc2).
+add(<<ElemLen:32/integer, Rest/binary>>, Acc) ->
+    <<Elem:ElemLen/binary, ActorLen:32/integer, Rest1/binary>> = Rest,
+    <<Actor:ActorLen/binary, Cnt:32/integer, TSB:8/integer>> = Rest1,
+    add(Elem, Actor, Cnt, TSB, Acc).
+    %% #fold_acc{elements=E, size=Size} = Acc,
+    %% Acc2 = Acc#fold_acc{elements=[Elem | E], size=Size+1},
+    %% maybe_flush(Acc2).
 
 %% @private leveldb compaction will do this too, but since we may
 %% always have lower `Cnt' writes for any `Actor' or a tombstone for
@@ -112,18 +117,34 @@ add(Element, Actor, Cnt, TSB, Acc=#fold_acc{}) ->
 
 %% @private add an element to the accumulator.
 store_element(Acc) ->
-    #fold_acc{current_actor=Actor,
-              current_cnt=Cnt,
+    #fold_acc{current_actor=_Actor,
+              current_cnt=_Cnt,
               current_elem=Elem,
               elements=Elements,
               size=Size} = Acc,
+    %% lager:info("elem is ~p~n", [Elem]),
+    %% lager:info("of size ~p~n", [byte_size(Elem)]),
+
+    Sz = byte_size(Elem),
+%%    BinSz = byte_size(Elements) - (4 + Sz),
+
     Elements2 = case Elements of
-                    [{Elem, Dots} | Rest] ->
-                        [{Elem, lists:umerge([{Actor, Cnt}], Dots)}
-                         | Rest];
-                    L ->
-                        [{Elem, [{Actor, Cnt}]} | L]
+%                    <<_Bin:BinSz, Sz:32/integer, Elem:Sz/binary>> ->
+                    %% Reveresed!
+                    <<Sz:32/integer, Elem:Sz/binary, _Rest/binary>> ->
+                        %% IE unchanged!
+                        Elements;
+                    Bin ->
+                        %% New element
+                        <<Sz:32/integer, Elem:Sz/binary, Bin/binary>>
                 end,
+    %% Elements2 = case Elements of
+    %%                 [{Elem, Dots} | Rest] ->
+    %%                     [{Elem, lists:umerge([{Actor, Cnt}], Dots)}
+    %%                      | Rest];
+    %%                 L ->
+    %%                     [{Elem, [{Actor, Cnt}]} | L]
+    %%             end,
     Acc#fold_acc{elements=Elements2, size=Size+1}.
 
 %% @private if the buffer is full, flush!
@@ -143,11 +164,11 @@ flush(Acc) ->
     %% acked, seems to me this gives us time to fold while message is
     %% in flight, read, acknowledged)
     #fold_acc{elements=Elements, monitor=Monitor, partition=Partition} = Acc,
-    lager:debug("flushing ~p ~p elements", [Partition, length(Elements)]),
+
     Res = receive
               {Monitor, ok} ->
-                  send({elements, lists:reverse(Elements)}, Acc),
-                  Acc#fold_acc{size=0, elements=[]};
+                  send({elements, Elements}, Acc),
+                  Acc#fold_acc{size=0, elements= <<>>};
               {Monitor, stop_fold} ->
                   lager:debug("told to stop~p~n", [Partition]),
                   close(Acc),

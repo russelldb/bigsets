@@ -16,7 +16,7 @@
         {
           partition :: pos_integer(),
           clock=undefined :: undefined | bigset_clock:clock(),
-          elements=[]:: [{binary(), riak_dt_vclock:dot()}],
+          elements= <<>>:: [{binary(), riak_dt_vclock:dot()}],
           not_found = true :: boolean(),
           done = false :: boolean()
         }).
@@ -110,12 +110,12 @@ maybe_merge_and_flush(Core) ->
         false ->
             {undefined, Core};
         {true, LeastLastElement, MergableActors} ->
-            SplitFun = split_fun(LeastLastElement),
+%%            SplitFun = split_fun(LeastLastElement),
             %% of the actors that are mergable, split their lists
             %% fold instead so that you can merge+update the Core to return in one pass!!
             {MergedActor, NewActors} =lists:foldl(fun({Partition, Actor}, {MergedSet, NewCore}) ->
                                                           #actor{elements=Elements} = Actor,
-                                                          {Merge, Keep} = lists:splitwith(SplitFun, Elements),
+                                                          {Merge, Keep} = elements_split(LeastLastElement, Elements),
                                                           {
                                                             merge([{Partition, Actor#actor{elements=Merge}}], MergedSet),
                                                             orddict:store(Partition, Actor#actor{elements=Keep}, NewCore)
@@ -131,21 +131,40 @@ split_fun(LeastLastElement) ->
             E =< LeastLastElement
     end.
 
+%% Like lists:splitwith(fun split_fun(Least), Bin) but for binaries of elements
+elements_split(Least, Bin) ->
+    SplitAt = elements_split(Least, Bin, 0),
+    <<Keep:SplitAt/binary, Merge/binary>> = Bin,
+    {Merge, Keep}.
+
+elements_split(Least, <<Sz:32/integer, Rest/binary>>, Cntr) ->
+    <<E:Sz/binary, Rest2/binary>> = Rest,
+    if E > Least ->
+            elements_split(Least, Rest2, Cntr + (4+Sz));
+       true ->
+            %% done!
+            Cntr
+    end.
+
 mergable([], LeastLast, MergeActors) ->
     {true, LeastLast, MergeActors};
 mergable([{_Partition, #actor{not_found=true}} | Rest], LeastLast, MergeActors) ->
     mergable(Rest, LeastLast, MergeActors);
-mergable([{Partition, #actor{done=false, elements=[]}} | _Rest], _Acc, _MergeActors) ->
+mergable([{Partition, #actor{done=false, elements= <<>>}} | _Rest], _Acc, _MergeActors) ->
     %% We can't do anything, some partition has no elements
     %% and is not 'done'
     lager:debug("no elements for some vnode ~p~n", [Partition]),
     false;
-mergable([{_P, #actor{done=true, elements=[]}}=Actor | Rest], LeastLast, MergeActors) ->
+mergable([{_P, #actor{done=true, elements= <<>>}}=Actor | Rest], LeastLast, MergeActors) ->
     mergable(Rest, LeastLast, [Actor | MergeActors]);
 mergable([{_P, #actor{elements=E}}=Actor | Rest], undefined, MergeActors) ->
-    mergable(Rest, lists:last(E), [Actor | MergeActors]);
+    mergable(Rest, last_element(E), [Actor | MergeActors]);
 mergable([{_P, #actor{elements=E}}=Actor | Rest], LeastLast, MergeActors) ->
-    mergable(Rest, min(LeastLast, lists:last(E)), [Actor | MergeActors]).
+    mergable(Rest, min(LeastLast, last_element(E)), [Actor | MergeActors]).
+
+last_element(<<Sz:32/integer, Rest/binary>>) ->
+    <<E:Sz/binary, _/binary>> = Rest,
+    E.
 
 %% @perform a CRDT orswot merge
 finalise(#state{actors=Actors}) ->
@@ -177,12 +196,8 @@ merge([{_P, Actor} | Rest], Mergedest) ->
     merge(Rest, M2).
 
 orswot_merge(A1, A1) ->
-    dyntrace:p(1),
-    dyntrace:p(2),
     A1;
 orswot_merge(#actor{clock=C1, elements=E}, A=#actor{clock=C2, elements=E}) ->
-    dyntrace:p(1),
-    dyntrace:p(2),
     A#actor{clock=bigset_clock:merge(C1, C2)};
 orswot_merge(A1, A2) ->
     lager:info("oops, real merge"),
@@ -277,7 +292,7 @@ set_done(Actor) ->
 
 append_elements(Actor, Elements) ->
     #actor{elements=E} = Actor,
-    Actor#actor{elements=lists:umerge(Elements, E)}.
+    Actor#actor{elements= <<E/binary, Elements/binary>>}.
 
 add_clock(Actor, Clock) ->
     Actor#actor{clock=Clock, not_found=false}.

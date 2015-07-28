@@ -299,17 +299,18 @@ write_vnode_status(Status, File) ->
 
 gen_inserts(Set, Inserts, Id, Clock) ->
     lists:foldl(fun(Element, {C, W, R}) ->
-                       %% Generate a dot per insert
-                       {{Id, Cnt}=Dot, C2} = bigset_clock:increment(Id, C),
-                       ElemKey = bigset:insert_member_key(Set, Element, Id, Cnt),
-                       {
-                         C2, %% New Clock
-                         [{put, ElemKey, <<>>} | W], %% To write
-                         [{ElemKey, Dot} | R] %% To replicate
-                       }
-               end,
-               {Clock, [], []},
-               Inserts).
+                        %% Generate a dot per insert
+                        {{Id, Cnt}=Dot, C2} = bigset_clock:increment(Id, C),
+                        ElemKey = bigset:insert_member_key(Set, Element, Id, Cnt),
+                        Val = bigset:insert_member_value(Element, Id, Cnt),
+                        {
+                          C2, %% New Clock
+                          [{put, ElemKey, Val} | W], %% To write
+                          [{ElemKey, Val, Dot} | R] %% To replicate
+                        }
+                end,
+                {Clock, [], []},
+                Inserts).
 
 %% @private gen_removes: generate the writes needed to for a delete.
 %% When there is no context, use the local, coordinating clock (we can
@@ -339,14 +340,14 @@ gen_removes(Set, Removes, Ctx) ->
                      [delta_element()]) ->
                             [level_put()].
 replica_writes(not_found, Elements) ->
-    F = fun({Key, Dot}, {Clock, Writes}) ->
+    F = fun({Key, Val, Dot}, {Clock, Writes}) ->
                 C2 = bigset_clock:strip_dots(Dot, Clock),
-                {C2, [{put, Key, <<>>} | Writes]}
+                {C2, [{put, Key, Val} | Writes]}
         end,
     lists:foldl(F, {bigset_clock:fresh(), []}, Elements);
 replica_writes({ok, BinClock}, Elements) ->
     Clock0 = bigset:from_bin(BinClock),
-    F = fun({Key, Dot}, {Clock, Writes}) ->
+    F = fun({Key, Val, Dot}, {Clock, Writes}) ->
                 case bigset_clock:seen(Clock, Dot) of
                     true ->
                         %% No op, skip it/discard
@@ -354,7 +355,7 @@ replica_writes({ok, BinClock}, Elements) ->
                     false ->
                         %% Strip the dot
                         C2 = bigset_clock:strip_dots(Dot, Clock),
-                        {C2, [{put, Key, <<>>} | Writes]}
+                        {C2, [{put, Key, Val} | Writes]}
                 end
         end,
     lists:foldl(F, {Clock0, []}, Elements).
