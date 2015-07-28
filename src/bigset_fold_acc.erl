@@ -25,7 +25,8 @@
           current_tsb :: <<_:1>>,
           elements = <<>>,
           prefix=undefined,
-          prefix_len=0
+          prefix_len=0,
+          cntr=0
         }).
 
 -define(ADD, 0).
@@ -71,8 +72,8 @@ add(<<ElemLen:32/integer, Rest/binary>>, Acc) ->
     <<Elem:ElemLen/binary, ActorLen:32/integer, Rest1/binary>> = Rest,
     <<Actor:ActorLen/binary, Cnt:32/integer, TSB:8/integer>> = Rest1,
     add(Elem, Actor, Cnt, TSB, Acc).
-    %% #fold_acc{elements=E, size=Size} = Acc,
-    %% Acc2 = Acc#fold_acc{elements=[Elem | E], size=Size+1},
+    %% #fold_acc{elements=E, size=Size, cntr=Cnt} = Acc,
+    %% Acc2 = Acc#fold_acc{elements= <<4:32/integer, Cnt:32/integer, E/binary>>, size=Size+1, cntr=Cnt+1},
     %% maybe_flush(Acc2).
 
 %% @private leveldb compaction will do this too, but since we may

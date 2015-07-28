@@ -105,7 +105,7 @@ maybe_merge_and_flush(Core) ->
     %% if any actor has a clock, but no values, and is not 'done' we
     %% can't proceed
     #state{actors=Actors} = Core,
-
+    dyntrace:p(1),
     case mergable(Actors, undefined, []) of
         false ->
             {undefined, Core};
@@ -113,6 +113,7 @@ maybe_merge_and_flush(Core) ->
 %%            SplitFun = split_fun(LeastLastElement),
             %% of the actors that are mergable, split their lists
             %% fold instead so that you can merge+update the Core to return in one pass!!
+            dyntrace:p(2),
             {MergedActor, NewActors} =lists:foldl(fun({Partition, Actor}, {MergedSet, NewCore}) ->
                                                           #actor{elements=Elements} = Actor,
                                                           {Merge, Keep} = elements_split(LeastLastElement, Elements),
@@ -123,6 +124,7 @@ maybe_merge_and_flush(Core) ->
                                                   end,
                                                   {undefined, Actors},
                                                   MergableActors),
+
             {MergedActor#actor.elements, Core#state{actors=NewActors}}
     end.
 
