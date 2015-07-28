@@ -28,7 +28,7 @@
                 preflist :: riak_core_apl:preflist(),
                 %% default to r=2 for demo/proto, defaults to
                 %% basic_quorum=false and notfound_ok=true, too
-                logic = bigset_read_core:new(1),
+                logic = bigset_read_core:new(2),
                 options=[] :: list(),
                 timer=undefined :: reference() | undefined,
                 reply = undefined,
@@ -194,18 +194,18 @@ maybe_send_results([], _State) ->
 maybe_send_results(Results, State) ->
     %% @TODO(rdb|optimise) It's a shame to have to iterate the list of
     %% elements AGAIN here to encode the per element ctx
-    %% #state{encoder=Dict} = State,
-    %% Encoded = lists:map(fun({E, Dots}) ->
-    %%                             %% We have a complete encoder dict
-    %%                             %% from the clock, so we do not need
-    %%                             %% to keep the updated state,
-    %%                             %% otherwise would use a fold
-    %%                             {DotsBin, _NewEncoder} = bigset_ctx_codec:encode_dots(Dots, Dict),
-    %%                             {E, DotsBin}
-    %%                     end,
-    %%                     Results),
-    %% send_reply({ok, {elems, Encoded}}, State).
-    send_reply({ok, {elems, Results}}, State).
+    #state{encoder=Dict} = State,
+    Encoded = lists:map(fun({E, Dots}) ->
+                                %% We have a complete encoder dict
+                                %% from the clock, so we do not need
+                                %% to keep the updated state,
+                                %% otherwise would use a fold
+                                {DotsBin, _NewEncoder} = bigset_ctx_codec:encode_dots(Dots, Dict),
+                                {E, DotsBin}
+                        end,
+                        Results),
+    send_reply({ok, {elems, Encoded}}, State).
+%%    send_reply({ok, {elems, Results}}, State).
 
 send_reply(Reply, State) ->
     #state{from=From, req_id=ReqId} = State,

@@ -119,8 +119,8 @@ add(Element, Actor, Cnt, TSB, Acc=#fold_acc{}) ->
 
 %% @private add an element to the accumulator.
 store_element(Acc) ->
-    #fold_acc{current_actor=_Actor,
-              current_cnt=_Cnt,
+    #fold_acc{current_actor=Actor,
+              current_cnt=Cnt,
               current_elem=Elem,
               elements=Elements,
               size=Size} = Acc,
@@ -141,17 +141,17 @@ store_element(Acc) ->
     %%                         <<Sz:32/integer, Elem:Sz/binary, Bin/binary>>
     %%                 end,
     Elements2 = case Elements of
-                    [Elem | _Rest] ->
-                        Elements;
-                    _ ->
-                        [Elem | Elements]
+                    %%                 [Elem | _Rest] ->
+                    %%                     Elements;
+                    %%                 _ ->
+                    %%                     [Elem | Elements]
+                    %%             end,
+                    [{Elem, Dots} | Rest] ->
+                        [{Elem, lists:umerge([{Actor, Cnt}], Dots)}
+                         | Rest];
+                    L ->
+                        [{Elem, [{Actor, Cnt}]} | L]
                 end,
-    %%  [{Elem, Dots} | Rest] ->
-    %%         [{Elem, lists:umerge([{Actor, Cnt}], Dots)}
-    %%          | Rest];
-    %%     L ->
-    %%         [{Elem, [{Actor, Cnt}]} | L]
-    %% end,
     Acc#fold_acc{elements=Elements2, size=Size+1}.
 
 %% @private if the buffer is full, flush!
