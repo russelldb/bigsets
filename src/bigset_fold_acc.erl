@@ -8,6 +8,8 @@
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
+-define(EMPTY, []).
+
 -record(fold_acc,
         {
           set_list :: list(),
@@ -23,7 +25,7 @@
           current_actor :: binary(),
           current_cnt :: pos_integer(),
           current_tsb :: <<_:1>>,
-          elements = <<>>,
+          elements = ?EMPTY,
           prefix=undefined,
           prefix_len=0
         }).
@@ -125,26 +127,31 @@ store_element(Acc) ->
     %% lager:info("elem is ~p~n", [Elem]),
     %% lager:info("of size ~p~n", [byte_size(Elem)]),
 
-    Sz = byte_size(Elem),
-%%    BinSz = byte_size(Elements) - (4 + Sz),
+    %%    Sz = byte_size(Elem),
+    %% %%    BinSz = byte_size(Elements) - (4 + Sz),
 
+    %%     Elements2 = case Elements of
+    %% %                    <<_Bin:BinSz, Sz:32/integer, Elem:Sz/binary>> ->
+    %%                     %% Reveresed!
+    %%                     <<Sz:32/integer, Elem:Sz/binary, _Rest/binary>> ->
+    %%                         %% IE unchanged!
+    %%                         Elements;
+    %%                     Bin ->
+    %%                         %% New element
+    %%                         <<Sz:32/integer, Elem:Sz/binary, Bin/binary>>
+    %%                 end,
     Elements2 = case Elements of
-%                    <<_Bin:BinSz, Sz:32/integer, Elem:Sz/binary>> ->
-                    %% Reveresed!
-                    <<Sz:32/integer, Elem:Sz/binary, _Rest/binary>> ->
-                        %% IE unchanged!
+                    [Elem | _Rest] ->
                         Elements;
-                    Bin ->
-                        %% New element
-                        <<Sz:32/integer, Elem:Sz/binary, Bin/binary>>
+                    _ ->
+                        [Elem | Elements]
                 end,
-    %% Elements2 = case Elements of
-    %%                 [{Elem, Dots} | Rest] ->
-    %%                     [{Elem, lists:umerge([{Actor, Cnt}], Dots)}
-    %%                      | Rest];
-    %%                 L ->
-    %%                     [{Elem, [{Actor, Cnt}]} | L]
-    %%             end,
+    %%  [{Elem, Dots} | Rest] ->
+    %%         [{Elem, lists:umerge([{Actor, Cnt}], Dots)}
+    %%          | Rest];
+    %%     L ->
+    %%         [{Elem, [{Actor, Cnt}]} | L]
+    %% end,
     Acc#fold_acc{elements=Elements2, size=Size+1}.
 
 %% @private if the buffer is full, flush!
@@ -168,7 +175,7 @@ flush(Acc) ->
     Res = receive
               {Monitor, ok} ->
                   send({elements, Elements}, Acc),
-                  Acc#fold_acc{size=0, elements= <<>>};
+                  Acc#fold_acc{size=0, elements=?EMPTY};
               {Monitor, stop_fold} ->
                   lager:debug("told to stop~p~n", [Partition]),
                   close(Acc),

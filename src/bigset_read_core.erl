@@ -12,11 +12,13 @@
 %% API
 -compile([export_all]).
 
+-define(EMPTY, []).
+
 -record(actor,
         {
           partition :: pos_integer(),
           clock=undefined :: undefined | bigset_clock:clock(),
-          elements= <<>>:: [{binary(), riak_dt_vclock:dot()}],
+          elements= ?EMPTY:: [{binary(), riak_dt_vclock:dot()}],
           not_found = true :: boolean(),
           done = false :: boolean()
         }).
@@ -110,12 +112,12 @@ maybe_merge_and_flush(Core) ->
         false ->
             {undefined, Core};
         {true, LeastLastElement, MergableActors} ->
-%%            SplitFun = split_fun(LeastLastElement),
+          SplitFun = split_fun(LeastLastElement),
             %% of the actors that are mergable, split their lists
             %% fold instead so that you can merge+update the Core to return in one pass!!
             {MergedActor, NewActors} =lists:foldl(fun({Partition, Actor}, {MergedSet, NewCore}) ->
                                                           #actor{elements=Elements} = Actor,
-                                                          {Merge, Keep} = elements_split(LeastLastElement, Elements),
+                                                          {Merge, Keep} = lists:splitwith(SplitFun, Elements),
                                                           {
                                                             merge([{Partition, Actor#actor{elements=Merge}}], MergedSet),
                                                             orddict:store(Partition, Actor#actor{elements=Keep}, NewCore)
@@ -150,18 +152,20 @@ mergable([], LeastLast, MergeActors) ->
     {true, LeastLast, MergeActors};
 mergable([{_Partition, #actor{not_found=true}} | Rest], LeastLast, MergeActors) ->
     mergable(Rest, LeastLast, MergeActors);
-mergable([{Partition, #actor{done=false, elements= <<>>}} | _Rest], _Acc, _MergeActors) ->
+mergable([{Partition, #actor{done=false, elements= ?EMPTY}} | _Rest], _Acc, _MergeActors) ->
     %% We can't do anything, some partition has no elements
     %% and is not 'done'
     lager:debug("no elements for some vnode ~p~n", [Partition]),
     false;
-mergable([{_P, #actor{done=true, elements= <<>>}}=Actor | Rest], LeastLast, MergeActors) ->
+mergable([{_P, #actor{done=true, elements= ?EMPTY}}=Actor | Rest], LeastLast, MergeActors) ->
     mergable(Rest, LeastLast, [Actor | MergeActors]);
 mergable([{_P, #actor{elements=E}}=Actor | Rest], undefined, MergeActors) ->
     mergable(Rest, last_element(E), [Actor | MergeActors]);
 mergable([{_P, #actor{elements=E}}=Actor | Rest], LeastLast, MergeActors) ->
     mergable(Rest, min(LeastLast, last_element(E)), [Actor | MergeActors]).
 
+last_element(L) when is_list(L) ->
+    lists:last(L);
 last_element(<<Sz:32/integer, Rest/binary>>) ->
     <<E:Sz/binary, _/binary>> = Rest,
     E.
@@ -292,7 +296,8 @@ set_done(Actor) ->
 
 append_elements(Actor, Elements) ->
     #actor{elements=E} = Actor,
-    Actor#actor{elements= <<E/binary, Elements/binary>>}.
+%%    Actor#actor{elements= <<E/binary, Elements/binary>>}.
+    Actor#actor{elements=lists:append(E, Elements)}.
 
 add_clock(Actor, Clock) ->
     Actor#actor{clock=Clock, not_found=false}.

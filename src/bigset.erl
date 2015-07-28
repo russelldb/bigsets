@@ -86,8 +86,8 @@ stream_receive_loop(ReqId, Pid, Monitor, {Cnt, Ctx}) ->
             lager:debug("XX CTX XX:::~n ~p~n", [Res]),
             stream_receive_loop(ReqId, Pid, Monitor, {Cnt, Res});
         {ReqId, {ok, {elems, Res}}} ->
-            lager:debug("XX RESULT XX:::~n ~p~n", [byte_size(Res)]),
-            stream_receive_loop(ReqId, Pid, Monitor, {Cnt+byte_size(Res), Ctx})
+            lager:debug("XX RESULT XX:::~n ~p~n", [length(Res)]),
+            stream_receive_loop(ReqId, Pid, Monitor, {Cnt+length(Res), Ctx})
      %%% @TODO(rdb|wut?) why does this message get fired first for remote node?
         %% {'DOWN', Monitor, process, Pid, Info} ->
         %%     lager:debug("Got DOWN message ~p~n", [Info]),
