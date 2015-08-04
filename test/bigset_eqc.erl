@@ -73,8 +73,7 @@ create_replica_pre(#state{replicas=Replicas}) ->
 
 %% @doc create_replica_command - Command generator
 create_replica_args(_S) ->
-    %% Don't waste time shrinking the replicas ID binaries, they 8
-    %% byte binaris as that is riak-esque.
+    %% Don't waste time shrinking the replicas ID number
     [noshrink(nat())].
 
 %% @doc create_replica_pre - don't create a replica that already
@@ -84,10 +83,9 @@ create_replica_args(_S) ->
 create_replica_pre(#state{replicas=Replicas}, [Id]) ->
     not lists:member(Id, Replicas).
 
-%% @doc create a new replica, and store a bottom orswot/orset+deferred
-%% in ets
+%% @doc create a new replica
 create_replica(Id) ->
-    ets:insert(?MODULE, {Id, {bigset_clock:fresh(), []}, riak_dt_orswot:new()}).
+    ets:insert(?MODULE, {Id, {bigset_clock:fresh(), []}, riak_dt_delta_orswot:new()}).
 
 %% @doc create_replica_next - Add the new replica ID to state
 -spec create_replica_next(S :: eqc_statem:symbolic_state(),
@@ -119,8 +117,9 @@ add(Replica, Element) ->
     [{Replica, {Clock, Keys}, ORSWOT}] = ets:lookup(?MODULE, Replica),
 
     {{Replica, Cnt}, Clock2} = bigset_clock:increment(Replica, Clock),
-    Key = {Element, Replica, ?ADD, Cnt},
-    Keys2 = lists:usort([Key | Keys]),
+    Key = bigset:insert_member_key(Element, Replica, Cnt),
+    Val = bigset:insert_member_value(Element, Replica, Cnt),
+    Keys2 = lists:ukeysort(1, [{Key, Val} | Keys]),
 
     {ok, ORSWOT2} = riak_dt_orswot:update({add, Element}, Replica, ORSWOT),
 
@@ -177,7 +176,7 @@ context_remove(From, To, Element) ->
     Ctx = riak_dt_orswot:precondition_context(FromORSWOT),
     {ok, ToORSWOT2} = riak_dt_orswot:update({remove, Element}, To, ToORSWOT, Ctx),
 
-    dump_node(From, FromBigset),
+%%    dump_node(From, FromBigset),
 
     ets:insert(?MODULE, {To, ToBigset2, ToORSWOT2}),
     RemoveKeys.
