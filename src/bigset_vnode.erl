@@ -28,6 +28,7 @@
 
 -record(state, {partition,
                 vnodeid=undefined, %% actor
+                batch_size=?DEFAULT_BATCH_SIZE,
                 db %% eleveldb handle
                }).
 
@@ -89,7 +90,7 @@ init([Partition]) ->
     PoolSize = app_helper:get_env(bigset, worker_pool_size, ?DEFAULT_WORKER_POOL),
     VnodeId = vnode_id(Partition),
     BatchSize  = app_helper:get_env(bigset, batch_size, ?DEFAULT_BATCH_SIZE),
-    {ok, #state {vnodeid=VnodeId,  partition=Partition, db=DB},
+    {ok, #state {vnodeid=VnodeId,  partition=Partition, db=DB, batch_size=BatchSize},
      [{pool, bigset_vnode_worker, PoolSize, [{batch_size, BatchSize}]}]}.
 
 %% COMMANDS(denosneold!)
@@ -149,11 +150,13 @@ handle_command(?REPLICATE_REQ{set=Set,
     riak_core_vnode:reply(Sender, {dw, Partition}),
     {noreply, State};
 handle_command(?READ_REQ{set=Set}, Sender, State) ->
-    %% read is an async fold operation
-    %% @see bigset_vnode_worker for that code.
-    #state{db=DB} = State,
-    {async, {get, DB, Set}, Sender, State}.
-
+    %% read is an async fold operation @see bigset_vnode_worker for
+    %% that code.  NOTE: changed to spawn here to test the resource
+    %% leakyness of eleveldb branch feature/streaming-folds
+    #state{db=DB, partition=Idx, batch_size=BatchSize} = State,
+    {ok, WorkerState} = bigset_vnode_worker:init_worker(Idx, [{batch_size, BatchSize}], []),
+    spawn(bigset_vnode_worker, handle_work, [{get, DB, Set}, Sender, WorkerState]),
+    {noreply, State}.
 
 decode_writes([], Acc) ->
     Acc;
