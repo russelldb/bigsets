@@ -54,12 +54,13 @@ handle_work({get, DB, Set}, Sender, State=#state{partition=Partition, batch_size
     %% clock is first key
     %% read all the way to last element
     FirstKey = bigset:clock_key(Set),
+    EndKey = bigset:end_key(Set),
     Buffer = bigset_fold_acc:new(Set, Sender, BatchSize, Partition),
 
     try
         AccFinal =
             try
-                eleveldb:fold(DB, fun bigset_fold_acc:fold/2, Buffer, [{first_key, FirstKey} | ?FOLD_OPTS])
+                eleveldb:fold(DB, fun bigset_fold_acc:fold/2, Buffer, [{first_key, FirstKey}, {end_key, EndKey} | ?FOLD_OPTS])
             catch
                 {break, Res} ->
                     Res
