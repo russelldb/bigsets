@@ -132,7 +132,8 @@ decode_key(K) ->
 %% can be removed in compaction, as can every key {s, Set, E, A, Cnt,
 %% 0} which has some key {s, Set, E, A, Cnt', 1} whenre Cnt' >=
 %% Cnt. As can every key {s, Set, E, A, Cnt, 1} where the VV portion
-%% of the set clock >= {A, Cnt}. Crazy!!
+%% of the set clock >= {A, Cnt} @TODO document how this tombstone
+%% reaping works! Crazy!!
 -spec insert_member_key(set(), member(), actor(), counter()) -> key().
 insert_member_key(Set, Elem, Actor, Cnt) ->
     sext:encode({s, Set, Elem, Actor, Cnt, <<0:1>>}).

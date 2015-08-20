@@ -21,17 +21,39 @@
 
 -module(bigset_eqc).
 
-%%-ifdef(EQC).
+-ifdef(EQC).
 -include_lib("eqc/include/eqc.hrl").
 -include_lib("eqc/include/eqc_statem.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
 -compile(export_all).
 
+-define(SWOT, riak_dt_delta_orswot).
+-define(CLOCK, bigset_clock).
+-define(SET, set).
+
 -record(state, {replicas=[], %% Actor Ids for replicas in the system
                 adds=[],      %% Elements that have been added to the set
-                delta_buffers=[] %% buffers for deltas
+                deltas=[], %% delta result of add/remove goes here for later replication/delivery
+                delivered=[], %% track which deltas actually get delivered (for stats/funsies)
+                compacted=[] %% how many keys were removed by a compaction
                }).
+
+-record(bigset, {
+          clock=?CLOCK:fresh(),
+          keys=[]
+         }).
+
+-record(replica, {
+          id,            %% The replica ID
+          bigset=#bigset{},          %% a sort of bigset type structure
+          delta_set=?SWOT:new()      %% the model delta for comparison
+         }).
+
+-record(delta, {
+          bs_delta,
+          dt_delta
+         }).
 
 %% The set of possible elements in the set
 -define(ELEMENTS, ['A', 'B', 'C', 'D', 'X', 'Y', 'Z']).
@@ -41,8 +63,8 @@
         eqc:on_output(fun(Str, Args) ->
                               io:format(user, Str, Args) end, P)).
 
--define(ADD, 1).
--define(REMOVE, 0).
+-define(ADD, 0).
+-define(REMOVE, 1).
 
 %% Key is {Element, Actor, TombstoneBit, Cnt} and we keep the set
 %% sorted and foldr over it for accumulate (as that is simpler) see
@@ -85,7 +107,7 @@ create_replica_pre(#state{replicas=Replicas}, [Id]) ->
 
 %% @doc create a new replica
 create_replica(Id) ->
-    ets:insert(?MODULE, {Id, {bigset_clock:fresh(), []}, riak_dt_delta_orswot:new()}).
+    ets:insert(?MODULE, #replica{id=Id}).
 
 %% @doc create_replica_next - Add the new replica ID to state
 -spec create_replica_next(S :: eqc_statem:symbolic_state(),
@@ -114,17 +136,19 @@ add_pre(#state{replicas=Replicas}, [Replica, _]) ->
 
 %% @doc add the `Element' to the sets at `Replica'
 add(Replica, Element) ->
-    [{Replica, {Clock, Keys}, ORSWOT}] = ets:lookup(?MODULE, Replica),
+    [#replica{id=Replica,
+              bigset=BS=#bigset{clock=Clock, keys=Keys},
+              delta_set=ORSWOT}=Rep] = ets:lookup(?MODULE, Replica),
 
     {{Replica, Cnt}, Clock2} = bigset_clock:increment(Replica, Clock),
-    Key = bigset:insert_member_key(Element, Replica, Cnt),
-    Val = bigset:insert_member_value(Element, Replica, Cnt),
-    Keys2 = lists:ukeysort(1, [{Key, Val} | Keys]),
+    Key = {Element, Replica, Cnt, ?ADD},
+    Keys2 = lists:usort([Key | Keys]),
 
-    {ok, ORSWOT2} = riak_dt_orswot:update({add, Element}, Replica, ORSWOT),
-
-    ets:insert(?MODULE, {Replica, {Clock2, Keys2}, ORSWOT2}),
-    Key.
+    {ok, Delta} = ?SWOT:delta_update({add, Element}, Replica, ORSWOT),
+    ORSWOT2 = ?SWOT:merge(Delta, ORSWOT),
+    BS2 = BS#bigset{clock=Clock2, keys=Keys2},
+    ets:insert(?MODULE, Rep#replica{bigset=BS2, delta_set=ORSWOT2}),
+    #delta{bs_delta=[Key], dt_delta=Delta}.
 
 %% @doc add_next - Add the `Element' to the `adds' list so we can
 %% select from it when we come to remove. This increases the liklihood
@@ -133,90 +157,76 @@ add(Replica, Element) ->
 -spec add_next(S :: eqc_statem:symbolic_state(),
                V :: eqc_statem:var(),
                Args :: [term()]) -> eqc_statem:symbolic_state().
-add_next(S=#state{adds=Adds, delta_buffers=DBs}, Key, [Replica, Element]) ->
-    DB = proplists:get_value(Replica, DBs, []),
+add_next(S=#state{adds=Adds, deltas=Deltas}, Delta, [_Replica, Element]) ->
     S#state{adds=lists:umerge(Adds, [Element]),
-            delta_buffers=lists:keystore(Replica, 1, DBs, {Replica, DB ++ [Key]})}.
+            deltas=[Delta | Deltas]}.
 
-
-
-%% ------ Grouped operator: context_remove
-context_remove_args(#state{replicas=Replicas, adds=Adds}) ->
+%% ------ Grouped operator: remove
+remove_args(#state{replicas=Replicas, adds=Adds}) ->
     [elements(Replicas),
-     elements(Replicas),
      elements(Adds)].
 
-%% @doc context_remove_pre - As for `remove/1'
--spec context_remove_pre(S :: eqc_statem:symbolic_state()) -> boolean().
-context_remove_pre(#state{replicas=Replicas, adds=Adds}) ->
+%% @doc remove_pre - As for `remove/1'
+-spec remove_pre(S :: eqc_statem:symbolic_state()) -> boolean().
+remove_pre(#state{replicas=Replicas, adds=Adds}) ->
     Replicas /= [] andalso Adds /= [].
 
-%% @doc context_remove_pre - Ensure correct shrinking
--spec context_remove_pre(S :: eqc_statem:symbolic_state(),
+%% @doc remove_pre - Ensure correct shrinking
+-spec remove_pre(S :: eqc_statem:symbolic_state(),
                          Args :: [term()]) -> boolean().
-context_remove_pre(#state{replicas=Replicas, adds=Adds}, [From, To, Element]) ->
-    lists:member(From, Replicas) andalso lists:member(To, Replicas)
+remove_pre(#state{replicas=Replicas, adds=Adds}, [From, Element]) ->
+    lists:member(From, Replicas)
         andalso lists:member(Element, Adds).
 
 %% @doc a dynamic precondition uses concrete state, check that the
 %% `From' set contains `Element'
-context_remove_dynamicpre(_S, [From, _To, Element]) ->
-    [{From, Bigset, _FromSwot}] = ets:lookup(?MODULE, From),
-    lists:member(Element, replica_value(Bigset)).
+remove_dynamicpre(_S, [From, Element]) ->
+    [#replica{id=From, delta_set=Set}] = ets:lookup(?MODULE, From),
+    lists:member(Element, ?SWOT:value(Set)).
 
 %% @doc perform a context remove using the context+element at `From'
-%% and removing from `To'
-context_remove(From, To, Element) ->
-    [{From, FromBigset, FromORSWOT}] = ets:lookup(?MODULE, From),
-    [{To, ToBigset, ToORSWOT}] = ets:lookup(?MODULE, To),
+%% and removing from. Don't mutate state, this is a read->remove, so just add the delta to the buffer!
+remove(From, Element) ->
+    [#replica{id=From,
+              bigset=#bigset{clock=Clock, keys=Keys},
+              delta_set=Set}] = ets:lookup(?MODULE, From),
 
-    RemoveKeys = remove_keys(Element, FromBigset),
-    ToBigset2 = write_tombstones(RemoveKeys, ToBigset),
+    RemoveKeys = remove_keys(Element, {Clock, Keys}),
 
-    Ctx = riak_dt_orswot:precondition_context(FromORSWOT),
-    {ok, ToORSWOT2} = riak_dt_orswot:update({remove, Element}, To, ToORSWOT, Ctx),
+    {ok, Delta} = ?SWOT:delta_update({remove, Element}, From, Set),
+    #delta{bs_delta=RemoveKeys, dt_delta=Delta}.
 
-%%    dump_node(From, FromBigset),
-
-    ets:insert(?MODULE, {To, ToBigset2, ToORSWOT2}),
-    RemoveKeys.
-
-%% @doc context_remove_next - Add remove keys to the replica's delta
+%% @doc remove_next - Add remove keys to the delta
 %% buffer.
--spec context_remove_next(S :: eqc_statem:symbolic_state(),
+-spec remove_next(S :: eqc_statem:symbolic_state(),
                                V :: eqc_statem:var(),
                                Args :: [term()]) -> eqc_statem:symbolic_state().
-context_remove_next(S=#state{delta_buffers=DBs}, Keys, [_From, To, _RemovedElement]) ->
-    DB = proplists:get_value(To, DBs, []),
-    S#state{delta_buffers=lists:keystore(To, 1, DBs, {To, DB ++ [Keys]})}.
+remove_next(S=#state{deltas=Deltas}, Delta, [_From, _RemovedElement]) ->
+    S#state{deltas=[Delta | Deltas]}.
 
 %% ------ Grouped operator: replicate
 %% @doc replicate_args - Choose a From and To for replication
-replicate_args(#state{replicas=Replicas, delta_buffers=DBs}) ->
-    [?LET({Rep, Buffer}, elements(DBs),
-          {Rep, Buffer}), %% @TODO(rdb) what about a subset/1 of the buffer?
+replicate_args(#state{replicas=Replicas, deltas=Deltas}) ->
+    [subset(Deltas),
      elements(Replicas)].
 
 %% @doc replicate_pre - There must be at least on replica to replicate
 -spec replicate_pre(S :: eqc_statem:symbolic_state()) -> boolean().
-replicate_pre(#state{replicas=Replicas, delta_buffers=DBs}) ->
-    Replicas /= [] andalso DBs /= [].
+replicate_pre(#state{replicas=Replicas, deltas=Deltas}) ->
+    Replicas /= [] andalso Deltas /= [].
 
 %% @doc replicate_pre - Ensure correct shrinking
 -spec replicate_pre(S :: eqc_statem:symbolic_state(),
                     Args :: [term()]) -> boolean().
-replicate_pre(#state{replicas=Replicas, delta_buffers=DBs}, [{FromRep, FromDelta}, To]) ->
-    DB = proplists:get_value(FromRep, DBs, []),
-    lists:keymember(FromRep, 1, DBs)
-        andalso (FromDelta -- DB) == []
+replicate_pre(#state{replicas=Replicas, deltas=Deltas}, [Delta, To]) ->
+    sets:is_subset(sets:from_list(Delta), sets:from_list(Deltas))
         andalso lists:member(To, Replicas).
 
-%% @doc simulate replication by merging state at `To' with state from `From'
-replicate({FromRep, FromDelta}, To) ->
-    [{FromRep, _FromBigset, FromORSWOT}] = ets:lookup(?MODULE, FromRep),
-    [{To, {ToClock, ToKeys}, ToORSWOT}] = ets:lookup(?MODULE, To),
-
-    F = fun({_Element, Actor, ?ADD, Cnt}=Key, {Clock, Writes}) ->
+%% @doc simulate replication by merging state at `To' with the delta
+replicate(Delta, To) ->
+    [#replica{id=To, delta_set=Set,
+              bigset=BS=#bigset{clock=ToClock, keys=ToKeys}}=ToRep] = ets:lookup(?MODULE, To),
+    F = fun({_Element, Actor, Cnt, ?ADD}=Key, {Clock, Writes}) ->
                 Dot = {Actor, Cnt},
                 case bigset_clock:seen(Clock, Dot) of
                     true ->
@@ -227,20 +237,82 @@ replicate({FromRep, FromDelta}, To) ->
                         C2 = bigset_clock:strip_dots(Dot, Clock),
                         {C2, [Key | Writes]}
                 end;
-           ({_Element, Actor, ?REMOVE, Cnt}=Key, {Clock, Writes}) ->
+           ({_Element, Actor, Cnt, ?REMOVE}=Key, {Clock, Writes}) ->
                 %% Tombstones are always written, compaction can merge
-                %% them out later. Or we could try a read and see if
-                %% they're needed?? But we must add the dots to the
+                %% them out later. But we must add the dots to the
                 %% clock!!
                 C2 = bigset_clock:strip_dots({Actor, Cnt}, Clock),
                 {C2, [Key | Writes]}
         end,
 
-    {NewClock, NewKeys} = lists:foldl(F, {ToClock, []}, lists:flatten(FromDelta)),
+    {BSDelta, SwotDelta} = lists:foldl(fun(#delta{bs_delta=BSD, dt_delta=DT}, {B, D}) ->
+                                               {[BSD | B],
+                                                ?SWOT:merge(DT, D)}
+                                       end,
+                                       {[], ?SWOT:new()},
+                                       Delta),
 
-    ORSWOT = riak_dt_orswot:merge(FromORSWOT, ToORSWOT),
+    {NewClock, NewKeys} = lists:foldl(F, {ToClock, []}, lists:flatten(BSDelta)),
 
-    ets:insert(?MODULE, {To, {NewClock, lists:usort(NewKeys++ToKeys)}, ORSWOT}).
+
+
+    Set2 = ?SWOT:merge(Set, SwotDelta),
+    BS2 = BS#bigset{clock=NewClock, keys=lists:usort(NewKeys++ToKeys)},
+
+%%    io:format("new keys ~p~n", [BS2]),
+
+    ets:insert(?MODULE, ToRep#replica{bigset=BS2,
+                                      delta_set=Set2}).
+
+replicate_next(S=#state{delivered=Delivered}, _, [Delta, _To]) ->
+    S#state{delivered=[Delta | Delivered]}.
+
+%% --- Operation: compact ---
+%% @doc compact_pre/1 - Precondition for generation
+-spec compact_pre(S :: eqc_statem:symbolic_state()) -> boolean().
+compact_pre(#state{replicas=Replicas}) ->
+    Replicas /= [].
+
+%% @doc compact_args - Argument generator
+-spec compact_args(S :: eqc_statem:symbolic_state()) -> eqc_gen:gen([term()]).
+compact_args(#state{replicas=Replicas}) ->
+    [elements(Replicas)].
+
+%% @doc compact_pre/2 - Precondition for compact
+-spec compact_pre(S, Args) -> boolean()
+    when S    :: eqc_statem:symbolic_state(),
+         Args :: [term()].
+compact_pre(#state{replicas=Replicas}, [Replica]) ->
+    lists:member(Replica, Replicas).
+
+%% @doc compact - Remove superseded adds, and redundant tombstones.
+compact(Replica) ->
+    %% this is the algo that level will run.  It is a lot like
+    %% `accumulate' below.  Any add of an element {E, A, C} can be
+    %% removed if there is some other add {E, A, C'} where C' > C.
+    %% Any add {E, A, C} can be removed where there is some tombstone
+    %% {E, A, C'} where C' >= C.  Any tombstone {E, A, C} can be
+    %% removed if the set clock VV portion descends the dot {A, C}.
+    [#replica{bigset=BS}=Rep] = ets:lookup(?MODULE, Replica),
+
+    {BS2, Compacted} = compact_bigset(BS),
+
+    %%    io:format("compacted ~p~n to ~p~n", [Keys, lists:usort(Keys2)]),
+    ets:insert(?MODULE, Rep#replica{bigset=BS2}),
+    Compacted.
+
+%% @doc compact_next - Next state function
+compact_next(S=#state{compacted=Compacted}, Value, [_Replica]) ->
+    S#state{compacted=[Value | Compacted]}.
+
+%% @doc compact_post - Postcondition for compact
+%% -spec compact_post(S, Args, Res) -> true | term()
+%%     when S    :: eqc_state:dynamic_state(),
+%%          Args :: [term()],
+%%          Res  :: term().
+%% compact_post(_S, [Replica], _Val) ->
+%%     bigset_value(Before) == bigset_value(After).
+
 
 %% @doc weights for commands. Don't create too many replicas, but
 %% prejudice in favour of creating more than 1. Try and balance
@@ -249,11 +321,15 @@ replicate({FromRep, FromDelta}, To) ->
 weight(S, create_replica) when length(S#state.replicas) > 2 ->
     1;
 weight(S, create_replica) when length(S#state.replicas) < 5 ->
-    4;
-weight(_S, context_remove) ->
     3;
+weight(_S, remove) ->
+    5;
 weight(_S, add) ->
     8;
+weight(_S, replicate) ->
+    7;
+weight(_S, compaction) ->
+    4;
 weight(_S, _) ->
     1.
 
@@ -265,60 +341,118 @@ prop_merge() ->
             begin
                 %% Store the state external to the statem for correct
                 %% shrinking. This is best practice.
-                ets:new(?MODULE, [named_table, set]),
-                {H, S, Res} = run_commands(?MODULE,Cmds),
-                {MergedBigset, MergedSwot} = lists:foldl(fun({_Id, Bigset, ORSWOT}, {MBS, MOS}) ->
-                                                                 {merge_bigsets(Bigset, MBS),
-                                                                  riak_dt_orswot:merge(ORSWOT, MOS)}
-                                                         end,
-                                                         {{bigset_clock:fresh(), []}, riak_dt_orswot:new()},
-                                                         ets:tab2list(?MODULE)),
+                ets:new(?MODULE, [named_table, set, {keypos, #replica.id}]),
+                {H, S=#state{delivered=Delivered0, deltas=Deltas}, Res} = run_commands(?MODULE,Cmds),
+                {MergedBigset, MergedSwot, BigsetLength} = lists:foldl(fun(#replica{bigset=Bigset, delta_set=ORSWOT}, {MBS, MOS, BSLen}) ->
+                                                                               {BigsetCompacted, _Saving} = compact_bigset(Bigset),
+                                                                               {merge_bigsets(Bigset, MBS),
+                                                                                ?SWOT:merge(ORSWOT, MOS),
+                                                                                bigset_length(BigsetCompacted, BSLen)}
+                                                                       end,
+                                                                       {#bigset{}, ?SWOT:new(), 0},
+                                                                       ets:tab2list(?MODULE)),
+
+                Delivered = lists:flatten(Delivered0),
 
                 ets:delete(?MODULE),
                 pretty_commands(?MODULE, Cmds, {H, S, Res},
                                 aggregate(command_names(Cmds),
-                                          measure(replicas, length(S#state.replicas),
-                                                  measure(elements, riak_dt_orswot:stat(element_count, MergedSwot),
-                                                          conjunction([{result, Res == ok},
-                                                                       {equal, equals(sets_equal(MergedBigset, MergedSwot), true)}
-                                                                      ])))))
+                                          aggregate(S#state.compacted,
+                                                    measure(deltas, length(Deltas),
+                                                            measure(delivered, length(Delivered),
+                                                                    measure(undelivered, length(Deltas) - length(Delivered),
+                                                                            measure(replicas, length(S#state.replicas),
+                                                                                    measure(bs_ln, BigsetLength,
+                                                                                            measure(elements, length(?SWOT:value(MergedSwot)),
+                                                                                                    conjunction([{result, Res == ok},
+                                                                                                                 {equal, equals(sets_equal(MergedBigset, MergedSwot), true)}
+                                                                                                                ]))))))))))
 
             end).
 
+compact_bigset(#bigset{clock=Clock, keys=Keys}) ->
+    Keys2 = lists:foldl(fun({E, A, _C, ?ADD}=K, [{E, A, _, ?ADD} | Tl]) ->
+                                %% A later add supersedes a prior one
+                                %% of same element by same actor
+                                [K | Tl];
+                           ({_E, _A, _C, ?ADD}=K, Acc) ->
+                                %% A new element add
+                                [K | Acc];
+                           ({_E, A, C, ?REMOVE} = K, []) ->
+                                case bigset_clock:contiguous_seen(Clock, {A, C}) of
+                                    true ->
+                                        [];
+                                    _ ->
+                                        [K]
+                                end;
+                           ({E, A, C, ?REMOVE}=K, [Hd | Tl]=Acc) ->
+                                TombstoneSeen = bigset_clock:contiguous_seen(Clock, {A, C}),
+                                case {TombstoneSeen, Hd} of
+                                    {true, {E, A, _, _}} ->
+                                        %% a tombstone that removes
+                                        %% the last element, and is
+                                        %% compacted out
+                                        Tl;
+                                    {true, _} ->
+                                        %% A tombstone that does not
+                                        %% remove the last elment, and
+                                        %% is compacted out
+                                        Acc;
+                                    {false, {E, A, _, _}} ->
+                                        %% A tombstone that removes
+                                        %% the last element, and is
+                                        %% retained
+                                        [K | Tl];
+                                    {false, Hd} ->
+                                        %% A tombstone that does not
+                                        %% remove anything and is
+                                        %% retained
+                                        [K | Acc]
+                                end
+                        end,
+                        [],
+                        Keys),
+    {#bigset{clock=Clock, keys= lists:usort(Keys2)}, length(Keys) - length(Keys2)}.
 
-merge_bigsets({Clock, Keys}, AccumulatedSet) ->
+bigset_length(#bigset{keys=Keys}, BSLen) ->
+    max(length(Keys), BSLen).
+
+merge_bigsets(Bigset, AccumulatedSet) ->
+    #bigset{clock=Clock, keys=Keys} = Bigset,
     KeepSet = accumulate(Keys),
-    merge({Clock, KeepSet}, AccumulatedSet).
+    merge(#bigset{clock=Clock, keys=KeepSet}, AccumulatedSet).
 
 %% @private the vnode fold operation, can also be the eleveldb compact
 %% operation. Full credit to Thomas Arts @quviq for this rather
-%% genious roll backwards through the list. See if there is a way to
-%% do this in level, if it helps any.
+%% ingenious roll backwards through the list.
 accumulate(Keys) ->
-    lists:foldr(fun({Elem, Actor, ?ADD, Cnt}, []) ->
+%%    io:format("acc ~p~n", [Keys]),
+    lists:foldl(fun({Elem, Actor, Cnt, ?ADD}, []) ->
+                        %% first element? add to acc
                         [{Elem, Actor, Cnt}];
-                   ({Elem, Actor, ?ADD, _Cnt}, [{Elem, Actor, _} | _]=Acc) ->
-                        Acc;
-                   ({Elem, Actor, ?ADD, Cnt}, Acc) ->
+                   ({Elem, Actor, Cnt, ?ADD}, [{Elem, Actor, _} | Acc]) ->
+                        %% Same element as already in Acc, must have
+                        %% greate counter, so replace
                         [{Elem, Actor, Cnt} | Acc];
-                   ({Elem, Actor, ?REMOVE, TSCnt}, [{Elem, Actor, AddCnt} | Acc]) when TSCnt >= AddCnt ->
-                        %% tombstones will always follow all writes
-                        %% for an actor/elem pair (if we go backwards
-                        %% through the sorted write list!) And the
-                        %% biggest Tombstone is first. Does it
-                        %% dominate the biggest ADD? If so (here!) we
-                        %% remove the add from the acc.
+                   ({Elem, Actor, Cnt, ?ADD}, Acc) ->
+                        %% New element, Add to Acc
+                        [{Elem, Actor, Cnt} | Acc];
+                   ({Elem, Actor, RemCnt, ?REMOVE}, [{Elem, Actor, AddCnt} | Acc]) when RemCnt >= AddCnt ->
+                        %% a tombstone will always follow a write for
+                        %% an actor/elem/cnt triple Does this
+                        %% tombstone dominate the biggest ADD? If so
+                        %% (here!) we remove the add from the acc.
                         Acc;
                    (_Key, Acc) ->
                         %% The TS does not remove an element from the
-                        %% add
+                        %% acc
                         Acc
                 end,
                 [],
                 Keys).
 
 %% @TODO orswot style merge, so, you know, ugly
-merge({C1, Set1}, {C2, Set2}) ->
+merge(#bigset{clock=C1, keys=Set1}, #bigset{clock=C2, keys=Set2}) ->
     Clock = bigset_clock:merge(C1, C2),
     {Set2Unique, Keep} = lists:foldl(fun({_Elem, Actor, Cnt}=Key, {RHSU, Acc}) ->
                                              case lists:member(Key, Set2) of
@@ -355,18 +489,7 @@ merge({C1, Set1}, {C2, Set2}) ->
                          Keep,
                          Set2Unique),
 
-    {Clock, InSet}.
-
-%% Helpers @doc a non-context remove of an absent element generates a
-%% precondition error, but does not mutate the state, so just ignore
-%% and return original state.
-ignore_preconerror_remove(Value, Actor, Set, Mod) ->
-    case Mod:update({remove, Value}, Actor, Set) of
-        {ok, Set2} ->
-            Set2;
-        _E ->
-            Set
-    end.
+    #bigset{clock=Clock, keys=InSet}.
 
 %% @doc common precondition and property, do SWOT and Set have the
 %% same elements?
@@ -377,24 +500,24 @@ sets_equal(Bigset, ORSWOT) ->
         true ->
             true;
         _ ->
-            {bigset_value(Bigset), '/=', riak_dt_orswot:value(ORSWOT)}
+            {bs, bigset_value(Bigset), Bigset, '/=', dt, riak_dt_orswot:value(ORSWOT), ORSWOT}
     end.
 
 %% @private the value at a single replica (no need to merge, just
 %% accumulate the keys)
-replica_value({Clock, Keys}) ->
+replica_value(#bigset{clock=Clock, keys=Keys}) ->
     Accumulated = accumulate(Keys),
-    bigset_value({Clock, Accumulated}).
+    bigset_value(#bigset{clock=Clock, keys=Accumulated}).
 
 %% The value of an accumulated bigset
-bigset_value({_Clock, Keys}) ->
-    lists:usort([E || {E, _Actor, _Cnt} <- Keys]).
+bigset_value(#bigset{keys=Keys}) ->
+    lists:usort([E || {E, _A, _C} <- Keys]).
 
 %% @private subset generator, takes a random subset of the given set,
 %% in our case a delta buffer, that some, none, or all of, will be
 %% flushed.
 subset(Set) ->
-    ?LET(Keep, vector(length(Set), bool()),
+    ?LET(Keep, vector(length(Set), bool()), %%frequency([{1, false}, {2, true}])),
          return([ X || {X, true}<-lists:zip(Set, Keep)])).
 
 %% @private the keys from some replica bigset that are to be removed
@@ -404,21 +527,6 @@ subset(Set) ->
 %% the accumulator.
 remove_keys(Element, {_Clock, Keys}) ->
     Keys2 = accumulate(Keys),
-    [{E, A, ?REMOVE, C} || {E, A, C} <- Keys2, E == Element].
+    [{E, A, C, ?REMOVE} || {E, A, C} <- Keys2, E == Element].
 
-%% @private the tombstone writes. NOTE: we add the remove element dots
-%% to our clock!
-write_tombstones(RemoveKeys, Bigset) ->
-    lists:foldl(fun({_E, A, ?REMOVE, C}=K, {Clock, Elements}) ->
-                        C2 = bigset_clock:strip_dots({A, C}, Clock),
-                        {C2, lists:usort(Elements ++ [K])}
-                end,
-                Bigset,
-                RemoveKeys).
-
-dump_node(Replica, {Clock, Elements}) ->
-    io:format("Replica ~p~n", [Replica]),
-    io:format("Clock ~p~n", [Clock]),
-    io:format("Elements ~p~n", [Elements]).
-
-%%-endif.
+-endif.
