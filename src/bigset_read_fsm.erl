@@ -205,7 +205,6 @@ maybe_send_results(Results, State) ->
                         end,
                         Results),
     send_reply({ok, {elems, Encoded}}, State).
-%%    send_reply({ok, {elems, Results}}, State).
 
 send_reply(Reply, State) ->
     #state{from=From, req_id=ReqId} = State,

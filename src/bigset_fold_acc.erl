@@ -51,10 +51,11 @@ new(Set, Sender, BufferSize, Partition) ->
 %% Acc})' to break out of fold when last key is read.
 fold({Key, Val}, Acc=#fold_acc{not_found=false, prefix=Pref, prefix_len=PrefLen}) ->
     %% an element key, we've sent the clock (nf=false)
-    %%    #fold_acc{set=Set} = Acc,
     case Key of
         <<Pref:PrefLen/binary, _Rest/binary>> ->
-%%            {Element, Actor, Cnt, TSB} = bigset:decode_val(Val),
+            %% Note: this Val + Key being duplicate is until we get a
+            %% leveldb comparator and get ditch sext encoding
+            %% altogther
             add(Val, Acc);
         _ ->
             %% A clock key, so a new set, break!
@@ -73,9 +74,6 @@ add(<<ElemLen:32/integer, Rest/binary>>, Acc) ->
     <<Elem:ElemLen/binary, ActorLen:32/integer, Rest1/binary>> = Rest,
     <<Actor:ActorLen/binary, Cnt:32/integer, TSB:8/integer>> = Rest1,
     add(Elem, Actor, Cnt, TSB, Acc).
-    %% #fold_acc{elements=E, size=Size} = Acc,
-    %% Acc2 = Acc#fold_acc{elements=[Elem | E], size=Size+1},
-    %% maybe_flush(Acc2).
 
 %% @private leveldb compaction will do this too, but since we may
 %% always have lower `Cnt' writes for any `Actor' or a tombstone for
@@ -124,28 +122,8 @@ store_element(Acc) ->
               current_elem=Elem,
               elements=Elements,
               size=Size} = Acc,
-    %% lager:info("elem is ~p~n", [Elem]),
-    %% lager:info("of size ~p~n", [byte_size(Elem)]),
-
-    %%    Sz = byte_size(Elem),
-    %% %%    BinSz = byte_size(Elements) - (4 + Sz),
-
-    %%     Elements2 = case Elements of
-    %% %                    <<_Bin:BinSz, Sz:32/integer, Elem:Sz/binary>> ->
-    %%                     %% Reveresed!
-    %%                     <<Sz:32/integer, Elem:Sz/binary, _Rest/binary>> ->
-    %%                         %% IE unchanged!
-    %%                         Elements;
-    %%                     Bin ->
-    %%                         %% New element
-    %%                         <<Sz:32/integer, Elem:Sz/binary, Bin/binary>>
-    %%                 end,
+    %% create a regular orswot from the bigset on disk
     Elements2 = case Elements of
-                    %%                 [Elem | _Rest] ->
-                    %%                     Elements;
-                    %%                 _ ->
-                    %%                     [Elem | Elements]
-                    %%             end,
                     [{Elem, Dots} | Rest] ->
                         [{Elem, lists:umerge([{Actor, Cnt}], Dots)}
                          | Rest];
@@ -200,7 +178,6 @@ finalise(Acc=#fold_acc{current_tsb=?ADD}) ->
 finalise(Acc) ->
     %% the empty set
     done(Acc).
-
 
 %% @private let the caller know we're done.
 done(Acc0) ->

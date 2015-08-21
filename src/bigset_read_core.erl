@@ -209,7 +209,9 @@ orswot_merge(A1, A2) ->
     #actor{elements=E2, clock=C2} = A2,
     Clock = bigset_clock:merge(C1, C2),
 
-    %% ugly cut and paste from before
+    %% ugly cut and paste from old riak_dt_orswot before @TODO(rdb)
+    %% this is a candidate for optimising assuming most replicas are
+    %% mostly in sync
     {E2Unique, Keeps} = lists:foldl(fun({E, Dots}, {E2Remains, Acc}) ->
                                             case lists:keytake(E, 1, E2Remains) of
                                                 false ->
