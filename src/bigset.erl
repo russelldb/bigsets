@@ -50,6 +50,27 @@ make_bigset(Set, N) ->
             some_errors
     end.
 
+-define(BATCH_SIZE, 1000).
+
+make_set(Set, N) when N < ?BATCH_SIZE ->
+    Batch = [crypto:rand_bytes(100) || _N <- lists:seq(1, N)],
+    ok = bigset_client:update(Set, Batch);
+make_set(Set, N)  ->
+    Batches = if N < ?BATCH_SIZE  -> 1;
+                 true-> N div ?BATCH_SIZE
+              end,
+    make_batch(Set, Batches).
+
+make_batch(_Set, 0) ->
+    ok;
+make_batch(Set, N) ->
+    make_batch(Set),
+    make_batch(Set, N-1).
+
+make_batch(Set) ->
+    Batch = [crypto:rand_bytes(100) || _N <- lists:seq(1, ?BATCH_SIZE)],
+    ok = bigset_client:update(Set, Batch).
+
 add() ->
     add(<<"rdb">>).
 
