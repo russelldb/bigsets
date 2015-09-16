@@ -39,9 +39,6 @@
 -define(WRITE_OPTS, [{sync, false}]).
 -define(FOLD_OPTS, [{iterator_refresh, true}]).
 
-%% added onto the key for an add so it sorts higher than a remove key
--define(ADD, <<>>).
-
 %% API
 start_vnode(I) ->
     riak_core_vnode_master:get_vnode_pid(I, ?MODULE).
