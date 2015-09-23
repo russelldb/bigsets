@@ -13,7 +13,7 @@
 -include("bigset.hrl").
 
 %% API
--export([start_link/4]).
+-export([start_link/1]).
 
 %% gen_fsm callbacks
 -export([init/1, prepare/2,  validate/2, read/2,
@@ -25,6 +25,7 @@
 -record(state, {req_id :: reqid(),
                 from :: pid(),
                 set :: binary(),
+                member :: member(),
                 preflist :: riak_core_apl:preflist(),
                 %% default to r=2 for demo/proto, defaults to
                 %% basic_quorum=false and notfound_ok=true, too
@@ -50,15 +51,23 @@
 %%%===================================================================
 %%% API
 %%%===================================================================
-
-start_link(ReqId, From, Set, Options) ->
-    gen_fsm:start_link(?MODULE, [ReqId, From, Set, Options], []).
+-spec start_link(?READ_FSM_ARGS{}) -> {ok, pid()}.
+start_link(Args=?READ_FSM_ARGS{}) ->
+    gen_fsm:start_link(?MODULE, [Args], []).
 
 %%%===================================================================
 %%% gen_fsm callbacks
 %%%===================================================================
-init([ReqId, From, Set, Options]) ->
-    {ok, prepare, #state{req_id=ReqId, from=From, set=Set, options=Options}, 0}.
+-spec init(?READ_FSM_ARGS{}) -> {ok, prepare, #state{}, 0}.
+init(Args) ->
+    State = state_from_read_fsm_args(Args),
+    {ok, prepare, State, 0}.
+
+%% copy the incoming args into the internal state
+-spec state_from_read_fsm_args(?READ_FSM_ARGS{}) -> #state{}.
+state_from_read_fsm_args(Args) ->
+    ?READ_FSM_ARGS{req_id=ReqId, from=From, set=Set, options=Options, member=Member} = Args,
+    #state{req_id=ReqId, from=From, set=Set, options=Options, member=Member}.
 
 -spec prepare(timeout, state()) -> {next_state, validate, state(), 0}.
 prepare(timeout, State) ->

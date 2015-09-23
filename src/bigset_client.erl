@@ -94,14 +94,14 @@ read(Set, Options, {?MODULE, Node}) ->
 
     Me = self(),
     ReqId = mk_reqid(),
-
+    Request = ?READ_FSM_ARGS{req_id=ReqId, from=Me, set=Set, options=Options},
 
     case node() of
         Node ->
-            bigset_read_fsm:start_link(ReqId, Me, Set, Options);
+            bigset_read_fsm:start_link(Request);
         _ ->
             proc_lib:spawn_link(Node, bigset_read_fsm, start_link,
-                                [ReqId, Me, Set, Options])
+                                [Request])
     end,
     Timeout = recv_timeout(Options),
     Res = wait_for_read(ReqId, Timeout),

@@ -11,6 +11,12 @@
 -type delta_element() :: {ElementKey :: binary(),
                           Dot :: riak_dt_vclock:dot()}.
 
+-record(bigset_read_fsm_v1, {req_id,
+                             from,
+                             set,
+                             member,
+                             options}).
+
 -record(bigset_op_req_v1, {set :: binary(), %% The name of the set
                            inserts:: [binary()], %% to be stored
                            %% to be removed, require a per element ctx at present
@@ -33,13 +39,15 @@
 -record(bigset_read_req_v1, {set}).
 
 -record(bigset_contains_req_v1, {set :: binary(), %% The set
-                                 elements :: [binary()] %% a list of elements to check membership
+                                 member :: binary() %% an element to check membership
                                 }).
 
 -define(OP, #bigset_op_req_v1).
 -define(REPLICATE_REQ, #bigset_replicate_req_v1).
 -define(READ_REQ, #bigset_read_req_v1).
 -define(CONTAINS_REQ, #bigset_contains_req_v1).
+
+-define(READ_FSM_ARGS, #bigset_read_fsm_v1).
 
 -define(DEFAULT_BATCH_SIZE, 1000).
 -define(DEFAULT_WORKER_POOL, 100).
