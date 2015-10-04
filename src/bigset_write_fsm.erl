@@ -98,6 +98,8 @@ await_coord(request_timeout, State) ->
 await_coord({dw, Partition, Ins, Dels}, State) ->
     {next_state,
      replicate,
+     %% @TODO(rdb) doesn't it make more sense just to pass on the
+     %% original removes from ?OP ?
      State#state{replicate={Ins, Dels},
                  results=[{dw, Partition}]},
      0}.

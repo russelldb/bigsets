@@ -2,10 +2,15 @@
 -behaviour(riak_core_vnode).
 -include("bigset.hrl").
 
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-endif.
+
 -export([start_vnode/1,
          coordinate/2,
          replicate/2,
          read/2,
+         contains/2,
          init/1,
          terminate/2,
          handle_command/3,
@@ -76,6 +81,14 @@ read(PrefList, Req=?READ_REQ{}) ->
                                    {fsm, undefined, self()},
                                    bigset_vnode_master).
 
+%% @doc read a subset of defined keys to detrmine membership (does set
+%% contain [x.y,z]
+contains(PrefList, Req=?CONTAINS_REQ{}) ->
+    riak_core_vnode_master:command(PrefList,
+                                   Req,
+                                   {fsm, undefined, self()},
+                                   bigset_vnode_master).
+
 init([Partition]) ->
     DataDir = integer_to_list(Partition),
     Opts =  [{create_if_missing, true},
@@ -106,7 +119,7 @@ handle_command(dump_db, _Sender, State) ->
 handle_command(?OP{set=Set, inserts=Inserts, removes=Removes, ctx=Ctx}, Sender, State) ->
     %% Store elements in the set.
     #state{db=DB, partition=Partition, vnodeid=Id} = State,
-    ClockKey = bigset:clock_key(Set),
+    ClockKey = bigset:clock_key(Set, Id),
     Clock = clock(eleveldb:get(DB, ClockKey, ?READ_OPTS)),
     {Clock2, InsertWrites, ReplicationPayload} = gen_inserts(Set, Inserts, Id, Clock),
 
@@ -122,8 +135,9 @@ handle_command(?OP{set=Set, inserts=Inserts, removes=Removes, ctx=Ctx}, Sender, 
 
     Writes = lists:append([[{put, ClockKey, BinClock}],  InsertWrites, DeleteWrites]),
     ok = eleveldb:write(DB, Writes, ?WRITE_OPTS),
-%%    lager:debug("I wrote ~p~n", [decode_writes(Writes, [])]),
-    riak_core_vnode:reply(Sender, {dw, Partition, ReplicationPayload, DeleteWrites}),
+    %% Just pass on the removes, the downstream replicas need to strip
+    %% causal information from them
+    riak_core_vnode:reply(Sender, {dw, Partition, ReplicationPayload, Removes}),
     {noreply, State};
 handle_command(?REPLICATE_REQ{set=Set,
                               inserts=Ins,
@@ -135,9 +149,10 @@ handle_command(?REPLICATE_REQ{set=Set,
     riak_core_vnode:reply(Sender, {w, Partition}),
     %% Read local clock
     ClockKey = bigset:clock_key(Set),
-    {Clock, Inserts} = replica_writes(eleveldb:get(DB, ClockKey, ?READ_OPTS), Ins),
+    {Clock, Inserts} = replica_inserts(eleveldb:get(DB, ClockKey, ?READ_OPTS), Ins),
+    {Clock1, Deletes} = replica_removes(Clock, Rems),
     BinClock = bigset:to_bin(Clock),
-    Writes = lists:append([[{put, ClockKey, BinClock}], Inserts, Rems]),
+    Writes = lists:append([[{put, ClockKey, BinClock}], Inserts, Deletes]),
     ok = eleveldb:write(DB, Writes, ?WRITE_OPTS),
 %%    lager:debug("I wrote ~p~n", [decode_writes(Writes, [])]),
     riak_core_vnode:reply(Sender, {dw, Partition}),
@@ -146,8 +161,12 @@ handle_command(?READ_REQ{set=Set}, Sender, State) ->
     %% read is an async fold operation
     %% @see bigset_vnode_worker for that code.
     #state{db=DB} = State,
-    {async, {get, DB, Set}, Sender, State}.
-
+    {async, {get, DB, Set}, Sender, State};
+handle_command(?CONTAINS_REQ{set=Set, members=Members}, Sender, State) ->
+    %% contains is a special kind of read, and an async fold operation
+    %% @see bigset_vnode_worker for that code.
+    #state{db=DB} = State,
+    {async, {subset_get, DB, Set, Members}, Sender, State}.
 
 decode_writes([], Acc) ->
     Acc;
@@ -198,9 +217,10 @@ terminate(_Reason, State) ->
     ok.
 
 %%%%% priv
-
 -spec clock(not_found | {ok, binary()}) -> bigset_clock:clock().
 clock(not_found) ->
+    %% @TODO(rdb|correct) -> is this _really_ OK, what if we _know_
+    %% (how?) the set exists, a missing clock is bad.
     bigset_clock:fresh();
 clock({ok, ClockBin}) ->
     bigset:from_bin(ClockBin).
@@ -281,8 +301,9 @@ write_vnode_status(Status, File) ->
                                                          [orddict:to_list(VersionedStatus)])).
 
 %% @private gen_inserts: generate the list of writes for an insert
-%% operation, given the elements, set, and clock
-
+%% operation, given the elements, set, and clock, also generates the
+%% replicaton payload since they are similar, but not the same, and
+%% there is no point traversing one to transform it into the other.
 -spec gen_inserts(Set :: binary(),
                   Inserts :: [binary()],
                   Actor :: binary(),
@@ -296,6 +317,14 @@ gen_inserts(Set, Inserts, Id, Clock) ->
                         %% Generate a dot per insert
                         {{Id, Cnt}=Dot, C2} = bigset_clock:increment(Id, C),
                         ElemKey = bigset:insert_member_key(Set, Element, Id, Cnt),
+                        %% @TODO(rdb|optimise) this is a temporary
+                        %% hack where we use a plain old erlang binary
+                        %% to duplicate the data in the key, the
+                        %% reason being it is way cheaper than
+                        %% sext:decoding when reading. Ideally we
+                        %% would use this format for the key and some
+                        %% custom comparator in leveldb for key
+                        %% sorting.
                         Val = bigset:insert_member_value(Element, Id, Cnt),
                         {
                           C2, %% New Clock
@@ -333,17 +362,55 @@ gen_removes(Set, Removes, Ctx, Clock) ->
     {Clock2, lists:flatten(Rems)}.
 
 %% @private generate the write set, don't write stuff you wrote
-%% already. Returns {clock, writes}
--spec replica_writes(not_found | {ok, binary()},
+%% already. This is important, not just an optimisation. Imagine some
+%% write at dot {a, 1} has been tombstoned, and the tombstone
+%% removed. Re-writing {a,1} will cause the element to re-surface. We
+%% check the dot on the write, if we already saw it, we already wrote
+%% it, do not write again! Returns {clock, writes}
+-spec replica_inserts(not_found | {ok, binary()},
                      [delta_element()]) ->
                             [level_put()].
-replica_writes(not_found, Elements) ->
+replica_inserts(not_found, Elements) ->
     F = fun({Key, Val, Dot}, {Clock, Writes}) ->
                 C2 = bigset_clock:strip_dots(Dot, Clock),
                 {C2, [{put, Key, Val} | Writes]}
         end,
     lists:foldl(F, {bigset_clock:fresh(), []}, Elements);
-replica_writes({ok, BinClock}, Elements) ->
+replica_inserts({ok, BinClock}, Elements) ->
+    Clock0 = bigset:from_bin(BinClock),
+    F = fun({Key, Val, Dot}, {Clock, Writes}) ->
+                case bigset_clock:seen(Clock, Dot) of
+                    true ->
+                        %% No op, skip it/discard
+                        {Clock, Writes};
+                    false ->
+                        %% Strip the dot
+                        C2 = bigset_clock:strip_dots(Dot, Clock),
+                        {C2, [{put, Key, Val} | Writes]}
+                end
+        end,
+    lists:foldl(F, {Clock0, []}, Elements).
+
+
+%% @private generate the tombstone write set, there is no way to tell
+%% if we wrote a tombstone before (only that we didn't!), and it is
+%% safe to re-write one as compaction will remove it already. Imagine
+%% we wrote some element at {a,1}, we have seen {a,1} and it is in the
+%% clock. The tombstone for {a,1} has the same causal information, we
+%% cannot distinguish a tombstone write from a write, so at the risk
+%% of wastefullness, re-do the write. If {a, 1} was already
+%% tombstoned, and the tombstone compacted, the next compaction will
+%% take it out again. Returns {clock, writes}
+-spec replica_removes(bigset_clock:clock(),
+                     [delta_element()]) ->
+                            [level_put()].
+replica_inserts(not_found, Elements) ->
+    F = fun({Key, Val, Dot}, {Clock, Writes}) ->
+                C2 = bigset_clock:strip_dots(Dot, Clock),
+                {C2, [{put, Key, Val} | Writes]}
+        end,
+    lists:foldl(F, {bigset_clock:fresh(), []}, Elements);
+replica_inserts({ok, BinClock}, Elements) ->
     Clock0 = bigset:from_bin(BinClock),
     F = fun({Key, Val, Dot}, {Clock, Writes}) ->
                 case bigset_clock:seen(Clock, Dot) of
@@ -394,6 +461,8 @@ gen_removes_test() ->
     %% pair {element, BinCtx::binary()} and that BinCtx can be decoded
     %% into a list of dots with a decoder created from the Ctx
     %% @todo(bad|rdb) knows about internals of clock
+
+    %% NOTE: probably b's clock, since there are no gaps for b.
     Set = <<"friends">>,
     Clock = {[{<<"a">>, 10},
               {<<"b">>, 5},

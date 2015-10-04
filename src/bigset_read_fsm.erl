@@ -25,7 +25,7 @@
 -record(state, {req_id :: reqid(),
                 from :: pid(),
                 set :: binary(),
-                member :: member(),
+                members :: [member()],
                 preflist :: riak_core_apl:preflist(),
                 %% default to r=2 for demo/proto, defaults to
                 %% basic_quorum=false and notfound_ok=true, too
@@ -66,8 +66,12 @@ init(Args) ->
 %% copy the incoming args into the internal state
 -spec state_from_read_fsm_args(?READ_FSM_ARGS{}) -> #state{}.
 state_from_read_fsm_args(Args) ->
-    ?READ_FSM_ARGS{req_id=ReqId, from=From, set=Set, options=Options, member=Member} = Args,
-    #state{req_id=ReqId, from=From, set=Set, options=Options, member=Member}.
+    ?READ_FSM_ARGS{req_id=ReqId,
+                   from=From,
+                   set=Set,
+                   options=Options,
+                   members=Members} = Args,
+    #state{req_id=ReqId, from=From, set=Set, options=Options, members=Members}.
 
 -spec prepare(timeout, state()) -> {next_state, validate, state(), 0}.
 prepare(timeout, State) ->
@@ -94,10 +98,17 @@ validate(timeout, State) ->
 -spec read(timeout, state()) -> {next_state, await_clocks, state()}.
 read(request_timeout, State) ->
     {next_state, reply, State#state{reply={error, timeout}}, 0};
-read(timeout, State) ->
+read(timeout, State=#state{members=undefined}) ->
+    %% A read request
     #state{preflist=PL, set=Set} = State,
     Req = ?READ_REQ{set=Set},
     bigset_vnode:read(PL, Req),
+
+    {next_state, await_clocks, State};
+read(timeout, State) ->
+    #state{preflist=PL, set=Set, members=Members} = State,
+    Req = ?CONTAINS_REQ{set=Set, members=Members},
+    bigset_vnode:contains(PL, Req),
 
     {next_state, await_clocks, State}.
 

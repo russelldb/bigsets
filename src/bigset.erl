@@ -128,14 +128,17 @@ bm_read(Set, N) ->
      {min, lists:min(Times)},
      {avg, lists:sum(Times) div length(Times)}].
 
-%%% codec
-clock_key(Set) ->
+%%% codec See docs on key scheme, use Actor name in clock key so
+%% AAE/replication of clocks is safe. Like a decomposed VV, an actor
+%% may only update it's own clock.
+clock_key(Set, Actor) ->
     %% Must be same length as element key!
-    sext:encode({s, Set, clock, <<>>, 0, <<0:1>>}).
+    sext:encode({s, Set, clock, Actor, 0, <<0:1>>}).
 
 end_key(Set) ->
     %% we don't know the last key for this set, but a binary that is
     %% the set name with a single 0bit appended sounds about right.
+    %% @TODO(rdb) -> how about a clock key? Talk to Erik about this
     sext:encode({s, <<Set/binary, 0:1>>, a, <<>>, 0, <<0:1>>}).
 
 %% @private decode a binary key
@@ -153,12 +156,16 @@ decode_key(K) ->
 %% can be removed in compaction, as can every key {s, Set, E, A, Cnt,
 %% 0} which has some key {s, Set, E, A, Cnt', 1} whenre Cnt' >=
 %% Cnt. As can every key {s, Set, E, A, Cnt, 1} where the VV portion
-%% of the set clock >= {A, Cnt} @TODO document how this tombstone
+%% of the set clock >= {A, Cnt} @TODO(rdb) document how this tombstone
 %% reaping works! Crazy!!
 -spec insert_member_key(set(), member(), actor(), counter()) -> key().
 insert_member_key(Set, Elem, Actor, Cnt) ->
     sext:encode({s, Set, Elem, Actor, Cnt, <<0:1>>}).
 
+%% @private see note in bigset_vnode:gen_inserts/4 about this, it is a
+%% repeat of the key information, so we don't need to sext:decode on
+%% read (sext:decode is dawg slow)
+-spec insert_member_value(member(), actor(), counter()) -> binary().
 insert_member_value(Elem, Actor, Cnt) ->
     ElemLen = byte_size(Elem),
     ActorLen = byte_size(Actor),
@@ -166,10 +173,14 @@ insert_member_value(Elem, Actor, Cnt) ->
       ActorLen:32/integer, Actor:ActorLen/binary,
       Cnt:32/integer, 0:8/integer>>.
 
+%% @private see note above on insert_member_key/4. This is a
+%% tombstone.
 -spec remove_member_key(set(), member(), actor(), counter()) -> key().
 remove_member_key(Set, Element, Actor, Cnt) ->
     sext:encode({s, Set, Element, Actor, Cnt, <<1:1>>}).
 
+%% @private as above, duplication hack to avoid sext:decode
+-spec remove_member_value(member(), actor(), counter()) -> binary().
 remove_member_value(Elem, Actor, Cnt) ->
     ElemLen = byte_size(Elem),
     ActorLen = byte_size(Actor),
@@ -177,6 +188,8 @@ remove_member_value(Elem, Actor, Cnt) ->
       ActorLen:32/integer, Actor:ActorLen/binary,
       Cnt:32/integer, 1>>.
 
+%% @private the reverse of remove|insert_member_value/3
+-spec decode_val(binary()) -> {member(), actor(), counter(), tsb()}.
 decode_val(<<ElemLen:32/integer, Rest/binary>>) ->
     <<Elem:ElemLen/binary, ActorLen:32/integer, Rest1/binary>> = Rest,
     <<Actor:ActorLen/binary, Cnt:32/integer, TSB/binary>> = Rest1,
