@@ -1,3 +1,12 @@
+%%%-------------------------------------------------------------------
+%%% @author Russell Brown <russelldb@basho.com>
+%%% @copyright (C) 2015, Russell Brown
+%%% @doc
+%%% Reading a bigset is a fold across the clock and all the elements
+%%% for the set.
+%%% @end
+%%% Created :  8 Oct 2015 by Russell Brown <russelldb@basho.com>
+%%%-------------------------------------------------------------------
 -module(bigset_fold_acc).
 
 -compile([export_all]).
@@ -12,9 +21,10 @@
 
 -record(fold_acc,
         {
-          set_list :: list(),
+          set_list :: list(), %% @TODO(rdb) What is this?
           not_found = true,
           partition :: pos_integer(),
+          actor :: binary(),
           set :: binary(),
           sender :: riak_core:sender(),
           buffer_size :: pos_integer(),
@@ -26,10 +36,14 @@
           current_cnt :: pos_integer(),
           current_tsb :: <<_:1>>,
           elements = ?EMPTY,
+          %% Used for binary matching without sext decoding
           prefix=undefined,
-          prefix_len=0
+          prefix_len=0,
+          clock_prefix=undefined,
+          clock_prefix_len=0
         }).
 
+%% Tombstone bit meaning
 -define(ADD, 0).
 -define(REM, 1).
 
@@ -37,7 +51,7 @@ send(Message, Acc) ->
     #fold_acc{sender=Sender, me=Me, monitor=Mon, partition=Partition} = Acc,
     riak_core_vnode:reply(Sender, {Message, Partition, {Me, Mon}}).
 
-new(Set, Sender, BufferSize, Partition) ->
+new(Set, Sender, BufferSize, Partition, Actor) ->
     Monitor = riak_core_vnode:monitor(Sender),
     #fold_acc{
        set_list = binary_to_list(Set),
@@ -45,30 +59,41 @@ new(Set, Sender, BufferSize, Partition) ->
        sender=Sender,
        monitor=Monitor,
        buffer_size=BufferSize-1,
-       partition=Partition}.
+       partition=Partition,
+       actor = Actor}.
 
 %% @doc called by eleveldb:fold per key read. Uses `throw({break,
 %% Acc})' to break out of fold when last key is read.
-fold({Key, Val}, Acc=#fold_acc{not_found=false, prefix=Pref, prefix_len=PrefLen}) ->
+fold({Key, Val}, Acc=#fold_acc{not_found=false}) ->
+    #fold_acc{clock_prefix=ClockPref, clock_prefix_len=ClockPrefLen,
+              prefix=Pref, prefix_len=PrefLen} = Acc,
     %% an element key, we've sent the clock (nf=false)
     case Key of
         <<Pref:PrefLen/binary, _Rest/binary>> ->
             %% Note: this Val + Key being duplicate is until we get a
-            %% leveldb comparator and get ditch sext encoding
-            %% altogther
+            %% leveldb comparator and ditch sext encoding altogther
             add(Val, Acc);
+        <<ClockPref:ClockPrefLen/binary, _Rest/binary>> ->
+            %% a clock for another actor, skip it
+            Acc;
         _ ->
-            %% A clock key, so a new set, break!
+            %% The next set's 1st clock key, a new set, break!
             throw({break, Acc})
     end;
-fold({Key, Value}, Acc=#fold_acc{set=Set, not_found=true}) ->
+fold({Key, Value}, Acc=#fold_acc{not_found=true}) ->
     %% The first call for this acc, (nf=true!)
-    {s, Set, clock, _ ,_, _} = bigset:decode_key(Key),
-    Prefix = sext:prefix({s, Set, '_', '_', '_', '_'}),
-    %% Set clock, send at once!
+    #fold_acc{set=Set, actor=Actor} = Acc,
+    {s, Set, clock, Actor ,_, _} = bigset:decode_key(Key),
+    KeyPrefix = sext:prefix({s, Set, '_', '_', '_', '_'}),
+    ClockPrefix = sext:prefix({s, Set, clock, '_', '_', '_'}),
+    %% Set clock, send at once
     Clock = bigset:from_bin(Value),
     send({clock, Clock}, Acc),
-    Acc#fold_acc{not_found=false, prefix=Prefix, prefix_len=byte_size(Prefix)}.
+    Acc#fold_acc{not_found=false,
+                 prefix=KeyPrefix,
+                 prefix_len=byte_size(KeyPrefix),
+                 clock_prefix=ClockPrefix,
+                 clock_prefix_len=byte_size(ClockPrefix)}.
 
 add(<<ElemLen:32/integer, Rest/binary>>, Acc) ->
     <<Elem:ElemLen/binary, ActorLen:32/integer, Rest1/binary>> = Rest,
@@ -85,8 +110,14 @@ add(<<ElemLen:32/integer, Rest/binary>>, Acc) ->
 %% clock) other wise some gapped write could re-surface. Imagine
 %% writes {a, 1}, {a, 2}, {a,3}. Some replica sees {a,3} and
 %% tombstones it. If the ts is compacted away, and later the replica
-%% gets {a, 1} well technicall {a, 3} removes {a, 1} but instead it
+%% gets {a, 1} well technically {a, 3} removes {a, 1} but instead it
 %% re-surfaces. @TODO(rdb) tell Paulo
+
+%% NOTE: for causal consistency with Action-At-A-Distance this all
+%% changes
+
+%% @TODO(rdb|refactor) abstract the accumulation logic for different
+%% behaviours (CC vs EC)
 add(Element, Actor, Cnt, TSB, Acc=#fold_acc{current_elem=Element,
                                             current_actor=Actor}) ->
     %% If this Element is the same as current and this actor is the
@@ -94,10 +125,9 @@ add(Element, Actor, Cnt, TSB, Acc=#fold_acc{current_elem=Element,
     %% current cnt, and tsb.
     Acc#fold_acc{current_cnt=Cnt, current_tsb=TSB};
 add(Element, Actor, Cnt, TSB, Acc=#fold_acc{current_tsb=?ADD}) ->
-
-    %% If this element or actor is different look at TSB. TSB is 0 add
-    %% {element, {Actor, Cnt} to elements and set current actor,
-    %% current cnt, current tsb
+    %% If this element or actor is different look at TSB.  TSB is an
+    %% ?ADD so store the acc's current {element, {Actor, Cnt} to
+    %% elements and set current actor, current cnt, current tsb
     Acc2 = store_element(Acc),
     Acc3 = maybe_flush(Acc2),
     Acc3#fold_acc{current_cnt=Cnt, current_elem=Element,
@@ -110,6 +140,7 @@ add(Element, NewActor, Cnt, TSB, Acc=#fold_acc{current_tsb=?REM}) ->
     Acc#fold_acc{current_cnt=Cnt, current_elem=Element,
                  current_actor=NewActor, current_tsb=TSB};
 add(Element, Actor, Cnt, TSB, Acc=#fold_acc{}) ->
+    %% Empty acc, first pass
     Acc#fold_acc{current_elem=Element,
                  current_actor=Actor,
                  current_cnt=Cnt,
@@ -147,12 +178,13 @@ flush(Acc) ->
     %% last message is acked (saves cluster resources maybe) or
     %% 2. continue fold, but do not send result until message is
     %% acked, seems to me this gives us time to fold while message is
-    %% in flight, read, acknowledged)
+    %% in flight, read, acknowledged, but still allows backpressure)
     #fold_acc{elements=Elements, monitor=Monitor, partition=Partition} = Acc,
 
     Res = receive
               {Monitor, ok} ->
-                  send({elements, Elements}, Acc),
+                  %% Results needed sorted
+                  send({elements, lists:reverse(Elements)}, Acc),
                   Acc#fold_acc{size=0, elements=?EMPTY};
               {Monitor, stop_fold} ->
                   lager:debug("told to stop~p~n", [Partition]),

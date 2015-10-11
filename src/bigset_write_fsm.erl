@@ -96,10 +96,12 @@ coordinate(timeout, State) ->
 await_coord(request_timeout, State) ->
     {next_state, reply, State#state{reply={error, timeout}}, 0};
 await_coord({dw, Partition, Ins, Dels}, State) ->
+    %% NOTE: No {w, _, _, _} response, since coord needs a dw.
     {next_state,
      replicate,
      %% @TODO(rdb) doesn't it make more sense just to pass on the
-     %% original removes from ?OP ?
+     %% original removes from ?OP ? Maybe not, if processing thme
+     %% costs time.
      State#state{replicate={Ins, Dels},
                  results=[{dw, Partition}]},
      0}.
@@ -138,6 +140,7 @@ await_reps({w, _Partition}=Res, State) ->
 -spec reply(timeout, State) -> {stop, normal, State}.
 reply(_, State) ->
     #state{from=From, req_id=ReqId, reply=Reply} = State,
+    %% NOTE: default value of reply is just 'ok'
     From ! {ReqId, Reply},
     {stop, normal, State}.
 
@@ -152,7 +155,9 @@ handle_info(request_timeout, StateName, StateData) ->
 handle_info(_Info, _StateName, State) ->
     {stop, badmsg, State}.
 
-terminate(_Reason, _StateName, _State) ->
+terminate(_Reason, _StateName, State) ->
+    #state{timer=TRef} = State,
+    _ = erlang:cancel_timer(TRef),
     ok.
 
 code_change(_OldVsn, StateName, State, _Extra) ->

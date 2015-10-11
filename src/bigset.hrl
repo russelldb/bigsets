@@ -12,18 +12,18 @@
 -type removes() :: [remove()].
 
 -type delta_element() :: {ElementKey :: binary(),
+                          ElementVal :: binary(),
                           Dot :: riak_dt_vclock:dot()}.
 
 -record(bigset_read_fsm_v1, {req_id,
                              from,
                              set,
-                             members,
                              options}).
 
 -record(bigset_op_req_v1, {set :: binary(), %% The name of the set
                            inserts:: [binary()], %% to be stored
                            %% to be removed, require a per element ctx at present
-                           removes :: removes().
+                           removes :: removes(),
                            %% dictionary of actor->index mappings for
                            %% the per element ctx The aim here is to
                            %% not send big actor IDs when a single

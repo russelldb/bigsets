@@ -49,9 +49,9 @@ dictionary_from_clock(Clock) ->
     AllActors = bigset_clock:all_nodes(Clock),
     lists:foldl(fun(Actor, Acc) ->
                         #state{cntr=Cntr, dictionary=Dict} = Acc,
-                        AID = Cntr+1,
-                        Acc#state{cntr=AID,
-                                  dictionary=?DICT:store(Actor, AID, Dict)}
+                        ActorID = Cntr+1,
+                        Acc#state{cntr=ActorID,
+                                  dictionary=?DICT:store(Actor, ActorID, Dict)}
                 end,
                 new_encoder(),
                 AllActors).
@@ -83,6 +83,7 @@ encode({Actor, Cnt}, State) ->
         end,
     {<<ID:32/integer, (binary:encode_unsigned(Cnt))/binary>>, NewState}.
 
+%% @doc binary encode the dictionary context
 dict_ctx(State) ->
     #state{dictionary=Dict} = State,
     term_to_binary(Dict).

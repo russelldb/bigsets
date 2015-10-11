@@ -25,8 +25,6 @@
 
 -define(DEFAULT_TIMEOUT, 60000).
 
--type context() :: binary() | undefined.
--type remove() :: {member(), context()}.
 -type client() ::{bigset_client,  node()}.
 
 %% Public API
@@ -172,7 +170,7 @@ wait_for_read(ReqId, Timeout, Acc) ->
             wait_for_read(ReqId, Timeout, Acc#read_acc{ctx=Ctx});
         {ReqId, {ok, {elems, Res}}} ->
             #read_acc{elements=Elems} = Acc,
-            wait_for_read(ReqId, Timeout, Acc#read_acc{elements=[Res|Elems]});
+            wait_for_read(ReqId, Timeout, Acc#read_acc{elements=lists:append(Elems, Res)});
         {ReqId, {error, Error}} ->
             {error, Error}
     after Timeout ->

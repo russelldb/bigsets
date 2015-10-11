@@ -24,8 +24,8 @@
 
 -record(state, {req_id :: reqid(),
                 from :: pid(),
-                set :: binary(),
-                members :: [member()],
+                set :: binary(), %% Set name, think bucket for riak
+                members :: [member()], %% for a contains query
                 preflist :: riak_core_apl:preflist(),
                 %% default to r=2 for demo/proto, defaults to
                 %% basic_quorum=false and notfound_ok=true, too
@@ -59,19 +59,18 @@ start_link(Args=?READ_FSM_ARGS{}) ->
 %%% gen_fsm callbacks
 %%%===================================================================
 -spec init(?READ_FSM_ARGS{}) -> {ok, prepare, #state{}, 0}.
-init(Args) ->
+init([Args]) ->
     State = state_from_read_fsm_args(Args),
     {ok, prepare, State, 0}.
 
 %% copy the incoming args into the internal state
 -spec state_from_read_fsm_args(?READ_FSM_ARGS{}) -> #state{}.
-state_from_read_fsm_args(Args) ->
+state_from_read_fsm_args(?READ_FSM_ARGS{}=Args) ->
     ?READ_FSM_ARGS{req_id=ReqId,
                    from=From,
                    set=Set,
-                   options=Options,
-                   members=Members} = Args,
-    #state{req_id=ReqId, from=From, set=Set, options=Options, members=Members}.
+                   options=Options} = Args,
+    #state{req_id=ReqId, from=From, set=Set, options=Options}.
 
 -spec prepare(timeout, state()) -> {next_state, validate, state(), 0}.
 prepare(timeout, State) ->
@@ -103,13 +102,12 @@ read(timeout, State=#state{members=undefined}) ->
     #state{preflist=PL, set=Set} = State,
     Req = ?READ_REQ{set=Set},
     bigset_vnode:read(PL, Req),
-
     {next_state, await_clocks, State};
 read(timeout, State) ->
     #state{preflist=PL, set=Set, members=Members} = State,
+    %% @TODO(rdb) implement me, please
     Req = ?CONTAINS_REQ{set=Set, members=Members},
     bigset_vnode:contains(PL, Req),
-
     {next_state, await_clocks, State}.
 
 -spec await_clocks(result(), state()) -> {next_state, reply, state(), 0} |
@@ -121,21 +119,18 @@ await_clocks({{clock, Clock}, Partition, From}, State) ->
     ack(From),
     #state{logic=Core} = State,
     Core2 = bigset_read_core:clock(Partition, Clock, Core),
-    lager:debug("ac::: got clock from ~p~n", [Partition]),
+
     case bigset_read_core:r_clocks(Core2) of
         true ->
-            lager:debug("ac::: nuff clocks, moving to elements~n"),
             {CtxClock, Core3} = bigset_read_core:get_clock(Core2),
             CtxDict = bigset_ctx_codec:new_encoder(CtxClock),
             ReplyCtx = bigset_ctx_codec:dict_ctx(CtxDict),
             send_reply({ok, {ctx, ReplyCtx}}, State),
             {next_state, await_elements, State#state{logic=Core3, encoder=CtxDict}};
         false ->
-            lager:debug("ac::: need more clocks~n"),
             {next_state, await_clocks, State#state{logic=Core2}}
     end;
 await_clocks({{elements, Elements}, Partition, From}, State) ->
-    lager:debug("ac::: got ~p elements from ~p~n", [length(Elements), Partition]),
     ack(From),
     #state{logic=Core} = State,
     {undefined, Core2} = bigset_read_core:elements(Partition, Elements, Core),
@@ -166,46 +161,33 @@ await_clocks({not_found, Partition, _From}, State) ->
                         {next_state, await_elements, state()}.
 await_elements(request_timeout, State) ->
     {next_state, reply, State#state{reply={error, timeout}}, 0};
-await_elements({not_found, Partition, _From}, State) ->
+await_elements({not_found, _Partition, _From}, State) ->
     %% quite literally do not care!
-    lager:debug("ae::: notfound  ~p~n", [Partition]),
     {next_state, await_elements, State};
-await_elements({{clock, _Clock}, Partition, From}, State) ->
+await_elements({{clock, _Clock}, _Partition, From}, State) ->
     %% Too late to take part in R, stop folding, buddy!
-    lager:debug("ae::: got clock from ~p~n", [Partition]),
     stop_fold(From),
     {next_state, await_elements, State};
 await_elements({{elements, Elements}, Partition, From}, State) ->
     ack(From),
-    lager:debug("ae::: got ~p elements from ~p~n", [length(Elements), Partition]),
     #state{logic=Core} = State,
     {Send, Core2} = bigset_read_core:elements(Partition, Elements, Core),
-    lager:debug("ae:: I can send ~p~n", [message_length(Send)]),
     maybe_send_results(Send, State),
     State2 = State#state{logic=Core2},
     {next_state, await_elements, State2};
 await_elements({done, Partition, _From}, State) ->
     #state{logic=Core} = State,
-    lager:debug("ae::: done ~p~n", [Partition]),
     Core2 = bigset_read_core:done(Partition, Core),
     State2 = State#state{logic=Core2},
     case bigset_read_core:is_done(Core2) of
         true ->
             FinalElements = bigset_read_core:finalise(Core2),
-            lager:debug("sending final elements ~p~n",[FinalElements]),
             maybe_send_results(FinalElements, State),
             Reply = done,
             {next_state, reply, State2#state{reply=Reply}, 0};
         false ->
             {next_state, await_elements, State2}
     end.
-
-message_length(undefined) ->
-    0;
-message_length(L) when is_list(L) ->
-    length(L);
-message_length(B) when is_binary(B) ->
-    byte_size(B).
 
 maybe_send_results(undefined, _State) ->
     ok;
@@ -215,15 +197,15 @@ maybe_send_results(Results, State) ->
     %% @TODO(rdb|optimise) It's a shame to have to iterate the list of
     %% elements AGAIN here to encode the per element ctx
     #state{encoder=Dict} = State,
-    Encoded = lists:map(fun({E, Dots}) ->
-                                %% We have a complete encoder dict
-                                %% from the clock, so we do not need
-                                %% to keep the updated state,
-                                %% otherwise would use a fold
-                                {DotsBin, _NewEncoder} = bigset_ctx_codec:encode_dots(Dots, Dict),
-                                {E, DotsBin}
-                        end,
-                        Results),
+    Encoded = [
+               begin
+                   %% We have a complete encoder dict
+                   %% from the clock, so we do not need
+                   %% to keep the updated state,
+                   %% otherwise would use a fold
+                   {DotsBin, _NewEncoder} = bigset_ctx_codec:encode_dots(Dots, Dict),
+                   {E, DotsBin}
+               end || {E, Dots} <- Results],
     send_reply({ok, {elems, Encoded}}, State).
 
 send_reply(Reply, State) ->
