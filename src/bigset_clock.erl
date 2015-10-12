@@ -15,6 +15,7 @@
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
+%% lazy inefficient dot cloud of dict Actor->[count()]
 -type clock() :: {riak_dt_vclock:vclock(), [riak_dt:dot()]}.
 
 -define(DICT, orddict).

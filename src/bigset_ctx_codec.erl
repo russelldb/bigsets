@@ -1,3 +1,26 @@
+%%%-------------------------------------------------------------------
+%%% @author Russell Brown <russelldb@basho.com>
+%%% @copyright (C) 2015, Russell Brown
+%%% @doc
+%%% A really basic dictionary encoder for the per-element contexts.
+%%%
+%%% In bigsets right now, we don't have causal consistency, which
+%%% means we can't send a single version vector as a covering context
+%%% for elements, and the bigst_clock with dot cloud is no use: how do
+%%% you assign a dot to a remove? At the moment we chose to send the
+%%% dots for an element with the element, call it a per-elememt
+%%% context. Dots are {actor, counter} pairs. We expect few actors,
+%%% but many elements. Rather than send some actor ID many, many
+%%% times, instead, create a simple dictionary Actor::binary() ->
+%%% ID::pos_integer(). Substitute the per-element dots {actor,
+%%% counter} with {id, counter}. Maybe this is just faffing around the
+%%% edges, and the real answer is add causal consistency so a single,
+%%% gaples version vector covers all elements. Until then, now you
+%%% know what this module does at least.
+%%%
+%%% @end Created : 29 Sep 2015 by Russell Brown
+%%% <russelldb@basho.com>
+%%% -------------------------------------------------------------------
 -module(bigset_ctx_codec).
 
 -ifdef(TEST).
@@ -7,7 +30,6 @@
 -compile([export_all]).
 
 %% Simple dictionary coding for per element context
-
 -define(DICT, orddict).
 
 -record(state, {
@@ -27,9 +49,9 @@ dictionary_from_clock(Clock) ->
     AllActors = bigset_clock:all_nodes(Clock),
     lists:foldl(fun(Actor, Acc) ->
                         #state{cntr=Cntr, dictionary=Dict} = Acc,
-                        AID = Cntr+1,
-                        Acc#state{cntr=AID,
-                                  dictionary=?DICT:store(Actor, AID, Dict)}
+                        ActorID = Cntr+1,
+                        Acc#state{cntr=ActorID,
+                                  dictionary=?DICT:store(Actor, ActorID, Dict)}
                 end,
                 new_encoder(),
                 AllActors).
@@ -61,6 +83,7 @@ encode({Actor, Cnt}, State) ->
         end,
     {<<ID:32/integer, (binary:encode_unsigned(Cnt))/binary>>, NewState}.
 
+%% @doc binary encode the dictionary context
 dict_ctx(State) ->
     #state{dictionary=Dict} = State,
     term_to_binary(Dict).

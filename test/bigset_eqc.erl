@@ -521,7 +521,7 @@ subset(Set) ->
          return([ X || {X, true}<-lists:zip(Set, Keep)])).
 
 %% @private the keys from some replica bigset that are to be removed
-%% for element. Eseentially what a client would have read if they did
+%% for element. Essentially what a client would have read if they did
 %% r=1 at replica. Equivalent to the operation {remove, Element,
 %% [dots()]} where dots are the {actor, cnt} for elements that survive
 %% the accumulator.

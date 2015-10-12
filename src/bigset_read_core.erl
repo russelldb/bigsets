@@ -2,7 +2,7 @@
 %%% @author Russell Brown <russelldb@basho.com>
 %%% @copyright (C) 2015, Russell Brown
 %%% @doc
-%%% logic for mergig a streamed set of values
+%%% logic for merging a streamed set of values
 %%% defaults to r=2, n=3, basic_quorum=false, notfound_ok=true
 %%% @end
 %%% Created :  6 May 2015 by Russell Brown <russelldb@basho.com>
@@ -18,6 +18,8 @@
         {
           partition :: pos_integer(),
           clock=undefined :: undefined | bigset_clock:clock(),
+          %% @TODO(rdb|experiment) conisder the Dot->Elem mapping as
+          %% per Carlos's DotKernel
           elements= ?EMPTY:: [{binary(), riak_dt_vclock:dot()}],
           not_found = true :: boolean(),
           done = false :: boolean()
@@ -26,11 +28,11 @@
 -record(state,
         {
           r :: pos_integer(),
-          actors=orddict:new() :: [#actor{}],
+          actors=orddict:new() :: [{pos_integer(), #actor{}}],
           clocks = 0 :: non_neg_integer(),
           not_founds = 0 :: non_neg_integer(),
           done = 0 :: non_neg_integer(),
-          clock
+          clock %% Merged clock
         }).
 
 -ifdef(TEST).
@@ -39,7 +41,6 @@
 
 new(R) ->
     #state{r=R}.
-
 
 %% @doc call when a clock is received
 clock(Partition, Clock, Core) ->
@@ -98,7 +99,7 @@ is_done(_S) ->
     false.
 
 %% @private see if we have enough results to merge a subset and send
-%% it to the client
+%% it to the client @TODO(rdb|refactor) ugly
 -spec maybe_merge_and_flush(#state{}) -> {[#actor{}], #state{}}.
 maybe_merge_and_flush(Core=#state{not_founds=NF, clocks=C, r=R}) when NF+C < R ->
     {undefined, Core};
@@ -112,7 +113,7 @@ maybe_merge_and_flush(Core) ->
         false ->
             {undefined, Core};
         {true, LeastLastElement, MergableActors} ->
-          SplitFun = split_fun(LeastLastElement),
+            SplitFun = split_fun(LeastLastElement),
             %% of the actors that are mergable, split their lists
             %% fold instead so that you can merge+update the Core to return in one pass!!
             {MergedActor, NewActors} =lists:foldl(fun({Partition, Actor}, {MergedSet, NewCore}) ->
@@ -128,8 +129,9 @@ maybe_merge_and_flush(Core) ->
             {MergedActor#actor.elements, Core#state{actors=NewActors}}
     end.
 
+%% Consider just the element, not the dots
 split_fun(LeastLastElement) ->
-    fun(E) ->
+    fun({E, _}) ->
             E =< LeastLastElement
     end.
 
@@ -148,6 +150,27 @@ elements_split(Least, <<Sz:32/integer, Rest/binary>>, Cntr) ->
             Cntr
     end.
 
+
+%% @private determine which, if any actors can be merged together to
+%% generate a result for the client.
+%%
+%% Conisder each actor
+%% -  if it's not_found, skip it
+%% - If it's done and has no more elements, use it (for it's clock)
+%% - If an actor is not done and has no elements, merging cannot
+%%   continue, we have to wait for something to merge
+%% - For any other actor (not done, has elements) take it's least
+%%   element and acculumate the min of that and the current least
+%%   element. We're taking the least last element of all the actors
+%%   elements since this defines the common subset of the set we've
+%%   received and can merge safely.
+-spec mergable(Actors :: [#actor{}],
+               LeastLastElement :: undefined | {binary(), [riak_dt:dot()]},
+               MergedAccumulator :: [#actor{}]) ->
+                      {true,
+                       LeastLastElement :: {binary(), [riak_dt:dot()]},
+                       [#actor{}]} |
+                      false.
 mergable([], LeastLast, MergeActors) ->
     {true, LeastLast, MergeActors};
 mergable([{_Partition, #actor{not_found=true}} | Rest], LeastLast, MergeActors) ->
@@ -165,8 +188,11 @@ mergable([{_P, #actor{elements=E}}=Actor | Rest], LeastLast, MergeActors) ->
     mergable(Rest, min(LeastLast, last_element(E)), [Actor | MergeActors]).
 
 last_element(L) when is_list(L) ->
-    lists:last(L);
+    {E, _Dots} = lists:last(L),
+    E;
 last_element(<<Sz:32/integer, Rest/binary>>) ->
+    %% @TODO(rdb|remove?) Throw back from using a binary for an
+    %% orswot, consider removing
     <<E:Sz/binary, _/binary>> = Rest,
     E.
 
@@ -193,29 +219,26 @@ merge_clocks([{_P, #actor{clock=Clock}} | Rest], Acc) ->
 
 merge([], Actor) ->
     Actor;
-merge([{_, Actor} | Rest], undefined) ->
+merge([{_Partition, Actor} | Rest], undefined) ->
     merge(Rest, Actor);
-merge([{_P, Actor} | Rest], Mergedest) ->
-    M2 = orswot_merge(Actor, Mergedest),
-    merge(Rest, M2).
+merge([{_Partition, Actor} | Rest], Mergedest0) ->
+    Mergedest = orswot_merge(Actor, Mergedest0),
+    merge(Rest, Mergedest).
 
-orswot_merge(A1, A1) ->
-    A1;
 orswot_merge(#actor{clock=C1, elements=E}, A=#actor{clock=C2, elements=E}) ->
     A#actor{clock=bigset_clock:merge(C1, C2)};
 orswot_merge(A1, A2) ->
-
     #actor{elements=E1, clock=C1} = A1,
     #actor{elements=E2, clock=C2} = A2,
     Clock = bigset_clock:merge(C1, C2),
 
-    %% ugly cut and paste from old riak_dt_orswot before @TODO(rdb)
-    %% this is a candidate for optimising assuming most replicas are
-    %% mostly in sync
+    %% ugly cut and paste from old riak_dt_orswot before
+    %% @TODO(rdb|refactor|optimise) this is a candidate for optimising
+    %% assuming most replicas are mostly in sync
     {E2Unique, Keeps} = lists:foldl(fun({E, Dots}, {E2Remains, Acc}) ->
                                             case lists:keytake(E, 1, E2Remains) of
                                                 false ->
-                                                    %% Only present on one side, filter
+                                                    %% Only present on E1 side, filter
                                                     %% the dots
                                                     Acc2 = filter_element(E, Dots, C2, Acc),
                                                     {E2Remains, Acc2};
@@ -227,12 +250,13 @@ orswot_merge(A1, A2) ->
                                     {E2, []},
                                     E1),
     E2Keeps = lists:foldl(fun({E, Dots}, Acc) ->
-                                  %% Only present on one side, filter
+                                  %% Only present on E2 side, filter
                                   %% the dots
                                   filter_element(E, Dots, C1, Acc)
                           end,
                           [],
                           E2Unique),
+
     Elements = lists:umerge(lists:reverse(Keeps), lists:reverse(E2Keeps)),
 
     #actor{clock=Clock, elements=Elements}.
@@ -296,9 +320,8 @@ set_done(Actor) ->
     Actor#actor{done=true}.
 
 append_elements(Actor, Elements) ->
-    #actor{elements=E} = Actor,
-%%    Actor#actor{elements= <<E/binary, Elements/binary>>}.
-    Actor#actor{elements=lists:append(E, Elements)}.
+    #actor{elements=Existing} = Actor,
+    Actor#actor{elements=lists:append(Existing, Elements)}.
 
 add_clock(Actor, Clock) ->
     Actor#actor{clock=Clock, not_found=false}.
