@@ -1,4 +1,13 @@
+%%%-------------------------------------------------------------------
+%%% @author Russell Brown <russelldb@basho.com>
+%%% @copyright (C) 2015, Russell Brown
+%%% @doc
+%%%
+%%% @end
+%%% Created : 12 Oct 2015 by Russell Brown <russelldb@basho.com>
+%%%-------------------------------------------------------------------
 -module(bigset_vnode).
+
 -behaviour(riak_core_vnode).
 -include("bigset.hrl").
 
@@ -33,6 +42,7 @@
 
 -record(state, {partition,
                 vnodeid=undefined, %% actor
+                data_dir=undefined, %% eleveldb data directory
                 db %% eleveldb handle
                }).
 
@@ -99,7 +109,7 @@ init([Partition]) ->
     PoolSize = app_helper:get_env(bigset, worker_pool_size, ?DEFAULT_WORKER_POOL),
     VnodeId = vnode_id(Partition),
     BatchSize  = app_helper:get_env(bigset, batch_size, ?DEFAULT_BATCH_SIZE),
-    {ok, #state {vnodeid=VnodeId,  partition=Partition, db=DB},
+    {ok, #state {data_dir=DataDir, vnodeid=VnodeId,  partition=Partition, db=DB},
      [{pool, bigset_vnode_worker, PoolSize, [{batch_size, BatchSize}]}]}.
 
 %% COMMANDS(denosneold!)
@@ -202,17 +212,48 @@ handoff_cancelled(State) ->
 handoff_finished(_TargetNode, State) ->
     {ok, State}.
 
-handle_handoff_data(_Data, State) ->
+handle_handoff_data(<<_KeyLen:32, _Rest/binary>>, State) ->
+    #state{db=_DB, vnodeid=_ID} = State,
+    %% @TODO(rbd|optimise) some way to buffer incoming set? Inmemory,
+    %% assuming if you crash handoff starts over anyway, right?
+    %% @TODO(rdb|assumption) verify that crashing (and therefore
+    %% losing inmemory handoff receive buffer) leads to handoff
+    %% restarting from the beginning in riak
     {reply, ok, State}.
 
-encode_handoff_item(_ObjectName, _ObjectValue) ->
-    <<>>.
+encode_handoff_item(Key, Val) ->
+    %% Just bosh together the binary key and value.
+    KeyLen = byte_size(Key),
+    <<KeyLen:32/integer, Key, Val>>.
 
 is_empty(State) ->
-    {true, State}.
+    #state{db=DB} = State,
+    case eleveldb:is_empty(DB) of
+        true ->
+            {true, State};
+        false ->
+            Size = calc_handoff_size(DB),
+            {false, Size, State}
+    end.
+
+calc_handoff_size(DB) ->
+    try {ok, <<SizeStr/binary>>} = eleveldb:status(DB, <<"leveldb.total-bytes">>),
+         list_to_integer(binary_to_list(SizeStr)) of
+        Size -> {Size, bytes}
+    catch
+        error:_ -> undefined
+    end.
 
 delete(State) ->
-    {ok, State}.
+    #state{db=DB, partition=Partition, data_dir=DataDir} = State,
+    ok = clear_vnode_id(Partition),
+    eleveldb:close(DB),
+    case eleveldb:destroy(DataDir, []) of
+        ok ->
+            {ok, State#state{db = undefined}};
+        {error, Reason} ->
+            {error, Reason, State}
+    end.
 
 handle_coverage(_Req, _KeySpaces, _Sender, State) ->
     {stop, not_implemented, State}.
@@ -313,6 +354,13 @@ write_vnode_status(Status, File) ->
     VersionedStatus = orddict:store(version, 1, Status),
     ok = riak_core_util:replace_file(File, io_lib:format("~p.",
                                                          [orddict:to_list(VersionedStatus)])).
+
+clear_vnode_id(Partition) ->
+    File = vnode_status_filename(Partition),
+    {ok, Status} = read_vnode_status(File),
+    NewStatus = orddict:erase(vnodeid, Status),
+    write_vnode_status(NewStatus, File).
+
 
 %% @private gen_inserts: generate the list of writes for an insert
 %% operation, given the elements, set, and clock, also generates the

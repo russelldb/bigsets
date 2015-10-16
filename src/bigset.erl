@@ -132,20 +132,13 @@ bm_read(Set, N) ->
 %% AAE/replication of clocks is safe. Like a decomposed VV, an actor
 %% may only update it's own clock.
 clock_key(Set, Actor) ->
-    %% Must be same length as element key!
-    sext:encode({s, Set, clock, Actor, 0, <<0:1>>}).
-
-end_key(Set) ->
-    %% we don't know the last key for this set, but a binary that is
-    %% the set name with a single 0bit appended sounds about right.
-    %% @TODO(rdb) -> how about a clock key? Talk to Erik about this
-    sext:encode({s, <<Set/binary, 0:1>>, a, <<>>, 0, <<0:1>>}).
-
-%% @private decode a binary key
-decode_key(Bin) when is_binary(Bin) ->
-    sext:decode(Bin);
-decode_key(K) ->
-    K.
+    SetLen = byte_size(Set),
+    ActorLen = byte_size(Actor),
+    <<SetLen:32/little-unsigned-integer,
+      Set:SetLen/binary,
+      0:32/little-unsigned-integer, %% Means a clock, no element!
+      ActorLen:32/little-unsigned-integer,
+      Actor:ActorLen/binary>>.
 
 %% @private sext encodes the element key so it is in order, on disk,
 %% with the other elements. Use the actor ID and counter (dot)
@@ -160,33 +153,37 @@ decode_key(K) ->
 %% reaping works! Crazy!!
 -spec insert_member_key(set(), member(), actor(), counter()) -> key().
 insert_member_key(Set, Elem, Actor, Cnt) ->
-    sext:encode({s, Set, Elem, Actor, Cnt, <<0:1>>}).
-
-%% @private see note in bigset_vnode:gen_inserts/4 about this, it is a
-%% repeat of the key information, so we don't need to sext:decode on
-%% read (sext:decode is dawg slow)
--spec insert_member_value(member(), actor(), counter()) -> binary().
-insert_member_value(Elem, Actor, Cnt) ->
-    ElemLen = byte_size(Elem),
+    SetLen = byte_size(Set),
     ActorLen = byte_size(Actor),
-    <<ElemLen:32/integer, Elem:ElemLen/binary,
-      ActorLen:32/integer, Actor:ActorLen/binary,
-      Cnt:32/integer, 0:8/integer>>.
+    ElemLen = byte_size(Elem),
+    <<SetLen:32/little-unsigned-integer,
+      Set:SetLen/binary,
+      ElemLen:32/little-unsigned-integer,
+      Elem:ElemLen/binary,
+      ActorLen:32/little-unsigned-integer,
+      Actor:ActorLen/binary,
+      Cnt:64/little-unsigned-integer,
+ %% @TODO(rdb|optimise) no need for a 32-bit int to express 0 | 1, but
+ %% the c++ comparator is beyond me!
+      0:32/integer>>.
 
 %% @private see note above on insert_member_key/4. This is a
 %% tombstone.
 -spec remove_member_key(set(), member(), actor(), counter()) -> key().
-remove_member_key(Set, Element, Actor, Cnt) ->
-    sext:encode({s, Set, Element, Actor, Cnt, <<1:1>>}).
-
-%% @private as above, duplication hack to avoid sext:decode
--spec remove_member_value(member(), actor(), counter()) -> binary().
-remove_member_value(Elem, Actor, Cnt) ->
-    ElemLen = byte_size(Elem),
+remove_member_key(Set, Elem, Actor, Cnt) ->
+    SetLen = byte_size(Set),
     ActorLen = byte_size(Actor),
-    <<ElemLen:32/integer, Elem:ElemLen/binary,
-      ActorLen:32/integer, Actor:ActorLen/binary,
-      Cnt:32/integer, 1>>.
+    ElemLen = byte_size(Elem),
+    <<SetLen:32/little-unsigned-integer,
+      Set:SetLen/binary,
+      ElemLen:32/little-unsigned-integer,
+      Elem:ElemLen/binary,
+      ActorLen:32/little-unsigned-integer,
+      Actor:ActorLen/binary,
+      Cnt:64/little-unsigned-integer,
+ %% @TODO(rdb|optimise) no need for a 32-bit int to express 0 | 1, but
+ %% the c++ comparator is beyond me!
+      1:32/integer>>.
 
 %% @private the reverse of remove|insert_member_value/3
 -spec decode_val(binary()) -> {member(), actor(), counter(), tsb()}.
