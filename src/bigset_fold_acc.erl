@@ -21,11 +21,12 @@
 
 -record(fold_acc,
         {
-          set_list :: list(), %% @TODO(rdb) What is this?
           not_found = true,
           partition :: pos_integer(),
           actor :: binary(),
           set :: binary(),
+          key_prefix :: binary(),
+          prefix_len :: pos_integer(),
           sender :: riak_core:sender(),
           buffer_size :: pos_integer(),
           size=0 :: pos_integer(),
@@ -35,12 +36,7 @@
           current_actor :: binary(),
           current_cnt :: pos_integer(),
           current_tsb :: <<_:1>>,
-          elements = ?EMPTY,
-          %% Used for binary matching without sext decoding
-          prefix=undefined,
-          prefix_len=0,
-          clock_prefix=undefined,
-          clock_prefix_len=0
+          elements = ?EMPTY
         }).
 
 %% Tombstone bit meaning
@@ -53,9 +49,11 @@ send(Message, Acc) ->
 
 new(Set, Sender, BufferSize, Partition, Actor) ->
     Monitor = riak_core_vnode:monitor(Sender),
+    Prefix = bigset:key_prefix(Set),
     #fold_acc{
-       set_list = binary_to_list(Set),
        set=Set,
+       key_prefix=Prefix,
+       prefix_len= byte_size(Prefix),
        sender=Sender,
        monitor=Monitor,
        buffer_size=BufferSize-1,
@@ -64,18 +62,16 @@ new(Set, Sender, BufferSize, Partition, Actor) ->
 
 %% @doc called by eleveldb:fold per key read. Uses `throw({break,
 %% Acc})' to break out of fold when last key is read.
-fold({Key, Val}, Acc=#fold_acc{not_found=false}) ->
-    #fold_acc{clock_prefix=ClockPref, clock_prefix_len=ClockPrefLen,
-              prefix=Pref, prefix_len=PrefLen} = Acc,
+fold({Key, _Val}, Acc=#fold_acc{not_found=false}) ->
     %% an element key, we've sent the clock (nf=false)
+    #fold_acc{set=Set, key_prefix=Pref, prefix_len=PrefLen} = Acc,
     case Key of
-        <<Pref:PrefLen/binary, _Rest/binary>> ->
-            %% Note: this Val + Key being duplicate is until we get a
-            %% leveldb comparator and ditch sext encoding altogther
-            add(Val, Acc);
-        <<ClockPref:ClockPrefLen/binary, _Rest/binary>> ->
+        <<Pref:PrefLen/binary, 0:32/little-unsigned-integer, _Rest/binary>> ->
             %% a clock for another actor, skip it
             Acc;
+        <<Pref:PrefLen/binary, _Rest/binary>> ->
+            {element, Set, Element, Actor, Cnt, TSB} = bigset:decode_key(Key),
+            add(Element, Actor, Cnt, TSB, Acc);
         _ ->
             %% The next set's 1st clock key, a new set, break!
             throw({break, Acc})
@@ -83,22 +79,17 @@ fold({Key, Val}, Acc=#fold_acc{not_found=false}) ->
 fold({Key, Value}, Acc=#fold_acc{not_found=true}) ->
     %% The first call for this acc, (nf=true!)
     #fold_acc{set=Set, actor=Actor} = Acc,
-    {s, Set, clock, Actor ,_, _} = bigset:decode_key(Key),
-    KeyPrefix = sext:prefix({s, Set, '_', '_', '_', '_'}),
-    ClockPrefix = sext:prefix({s, Set, clock, '_', '_', '_'}),
-    %% Set clock, send at once
-    Clock = bigset:from_bin(Value),
-    send({clock, Clock}, Acc),
-    Acc#fold_acc{not_found=false,
-                 prefix=KeyPrefix,
-                 prefix_len=byte_size(KeyPrefix),
-                 clock_prefix=ClockPrefix,
-                 clock_prefix_len=byte_size(ClockPrefix)}.
-
-add(<<ElemLen:32/integer, Rest/binary>>, Acc) ->
-    <<Elem:ElemLen/binary, ActorLen:32/integer, Rest1/binary>> = Rest,
-    <<Actor:ActorLen/binary, Cnt:32/integer, TSB:8/integer>> = Rest1,
-    add(Elem, Actor, Cnt, TSB, Acc).
+    %% @TODO(rdb|robustness) what if the clock key is missing and
+    %% first_key finds something else from *this* Set?
+    case bigset:decode_key(Key) of
+        {clock, Set, Actor} ->
+            %% Set clock, send at once
+            Clock = bigset:from_bin(Value),
+            send({clock, Clock}, Acc),
+            Acc#fold_acc{not_found=false};
+        _ ->
+            throw({break, Acc})
+    end.
 
 %% @private leveldb compaction will do this too, but since we may
 %% always have lower `Cnt' writes for any `Actor' or a tombstone for

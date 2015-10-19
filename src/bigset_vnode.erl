@@ -379,15 +379,7 @@ gen_inserts(Set, Inserts, Id, Clock) ->
                         %% Generate a dot per insert
                         {{Id, Cnt}=Dot, C2} = bigset_clock:increment(Id, C),
                         ElemKey = bigset:insert_member_key(Set, Element, Id, Cnt),
-                        %% @TODO(rdb|optimise) this is a temporary
-                        %% hack where we use a plain old erlang binary
-                        %% to duplicate the data in the key, the
-                        %% reason being it is way cheaper than
-                        %% sext:decoding when reading. Ideally we
-                        %% would use this format for the key and some
-                        %% custom comparator in leveldb for key
-                        %% sorting.
-                        Val = bigset:insert_member_value(Element, Id, Cnt),
+                        Val = <<>>,
                         {
                           C2, %% New Clock
                           [{put, ElemKey, Val} | W], %% To write
@@ -435,8 +427,7 @@ gen_removes(Set, Removes, Ctx, Clock) ->
                                                %% @TODO(rdb|refactor) Nested fold, sorry
                                                lists:foldl(fun({Actor, Cnt}=Dot, {C, W, R}) ->
                                                                    Key = bigset:remove_member_key(Set, E, Actor, Cnt),
-                                                                   %% @todo(rdb|optmise) same duplication as above in gen_inserts
-                                                                   Val = bigset:remove_member_value(E, Actor, Cnt),
+                                                                   Val = <<>>,
                                                                    {bigset_clock:strip_dots(Dot, C),
                                                                     [{put, Key, Val} | W], %% To write locally
                                                                     [{Key, Val, Dot} | R] %% To replicate

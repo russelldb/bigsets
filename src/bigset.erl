@@ -128,17 +128,43 @@ bm_read(Set, N) ->
      {min, lists:min(Times)},
      {avg, lists:sum(Times) div length(Times)}].
 
+%% Key prefix is the common prefix of a key for the given set
+-spec key_prefix(Set :: binary()) -> Prefix :: binary().
+key_prefix(Set) when is_binary(Set) ->
+    SetLen = byte_size(Set),
+    <<SetLen:32/little-unsigned-integer,
+      Set:SetLen/binary>>.
+
 %%% codec See docs on key scheme, use Actor name in clock key so
 %% AAE/replication of clocks is safe. Like a decomposed VV, an actor
 %% may only update it's own clock.
 clock_key(Set, Actor) ->
-    SetLen = byte_size(Set),
+    %% @TODO(rbd|optimise) This could just be <<SetLen, Set, Actor>>
+    %% with maybe a single byte 0 | 1 for clock | element key!
+    Pref = key_prefix(Set),
     ActorLen = byte_size(Actor),
-    <<SetLen:32/little-unsigned-integer,
-      Set:SetLen/binary,
+    <<Pref/binary,
       0:32/little-unsigned-integer, %% Means a clock, no element!
-      ActorLen:32/little-unsigned-integer,
+      ActorLen:32/little-unsigned-integer, %% Not needed!
       Actor:ActorLen/binary>>.
+
+%% @doc return the {Set, Actor} for a clock key
+-spec decode_key(Key :: binary()) -> {clock, set(), actor()} |
+                                     {element, set(), member(), actor(), counter(), tsb()}.
+decode_key(<<SetLen:32/little-unsigned-integer, Rest/binary>>) ->
+    <<Set:SetLen/binary, ElemLen:32/little-unsigned-integer, Bin/binary>> = Rest,
+    if ElemLen == 0 ->
+            <<32/little-unsigned-integer, Actor/binary>> = Bin,
+            {clock, Set, Actor};
+       true ->
+            <<Elem:ElemLen/binary,
+              ActorLen:32/little-unsigned-integer,
+              ActorEtc/binary>> = Bin,
+            <<Actor:ActorLen/binary,
+              Cnt:64/little-unsigned-integer,
+              TSB:32/little-unsigned-integer>> = ActorEtc,
+            {element, Set, Elem, Actor, Cnt, TSB}
+    end.
 
 %% @private sext encodes the element key so it is in order, on disk,
 %% with the other elements. Use the actor ID and counter (dot)
@@ -153,18 +179,17 @@ clock_key(Set, Actor) ->
 %% reaping works! Crazy!!
 -spec insert_member_key(set(), member(), actor(), counter()) -> key().
 insert_member_key(Set, Elem, Actor, Cnt) ->
-    SetLen = byte_size(Set),
+    Pref = key_prefix(Set),
     ActorLen = byte_size(Actor),
     ElemLen = byte_size(Elem),
-    <<SetLen:32/little-unsigned-integer,
-      Set:SetLen/binary,
+    <<Pref/binary,
       ElemLen:32/little-unsigned-integer,
       Elem:ElemLen/binary,
       ActorLen:32/little-unsigned-integer,
       Actor:ActorLen/binary,
       Cnt:64/little-unsigned-integer,
- %% @TODO(rdb|optimise) no need for a 32-bit int to express 0 | 1, but
- %% the c++ comparator is beyond me!
+ %% @TODO(rdb|optimise) no need for a 32-bit int to express 0 | 1 TSB,
+ %% but the c++ comparator is beyond me!
       0:32/integer>>.
 
 %% @private see note above on insert_member_key/4. This is a
@@ -184,13 +209,6 @@ remove_member_key(Set, Elem, Actor, Cnt) ->
  %% @TODO(rdb|optimise) no need for a 32-bit int to express 0 | 1, but
  %% the c++ comparator is beyond me!
       1:32/integer>>.
-
-%% @private the reverse of remove|insert_member_value/3
--spec decode_val(binary()) -> {member(), actor(), counter(), tsb()}.
-decode_val(<<ElemLen:32/integer, Rest/binary>>) ->
-    <<Elem:ElemLen/binary, ActorLen:32/integer, Rest1/binary>> = Rest,
-    <<Actor:ActorLen/binary, Cnt:32/integer, TSB/binary>> = Rest1,
-    {Elem, Actor, Cnt, TSB}.
 
 from_bin(B) ->
     binary_to_term(B).
