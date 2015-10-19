@@ -33,16 +33,16 @@ dump_set(Set, Id, Ref) ->
 
 dump_fun({Key, Val}, []) ->
     %% First call, clock key
-    {s, Set, clock, _, _, _} = bigset:decode_key(Key),
+    {clock, Set, _Actor} = bigset:decode_key(Key),
     Clock = bigset:from_bin(Val),
     [{Set, clock, Clock}];
-dump_fun({Key, Val}, Acc) ->
+dump_fun({Key, _Val}, Acc) ->
     case bigset:decode_key(Key) of
-        {s, _, clock, _, _, _} ->
+        {clock, _, _} ->
             %% Done, break
             throw({break, Acc});
-        _DecodedKey ->
-            [bigset:decode_val(Val) | Acc]
+        DecodedKey ->
+            [DecodedKey | Acc]
     end.
 
 dump_raw_fun() ->
@@ -74,7 +74,7 @@ get_state_data(Pid) ->
 get_level_reference(Idx) ->
     {ok, Pid} = riak_core_vnode_manager:get_vnode_pid(Idx, bigset_vnode),
     State = get_state_data(Pid),
-    {state, Idx, VnodeId, DBRef} = element(4, State),
+    {state, Idx, VnodeId, _DataDir, DBRef} = element(4, State),
     {Idx, VnodeId, DBRef}.
 
 dump_stats(Ref) ->

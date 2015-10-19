@@ -103,7 +103,8 @@ init([Partition]) ->
     DataDir = integer_to_list(Partition),
     Opts =  [{create_if_missing, true},
              {write_buffer_size, 1024*1024},
-             {max_open_files, 20}],
+             {max_open_files, 20},
+             {bigsets, true}],
     {ok, DB} = open_db(DataDir, Opts),
     %% @TODO(rdb|question) Maybe this pool should be BIIIIG for many gets
     PoolSize = app_helper:get_env(bigset, worker_pool_size, ?DEFAULT_WORKER_POOL),

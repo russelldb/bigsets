@@ -125,13 +125,15 @@ stream_read(Set, Options) ->
 stream_read(Set, Options, {?MODULE, Node}) ->
     Me = self(),
     ReqId = mk_reqid(),
+    Request = ?READ_FSM_ARGS{req_id=ReqId, from=Me, set=Set, options=Options},
+
     Pid = case node() of
               Node ->
-                  {ok, P} = bigset_read_fsm:start_link(ReqId, Me, Set, Options),
+                  {ok, P} = bigset_read_fsm:start_link(Request),
                   P;
               _ ->
                   proc_lib:spawn_link(Node, bigset_read_fsm, start_link,
-                                    [ReqId, Me, Set, Options])
+                                    [Request])
           end,
     {ok, ReqId, Pid}.
 

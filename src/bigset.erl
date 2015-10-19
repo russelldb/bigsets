@@ -154,7 +154,7 @@ clock_key(Set, Actor) ->
 decode_key(<<SetLen:32/little-unsigned-integer, Rest/binary>>) ->
     <<Set:SetLen/binary, ElemLen:32/little-unsigned-integer, Bin/binary>> = Rest,
     if ElemLen == 0 ->
-            <<32/little-unsigned-integer, Actor/binary>> = Bin,
+            <<_AL:32/little-unsigned-integer, Actor/binary>> = Bin,
             {clock, Set, Actor};
        true ->
             <<Elem:ElemLen/binary,
