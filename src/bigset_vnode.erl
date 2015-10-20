@@ -148,8 +148,8 @@ handle_command(?OP{set=Set, inserts=Inserts, removes=Removes, ctx=Ctx}, Sender, 
     %% without a coordinator, how cool!)
 
     BinClock = bigset:to_bin(Clock3),
-
-    Writes = lists:append([[{put, ClockKey, BinClock}],  InsertWrites, DeleteWrites]),
+    EndKey = bigset:end_key(Set),
+    Writes = lists:append([[{put, ClockKey, BinClock}, {put, EndKey, <<>>}],  InsertWrites, DeleteWrites]),
     ok = eleveldb:write(DB, Writes, ?WRITE_OPTS),
 
     %% Why the replication payload as is? We send the dot un-binaried
@@ -174,7 +174,8 @@ handle_command(?REPLICATE_REQ{set=Set,
     {Clock, Inserts} = replica_inserts(eleveldb:get(DB, ClockKey, ?READ_OPTS), Ins),
     {Clock1, Deletes} = replica_removes(Clock, Rems),
     BinClock = bigset:to_bin(Clock1),
-    Writes = lists:append([[{put, ClockKey, BinClock}], Inserts, Deletes]),
+    EndKey = bigset:end_key(Set),
+    Writes = lists:append([[{put, ClockKey, BinClock}, {put, EndKey, <<>>}], Inserts, Deletes]),
     ok = eleveldb:write(DB, Writes, ?WRITE_OPTS),
     riak_core_vnode:reply(Sender, {dw, Partition}),
     {noreply, State};
