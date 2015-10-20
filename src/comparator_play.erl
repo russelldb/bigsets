@@ -66,22 +66,29 @@ test() ->
 
 key_vals() ->
     S1 = <<"set1">>,
+    S2 = <<"z2">>,
     A1 = <<"actor1">>,
     A2 = <<"zor2">>,
     A0 = <<"000actor0">>,
     E1 = <<"element1">>,
     E2 = <<"znt2">>,
     E0 = <<"0000__kjlkjkjj lngelement3">>,
+
     [{bigset:clock_key(S1, A2), <<"clock key s1 a2">>},
      {bigset:insert_member_key(S1, E1, A1, 5), <<" S1, E1, A1, 5 Add">>},
      {bigset:insert_member_key(S1, E1, A1, 1), <<" S1, E1, A1, 1 Add">>},
+     {bigset:clock_key(S2, A2), <<"clock key s2 a2">>},
+     {bigset:end_key(S2), <<"end key s2">>},
      {bigset:clock_key(S1, A1), <<"clock key s1 a1">>},
-
+     {bigset:end_key(S1), <<"end key s1">>},
      {bigset:insert_member_key(S1, E2, A0, 13), <<" S1, E2, A0, 13 Add">>},
      {bigset:remove_member_key(S1, E0, A2, 9), <<" S1, E0, A2, 9 rem">>},
+     {bigset:clock_key(S2, A0), <<"clock key s2 a0">>},
      {bigset:insert_member_key(S1, E2, A1, 1), <<" S1, E2, A1, 1 Add">>},
+     {bigset:insert_member_key(S2, E2, A1, 1), <<" S2, E2, A1, 1 Add">>},
      {bigset:insert_member_key(S1, E1, A0, 22), <<" S1, E1, A0, 22 Add">>},
      {bigset:insert_member_key(S1, E0, A2, 9), <<" S1, E0, A2, 9 Add">>},
+     {bigset:insert_member_key(S2, E0, A2, 9), <<" S2, E0, A2, 9 Add">>},
      {bigset:remove_member_key(S1, E0, A2, 8), <<" S1, E0, A2, 8 Rem">>}].
 
     %% Actor1 = <<"actor1">>,

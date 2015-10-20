@@ -142,29 +142,42 @@ clock_key(Set, Actor) ->
     %% @TODO(rbd|optimise) This could just be <<SetLen, Set, Actor>>
     %% with maybe a single byte 0 | 1 for clock | element key!
     Pref = key_prefix(Set),
-    ActorLen = byte_size(Actor),
     <<Pref/binary,
-      0:32/little-unsigned-integer, %% Means a clock, no element!
-      ActorLen:32/little-unsigned-integer, %% Not needed!
-      Actor:ActorLen/binary>>.
+      $c, %% means clock
+      Actor/binary>>.
 
-%% @doc return the {Set, Actor} for a clock key
+end_key(Set) ->
+    %% an explicit end key that always sorts lowest
+    %% written _every write_??
+    Pref = key_prefix(Set),
+    <<Pref/binary,
+      $z %% means end key
+    >>.
+
+%% @doc
 -spec decode_key(Key :: binary()) -> {clock, set(), actor()} |
-                                     {element, set(), member(), actor(), counter(), tsb()}.
-decode_key(<<SetLen:32/little-unsigned-integer, Rest/binary>>) ->
-    <<Set:SetLen/binary, ElemLen:32/little-unsigned-integer, Bin/binary>> = Rest,
-    if ElemLen == 0 ->
-            <<_AL:32/little-unsigned-integer, Actor/binary>> = Bin,
-            {clock, Set, Actor};
-       true ->
-            <<Elem:ElemLen/binary,
+                                     {element, set(), member(), actor(), counter(), tsb()} |
+                                     {end_key, set()}.
+decode_key(<<SetLen:32/little-unsigned-integer, Bin/binary>>) ->
+    <<Set:SetLen/binary, Rest/binary>> = Bin,
+    decode_key(Rest, Set).
+
+
+decode_key(<<$c, Actor/binary>>, Set) ->
+    {clock, Set, Actor};
+decode_key(<<$e, Elem/binary>>, Set) ->
+    decode_element(Elem, Set);
+decode_key(<<$z>>, Set) ->
+    {end_key, Set}.
+
+decode_element(<<ElemLen:32/little-unsigned-integer, Rest/binary>>, Set) ->
+    <<Elem:ElemLen/binary,
               ActorLen:32/little-unsigned-integer,
-              ActorEtc/binary>> = Bin,
+              ActorEtc/binary>> = Rest,
             <<Actor:ActorLen/binary,
               Cnt:64/little-unsigned-integer,
-              TSB:32/little-unsigned-integer>> = ActorEtc,
-            {element, Set, Elem, Actor, Cnt, TSB}
-    end.
+              TSB>> = ActorEtc,
+    {element, Set, Elem, Actor, Cnt, TSB}.
 
 %% @private sext encodes the element key so it is in order, on disk,
 %% with the other elements. Use the actor ID and counter (dot)
@@ -183,6 +196,7 @@ insert_member_key(Set, Elem, Actor, Cnt) ->
     ActorLen = byte_size(Actor),
     ElemLen = byte_size(Elem),
     <<Pref/binary,
+      $e, %% means an element
       ElemLen:32/little-unsigned-integer,
       Elem:ElemLen/binary,
       ActorLen:32/little-unsigned-integer,
@@ -190,25 +204,27 @@ insert_member_key(Set, Elem, Actor, Cnt) ->
       Cnt:64/little-unsigned-integer,
  %% @TODO(rdb|optimise) no need for a 32-bit int to express 0 | 1 TSB,
  %% but the c++ comparator is beyond me!
-      0:32/integer>>.
+      $a %% means an add
+    >>.
 
 %% @private see note above on insert_member_key/4. This is a
 %% tombstone.
 -spec remove_member_key(set(), member(), actor(), counter()) -> key().
 remove_member_key(Set, Elem, Actor, Cnt) ->
-    SetLen = byte_size(Set),
+    Pref = key_prefix(Set),
     ActorLen = byte_size(Actor),
     ElemLen = byte_size(Elem),
-    <<SetLen:32/little-unsigned-integer,
-      Set:SetLen/binary,
+    <<Pref/binary,
+      $e, %% means element
       ElemLen:32/little-unsigned-integer,
       Elem:ElemLen/binary,
       ActorLen:32/little-unsigned-integer,
       Actor:ActorLen/binary,
       Cnt:64/little-unsigned-integer,
- %% @TODO(rdb|optimise) no need for a 32-bit int to express 0 | 1, but
- %% the c++ comparator is beyond me!
-      1:32/integer>>.
+      %% @TODO(rdb|optimise) no need for a 32-bit int to express 0 | 1, but
+      %% the c++ comparator is beyond me!
+      $r %% means a remove
+    >>.
 
 from_bin(B) ->
     binary_to_term(B).

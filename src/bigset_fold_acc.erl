@@ -39,9 +39,9 @@
           elements = ?EMPTY
         }).
 
-%% Tombstone bit meaning
--define(ADD, 0).
--define(REM, 1).
+%% Tombstone byte meaning
+-define(ADD, $a).
+-define(REM, $r).
 
 send(Message, Acc) ->
     #fold_acc{sender=Sender, me=Me, monitor=Mon, partition=Partition} = Acc,
@@ -66,14 +66,14 @@ fold({Key, _Val}, Acc=#fold_acc{not_found=false}) ->
     %% an element key, we've sent the clock (nf=false)
     #fold_acc{set=Set, key_prefix=Pref, prefix_len=PrefLen} = Acc,
     case Key of
-        <<Pref:PrefLen/binary, 0:32/little-unsigned-integer, _Rest/binary>> ->
+        <<Pref:PrefLen/binary, $c, _Rest/binary>> ->
             %% a clock for another actor, skip it
             Acc;
-        <<Pref:PrefLen/binary, _Rest/binary>> ->
-            {element, Set, Element, Actor, Cnt, TSB} = bigset:decode_key(Key),
+        <<Pref:PrefLen/binary, $e, Rest/binary>> ->
+            {element, Set, Element, Actor, Cnt, TSB} = bigset:decode_element(Rest, Set),
             add(Element, Actor, Cnt, TSB, Acc);
         _ ->
-            %% The next set's 1st clock key, a new set, break!
+            %% The end key
             throw({break, Acc})
     end;
 fold({Key, Value}, Acc=#fold_acc{not_found=true}) ->
@@ -82,7 +82,7 @@ fold({Key, Value}, Acc=#fold_acc{not_found=true}) ->
     %% @TODO(rdb|robustness) what if the clock key is missing and
     %% first_key finds something else from *this* Set?
     case bigset:decode_key(Key) of
-        {clock, Set, Actor} ->
+        {clock,Set, Actor} ->
             %% Set clock, send at once
             Clock = bigset:from_bin(Value),
             send({clock, Clock}, Acc),
