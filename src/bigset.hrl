@@ -45,6 +45,10 @@
                                  members :: [binary()] %%  elements to check membership
                                 }).
 
+%% Tombstone byte meaning
+-define(ADD, $a).
+-define(REM, $r).
+
 -define(OP, #bigset_op_req_v1).
 -define(REPLICATE_REQ, #bigset_replicate_req_v1).
 -define(READ_REQ, #bigset_read_req_v1).

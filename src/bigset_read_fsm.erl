@@ -153,7 +153,11 @@ await_clocks({not_found, Partition, _From}, State) ->
         {false, false} ->
             {next_state, await_clocks, State#state{logic=Core2}};
         {false, true} ->
-            {next_state, await_elements, State#state{logic=Core2}}
+            {CtxClock, Core3} = bigset_read_core:get_clock(Core2),
+            CtxDict = bigset_ctx_codec:new_encoder(CtxClock),
+            ReplyCtx = bigset_ctx_codec:dict_ctx(CtxDict),
+            send_reply({ok, {ctx, ReplyCtx}}, State),
+            {next_state, await_elements, State#state{logic=Core3, encoder=CtxDict}}
     end.
 
 -spec await_elements(result(), state()) ->

@@ -58,6 +58,7 @@ dev% : all
 stagedev% : dev%
 	  $(foreach dep,$(wildcard deps/*), rm -rf dev/$^/lib/$(shell basename $(dep))* && ln -sf $(abspath $(dep)) dev/$^/lib;)
 	  $(foreach app,$(wildcard apps/*), rm -rf dev/$^/lib/$(shell basename $(app))* && ln -sf $(abspath $(app)) dev/$^/lib;)
+	  rm -rf dev/$^/lib/bigset-1/ebin && ln -sf $(abspath ebin) dev/$^/lib/bigset-1/ebin
 
 devclean: clean
 	rm -rf dev

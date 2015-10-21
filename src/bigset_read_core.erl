@@ -198,7 +198,8 @@ last_element(<<Sz:32/integer, Rest/binary>>) ->
 
 %% @perform a CRDT orswot merge
 finalise(#state{actors=Actors}) ->
-    case merge(Actors, undefined) of
+    {true, _LLE, MergableActors} = mergable(Actors, undefined, []),
+    case merge(MergableActors, undefined) of
         #actor{elements=Elements} ->
             Elements;
         undefined ->

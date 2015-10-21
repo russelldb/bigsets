@@ -73,4 +73,8 @@ handle_work({get, Id, DB, Set}, Sender, State) ->
         throw:stop_fold     -> ok;
         throw:_PrematureAcc  -> ok %%FinishFun(PrematureAcc)
     end,
+    {noreply, State};
+handle_work({handoff, DB, FoldFun, Acc0}, Sender, State) ->
+    AccFinal = eleveldb:fold(DB, FoldFun, Acc0, ?FOLD_OPTS),
+    riak_core_vnode:reply(Sender, AccFinal),
     {noreply, State}.

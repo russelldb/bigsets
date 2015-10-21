@@ -8,6 +8,11 @@ preflist(Set) ->
     Hash = riak_core_util:chash_key({bigset, Set}),
     riak_core_apl:get_apl(Hash, 3, bigset).
 
+preflist_ann(Set) ->
+    Hash = riak_core_util:chash_key({bigset, Set}),
+    UpNodes = riak_core_node_watcher:nodes(bigset),
+    riak_core_apl:get_apl_ann(Hash, 3, UpNodes).
+
 dev_client() ->
     make_client('bigset1@127.0.0.1').
 

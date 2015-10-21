@@ -12,6 +12,7 @@
 -compile([export_all]).
 
 -include("bigset_trace.hrl").
+-include("bigset.hrl").
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -39,9 +40,6 @@
           elements = ?EMPTY
         }).
 
-%% Tombstone byte meaning
--define(ADD, $a).
--define(REM, $r).
 
 send(Message, Acc) ->
     #fold_acc{sender=Sender, me=Me, monitor=Mon, partition=Partition} = Acc,

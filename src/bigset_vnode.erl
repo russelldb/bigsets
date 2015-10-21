@@ -10,7 +10,7 @@
 
 -behaviour(riak_core_vnode).
 -include("bigset.hrl").
-
+-include_lib("riak_core/include/riak_core_vnode.hrl").
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
@@ -121,9 +121,9 @@ handle_command(dump_db, _Sender, State) ->
     #state{db=DB, partition=P} = State,
 
     FoldFun = fun({K, <<>>}, Acc) ->
-                      [sext:decode(K) | Acc];
+                      [bigset:decode_key(K) | Acc];
                  ({K, V}, Acc) ->
-                      [{sext:decode(K), binary_to_term(V)} | Acc]
+                      [{bigset:decode_key(K), binary_to_term(V)} | Acc]
               end,
     Acc =  eleveldb:fold(DB, FoldFun, [], [?FOLD_OPTS]),
     {reply, {ok, P, lists:reverse(Acc)}, State};
@@ -202,8 +202,12 @@ handle_command(?CONTAINS_REQ{set=Set, members=Members}, Sender, State) ->
 
 -spec handle_handoff_command(term(), term(), state()) ->
                                     {noreply, state()}.
-handle_handoff_command(_Message, _Sender, State) ->
-    {noreply, State}.
+handle_handoff_command(?FOLD_REQ{foldfun=FoldFun, acc0=Acc0}, Sender, State) ->
+    #state{db=DB} = State,
+    FoldFunWrapped = fun({Key, Val}, AccIn) ->
+                             FoldFun(Key, Val, AccIn)
+                     end,
+    {async, {handoff, DB, FoldFunWrapped, Acc0}, Sender, State}.
 
 handoff_starting(_TargetNode, State) ->
     {true, State}.
@@ -214,19 +218,61 @@ handoff_cancelled(State) ->
 handoff_finished(_TargetNode, State) ->
     {ok, State}.
 
-handle_handoff_data(<<_KeyLen:32, _Rest/binary>>, State) ->
-    #state{db=_DB, vnodeid=_ID} = State,
+handle_handoff_data(<<KeyLen:32/integer, Rest/binary>>, State) ->
+    #state{db=DB, vnodeid=ID} = State,
     %% @TODO(rbd|optimise) some way to buffer incoming set? Inmemory,
     %% assuming if you crash handoff starts over anyway, right?
     %% @TODO(rdb|assumption) verify that crashing (and therefore
     %% losing inmemory handoff receive buffer) leads to handoff
-    %% restarting from the beginning in riak
+    %% restarting from the beginning in riak could at least cache the
+    %% set clock since we know they're stored in order at the other
+    %% vnode handing off
+    <<Key:KeyLen/binary, Val/binary>> = Rest,
+    case bigset:decode_key(Key) of
+        {clock, _Set, ID} ->
+            %% My clock key, ignore it (@TODO(rdb|robustness) or merge
+            %% it/check it exists?)
+            ok;
+        {clock, Set, _Actor} ->
+            %% Some other actors key, just store it
+            %% @TODO(rdb|robustness) can we do something to check
+            %% integrity here?
+            EndKey = bigset:end_key(Set),
+            ok = eleveldb:write(DB, [{put, Key, Val}, {put, EndKey, <<>>}], ?WRITE_OPTS);
+        {element, Set, _Elem, Actor, Counter, ?REM} ->
+            %% Tombstone, always store, maybe update clock
+            ClockKey = bigset:clock_key(Set, ID),
+            Clock = clock(eleveldb:get(DB, ClockKey, ?READ_OPTS)),
+            Clock2 = bigset_clock:strip_dots({Actor, Counter}, Clock),
+            EndKey = bigset:end_key(Set),
+            ok = eleveldb:write(DB, [{put, ClockKey, bigset:to_bin(Clock2)},
+                                     {put, Key, Val},
+                                     {put, EndKey, <<>>}], ?WRITE_OPTS);
+        {element, Set, _Elem, Actor, Counter, ?ADD} ->
+            %% Add, only store if unseen
+            ClockKey = bigset:clock_key(Set, ID),
+            Clock = clock(eleveldb:get(DB, ClockKey, ?READ_OPTS)),
+            Dot = {Actor, Counter},
+            case bigset_clock:seen(Clock, Dot) of
+                true ->
+                    %% no op
+                    ok;
+                false ->
+                    EndKey = bigset:end_key(Set),
+                    C2 = bigset_clock:strip_dots(Dot, Clock),
+                    ok = eleveldb:write(DB, [{put, ClockKey, bigset:to_bin(C2)},
+                                             {put, Key, Val},
+                                             {put, EndKey, <<>>}], ?WRITE_OPTS)
+            end;
+        {end_key, _Set} ->
+            ok
+    end,
     {reply, ok, State}.
 
 encode_handoff_item(Key, Val) ->
     %% Just bosh together the binary key and value.
     KeyLen = byte_size(Key),
-    <<KeyLen:32/integer, Key, Val>>.
+    <<KeyLen:32/integer, Key:KeyLen/binary, Val/binary>>.
 
 is_empty(State) ->
     #state{db=DB} = State,
