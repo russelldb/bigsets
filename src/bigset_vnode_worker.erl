@@ -49,29 +49,32 @@ init_worker(VNodeIndex, Args, _Props) ->
 %% State} the latter sends `Reply' to `Sender' using
 %% riak_core_vnode:reply(Sender, Reply)
 %% No need for lots of indirection here, is there?
-handle_work({get, DB, Set}, Sender, State=#state{partition=Partition, batch_size=BatchSize}) ->
-
+handle_work({get, Id, DB, Set}, Sender, State) ->
+    #state{partition=Partition, batch_size=BatchSize} = State,
     %% clock is first key
     %% read all the way to last element
-    FirstKey = bigset:clock_key(Set),
-    Buffer = bigset_fold_acc:new(Set, Sender, BatchSize, Partition),
-
+    FirstKey = bigset:clock_key(Set, Id),
     EndKey = bigset:end_key(Set),
+    Buffer = bigset_fold_acc:new(Set, Sender, BatchSize, Partition, Id),
+    FoldOpts = [{first_key, FirstKey}, {last_key, EndKey} | ?FOLD_OPTS],
 
     try
         AccFinal =
             try
-                eleveldb:fold(DB, fun bigset_fold_acc:fold/2, Buffer, [{first_key, FirstKey}, {end_key, EndKey} | ?FOLD_OPTS])
+                eleveldb:fold(DB, fun bigset_fold_acc:fold/2, Buffer, FoldOpts)
             catch
-                {break, Res} ->
-                    Res
+                {break, Acc} ->
+                    Acc
             end,
 
-        lager:debug("finalising on ~p", [Partition]),
         bigset_fold_acc:finalise(AccFinal)
     catch
         throw:receiver_down -> ok;
         throw:stop_fold     -> ok;
         throw:_PrematureAcc  -> ok %%FinishFun(PrematureAcc)
     end,
+    {noreply, State};
+handle_work({handoff, DB, FoldFun, Acc0}, Sender, State) ->
+    AccFinal = eleveldb:fold(DB, FoldFun, Acc0, ?FOLD_OPTS),
+    riak_core_vnode:reply(Sender, AccFinal),
     {noreply, State}.

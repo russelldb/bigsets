@@ -27,6 +27,7 @@ xref: all
 stage : rel
 	$(foreach dep,$(wildcard deps/*), rm -rf rel/bigset/lib/$(shell basename $(dep))-* && ln -sf $(abspath $(dep)) rel/bigset/lib;)
 	$(foreach app,$(wildcard apps/*), rm -rf rel/bigset/lib/$(shell basename $(app))-* && ln -sf $(abspath $(app)) rel/bigset/lib;)
+	rm -rf rel/bigset/lib/bigset-1/ebin && ln -sf $(abspath ebin) rel/bigset/lib/bigset-1/ebin
 
 
 ##
@@ -57,6 +58,15 @@ dev% : all
 stagedev% : dev%
 	  $(foreach dep,$(wildcard deps/*), rm -rf dev/$^/lib/$(shell basename $(dep))* && ln -sf $(abspath $(dep)) dev/$^/lib;)
 	  $(foreach app,$(wildcard apps/*), rm -rf dev/$^/lib/$(shell basename $(app))* && ln -sf $(abspath $(app)) dev/$^/lib;)
+	  rm -rf dev/$^/lib/bigset-1/ebin && ln -sf $(abspath ebin) dev/$^/lib/bigset-1/ebin
 
 devclean: clean
 	rm -rf dev
+
+DIALYZER_APPS = kernel stdlib sasl erts ssl tools os_mon runtime_tools crypto inets \
+	xmerl webtool eunit syntax_tools compiler mnesia public_key snmp
+
+include tools.mk
+
+typer:
+	typer --annotate -I ../ --plt $(PLT) -r src

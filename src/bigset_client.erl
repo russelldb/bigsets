@@ -1,3 +1,11 @@
+%%%-------------------------------------------------------------------
+%%% @author Russell Brown <russelldb@basho.com>
+%%% @copyright (C) 2015, Russell Brown
+%%% @doc
+%%% In server client. Node local or remote. Not for external API, internal API only.
+%%% @end
+%%% Created : 30 Sep 2015 by Russell Brown <russelldb@basho.com>
+%%%-------------------------------------------------------------------
 -module(bigset_client).
 -include("bigset.hrl").
 -include("bigset_trace.hrl").
@@ -17,9 +25,6 @@
 
 -define(DEFAULT_TIMEOUT, 60000).
 
-%% an opaque binary riak_dt_vclock:vclock()
--type context() :: binary() | undefined.
--type remove() :: {member(), context()}.
 -type client() ::{bigset_client,  node()}.
 
 %% Public API
@@ -94,19 +99,17 @@ read(Set, Options, {?MODULE, Node}) ->
 
     Me = self(),
     ReqId = mk_reqid(),
-
-    %% dyntrace:p(1, ?CLIENT_READ),
+    Request = ?READ_FSM_ARGS{req_id=ReqId, from=Me, set=Set, options=Options},
 
     case node() of
         Node ->
-            bigset_read_fsm:start_link(ReqId, Me, Set, Options);
+            bigset_read_fsm:start_link(Request);
         _ ->
             proc_lib:spawn_link(Node, bigset_read_fsm, start_link,
-                                [ReqId, Me, Set, Options])
+                                [Request])
     end,
     Timeout = recv_timeout(Options),
     Res = wait_for_read(ReqId, Timeout),
-    %% dyntrace:p(2, ?CLIENT_READ),
     Res.
 
 -spec stream_read(set(),
@@ -122,13 +125,15 @@ stream_read(Set, Options) ->
 stream_read(Set, Options, {?MODULE, Node}) ->
     Me = self(),
     ReqId = mk_reqid(),
+    Request = ?READ_FSM_ARGS{req_id=ReqId, from=Me, set=Set, options=Options},
+
     Pid = case node() of
               Node ->
-                  {ok, P} = bigset_read_fsm:start_link(ReqId, Me, Set, Options),
+                  {ok, P} = bigset_read_fsm:start_link(Request),
                   P;
               _ ->
                   proc_lib:spawn_link(Node, bigset_read_fsm, start_link,
-                                    [ReqId, Me, Set, Options])
+                                    [Request])
           end,
     {ok, ReqId, Pid}.
 
@@ -145,14 +150,6 @@ recv_timeout(Options) ->
 
 wait_for_reqid(ReqId, Timeout) ->
     receive
-        {ReqId, {error, overload}=Response} ->
-            case app_helper:get_env(riak_kv, overload_backoff, undefined) of
-                Msecs when is_number(Msecs) ->
-                    timer:sleep(Msecs);
-                undefined ->
-                    ok
-            end,
-            Response;
         {ReqId, Response} -> Response
     after Timeout ->
             {error, timeout}
@@ -175,7 +172,7 @@ wait_for_read(ReqId, Timeout, Acc) ->
             wait_for_read(ReqId, Timeout, Acc#read_acc{ctx=Ctx});
         {ReqId, {ok, {elems, Res}}} ->
             #read_acc{elements=Elems} = Acc,
-            wait_for_read(ReqId, Timeout, Acc#read_acc{elements=[Res|Elems]});
+            wait_for_read(ReqId, Timeout, Acc#read_acc{elements=lists:append(Elems, Res)});
         {ReqId, {error, Error}} ->
             {error, Error}
     after Timeout ->

@@ -8,6 +8,11 @@ preflist(Set) ->
     Hash = riak_core_util:chash_key({bigset, Set}),
     riak_core_apl:get_apl(Hash, 3, bigset).
 
+preflist_ann(Set) ->
+    Hash = riak_core_util:chash_key({bigset, Set}),
+    UpNodes = riak_core_node_watcher:nodes(bigset),
+    riak_core_apl:get_apl_ann(Hash, 3, UpNodes).
+
 dev_client() ->
     make_client('bigset1@127.0.0.1').
 
@@ -49,6 +54,27 @@ make_bigset(Set, N) ->
         false ->
             some_errors
     end.
+
+-define(BATCH_SIZE, 1000).
+
+make_set(Set, N) when N < ?BATCH_SIZE ->
+    Batch = [crypto:rand_bytes(100) || _N <- lists:seq(1, N)],
+    ok = bigset_client:update(Set, Batch);
+make_set(Set, N)  ->
+    Batches = if N < ?BATCH_SIZE  -> 1;
+                 true-> N div ?BATCH_SIZE
+              end,
+    make_batch(Set, Batches).
+
+make_batch(_Set, 0) ->
+    ok;
+make_batch(Set, N) ->
+    make_batch(Set),
+    make_batch(Set, N-1).
+
+make_batch(Set) ->
+    Batch = [crypto:rand_bytes(100) || _N <- lists:seq(1, ?BATCH_SIZE)],
+    ok = bigset_client:update(Set, Batch).
 
 add() ->
     add(<<"rdb">>).
@@ -107,19 +133,56 @@ bm_read(Set, N) ->
      {min, lists:min(Times)},
      {avg, lists:sum(Times) div length(Times)}].
 
-%%% codec
-clock_key(Set) ->
-    %% Must be same length as element key!
-    sext:encode({s, Set, clock, <<>>, 0, <<0:1>>}).
+%% Key prefix is the common prefix of a key for the given set
+-spec key_prefix(Set :: binary()) -> Prefix :: binary().
+key_prefix(Set) when is_binary(Set) ->
+    SetLen = byte_size(Set),
+    <<SetLen:32/little-unsigned-integer,
+      Set:SetLen/binary>>.
+
+%%% codec See docs on key scheme, use Actor name in clock key so
+%% AAE/replication of clocks is safe. Like a decomposed VV, an actor
+%% may only update it's own clock.
+clock_key(Set, Actor) ->
+    %% @TODO(rbd|optimise) This could just be <<SetLen, Set, Actor>>
+    %% with maybe a single byte 0 | 1 for clock | element key!
+    Pref = key_prefix(Set),
+    <<Pref/binary,
+      $c, %% means clock
+      Actor/binary>>.
 
 end_key(Set) ->
-    {s, <<Set/binary, 0:1>>, a, <<>>, 0, <<0:1>>}.
+    %% an explicit end key that always sorts lowest
+    %% written _every write_??
+    Pref = key_prefix(Set),
+    <<Pref/binary,
+      $z %% means end key
+    >>.
 
-%% @private decode a binary key
-decode_key(Bin) when is_binary(Bin) ->
-    sext:decode(Bin);
-decode_key(K) ->
-    K.
+%% @doc
+-spec decode_key(Key :: binary()) -> {clock, set(), actor()} |
+                                     {element, set(), member(), actor(), counter(), tsb()} |
+                                     {end_key, set()}.
+decode_key(<<SetLen:32/little-unsigned-integer, Bin/binary>>) ->
+    <<Set:SetLen/binary, Rest/binary>> = Bin,
+    decode_key(Rest, Set).
+
+
+decode_key(<<$c, Actor/binary>>, Set) ->
+    {clock, Set, Actor};
+decode_key(<<$e, Elem/binary>>, Set) ->
+    decode_element(Elem, Set);
+decode_key(<<$z>>, Set) ->
+    {end_key, Set}.
+
+decode_element(<<ElemLen:32/little-unsigned-integer, Rest/binary>>, Set) ->
+    <<Elem:ElemLen/binary,
+              ActorLen:32/little-unsigned-integer,
+              ActorEtc/binary>> = Rest,
+            <<Actor:ActorLen/binary,
+              Cnt:64/little-unsigned-integer,
+              TSB>> = ActorEtc,
+    {element, Set, Elem, Actor, Cnt, TSB}.
 
 %% @private sext encodes the element key so it is in order, on disk,
 %% with the other elements. Use the actor ID and counter (dot)
@@ -130,14 +193,43 @@ decode_key(K) ->
 %% can be removed in compaction, as can every key {s, Set, E, A, Cnt,
 %% 0} which has some key {s, Set, E, A, Cnt', 1} whenre Cnt' >=
 %% Cnt. As can every key {s, Set, E, A, Cnt, 1} where the VV portion
-%% of the set clock >= {A, Cnt}. Crazy!!
+%% of the set clock >= {A, Cnt} @TODO(rdb) document how this tombstone
+%% reaping works! Crazy!!
 -spec insert_member_key(set(), member(), actor(), counter()) -> key().
 insert_member_key(Set, Elem, Actor, Cnt) ->
-    sext:encode({s, Set, Elem, Actor, Cnt, <<0:1>>}).
+    Pref = key_prefix(Set),
+    ActorLen = byte_size(Actor),
+    ElemLen = byte_size(Elem),
+    <<Pref/binary,
+      $e, %% means an element
+      ElemLen:32/little-unsigned-integer,
+      Elem:ElemLen/binary,
+      ActorLen:32/little-unsigned-integer,
+      Actor:ActorLen/binary,
+      Cnt:64/little-unsigned-integer,
+ %% @TODO(rdb|optimise) no need for a 32-bit int to express 0 | 1 TSB,
+ %% but the c++ comparator is beyond me!
+      $a %% means an add
+    >>.
 
+%% @private see note above on insert_member_key/4. This is a
+%% tombstone.
 -spec remove_member_key(set(), member(), actor(), counter()) -> key().
-remove_member_key(Set, Element, Actor, Cnt) ->
-    sext:encode({s, Set, Element, Actor, Cnt, <<1:1>>}).
+remove_member_key(Set, Elem, Actor, Cnt) ->
+    Pref = key_prefix(Set),
+    ActorLen = byte_size(Actor),
+    ElemLen = byte_size(Elem),
+    <<Pref/binary,
+      $e, %% means element
+      ElemLen:32/little-unsigned-integer,
+      Elem:ElemLen/binary,
+      ActorLen:32/little-unsigned-integer,
+      Actor:ActorLen/binary,
+      Cnt:64/little-unsigned-integer,
+      %% @TODO(rdb|optimise) no need for a 32-bit int to express 0 | 1, but
+      %% the c++ comparator is beyond me!
+      $r %% means a remove
+    >>.
 
 from_bin(B) ->
     binary_to_term(B).
