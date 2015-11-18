@@ -137,7 +137,7 @@ devrel (so `'bigset1@127.0.0.1', 'bigset2@127.0.0.1'` etc) and change
 `bigset_mynode` to something like `bigset_bench@127.0.0.1`.
 
 The `key_generator` and `value_generator` set the number of sets and
-size of the sets respectively. So by default make a chose the set name
+size of the sets respectively. So by default chose the set name
 from 1000 possible, with a pareto distribution, and the element name
 from 100,000 possible with uniform distribution. Maybe make
 `key_generator`smaller for a short local run.
