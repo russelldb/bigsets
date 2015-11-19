@@ -109,6 +109,7 @@ If all that works you probably want to start benchmarking. First make a devrel.
 Clone basho_bench and checkout the bigsets branch:
 
      git clone git@github.com:basho/basho_bench.git
+     cd basho_bench
      git checkout rdb/bigset
      make
 
