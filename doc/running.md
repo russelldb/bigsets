@@ -142,7 +142,7 @@ from 1000 possible, with a pareto distribution, and the element name
 from 100,000 possible with uniform distribution. Maybe make
 `key_generator`smaller for a short local run.
 
-Now set up your devrel by running `./setup-dev`
+Now set up your devrel by changing back to the bigsets directory and running `./set-up-dev`
 
 When running `dev/dev1/bin/bigset-admin member-status` shows the
 cluster settled so that `pending` is `--` on every line like so:
@@ -162,7 +162,7 @@ You can run your benchmark:
     cd ../basho_bench
     ./basho_bench examples/bigsets.bm.config
 
-When it's over, run `make results` and open `tests/current/summary.png`
+When it's over, run `make results` and open `tests/current/summary.png`. Note that if you get a make error stating "Rscript: No such file or directory", then you need to install the R statistics language; see the Basho Bench [Prerequisites](http://docs.basho.com/riak/latest/ops/building/benchmarking/#Generating-Benchmark-Graphs) for generating benchmark graphs.
 
 All that remains is to set up a Riak 2.1 cluster devrel, and edit the
 `riakclient.sets.bm.config` to be equivalent to the
