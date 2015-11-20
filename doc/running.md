@@ -1,7 +1,6 @@
 # Getting Started
 
-Bigsets is a prototype hacked together by a de-motivated
-depressive. If you want to run it today this is what you have to do:
+Bigsets is hacked together prototype. If you want to run it today this is what you have to do:
 
 ## Erlang
 
