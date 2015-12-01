@@ -144,8 +144,6 @@ key_prefix(Set) when is_binary(Set) ->
 %% AAE/replication of clocks is safe. Like a decomposed VV, an actor
 %% may only update it's own clock.
 clock_key(Set, Actor) ->
-    %% @TODO(rbd|optimise) This could just be <<SetLen, Set, Actor>>
-    %% with maybe a single byte 0 | 1 for clock | element key!
     Pref = key_prefix(Set),
     <<Pref/binary,
       $c, %% means clock
