@@ -185,13 +185,7 @@ decode_element(<<ElemLen:32/little-unsigned-integer, Rest/binary>>, Set) ->
 %% @private encodes the element key so it is in order, on disk, with
 %% the other elements. Use the actor ID and counter (dot) too. This
 %% means at some extra storage, but makes for no reads before writes
-%% on replication/delta merge. See read for how the leveldb merge
-%% magic will work. Essentially every key <<Set, E, A, Cnt, $a>> that
-%% has some key <<Set, E, A, Cnt', $a>> where Cnt' > Cnt can be
-%% removed in compaction, as can every key <<Set, E, A, Cnt, 0>> which
-%% has some key <<Set, E, A, Cnt', $r>> whenre Cnt' >= Cnt. As can
-%% every key <<Set, E, A, Cnt, $r>> where the VV portion of the set
-%% clock >= {A, Cnt}
+%% on replication/delta merge.
 -spec insert_member_key(set(), member(), actor(), counter()) -> key().
 insert_member_key(Set, Elem, Actor, Cnt) ->
     Pref = key_prefix(Set),
@@ -204,8 +198,6 @@ insert_member_key(Set, Elem, Actor, Cnt) ->
       ActorLen:32/little-unsigned-integer,
       Actor:ActorLen/binary,
       Cnt:64/little-unsigned-integer,
- %% @TODO(rdb|optimise) no need for a 32-bit int to express 0 | 1 TSB,
- %% but the c++ comparator is beyond me!
       $a %% means an add
     >>.
 
@@ -223,8 +215,6 @@ remove_member_key(Set, Elem, Actor, Cnt) ->
       ActorLen:32/little-unsigned-integer,
       Actor:ActorLen/binary,
       Cnt:64/little-unsigned-integer,
-      %% @TODO(rdb|optimise) no need for a 32-bit int to express 0 | 1, but
-      %% the c++ comparator is beyond me!
       $r %% means a remove
     >>.
 

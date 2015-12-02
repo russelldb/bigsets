@@ -423,7 +423,6 @@ compact_bigset(BS) ->
     Res = fold_bigset(BS, fun compaction_flush_acc/2),
     Res.
 
-
 -spec fold_bigset(bigset(), function()) -> {bigset(), integer()}.
 fold_bigset(#bigset{clock=Clock, keys=Keys}, FlushFun) ->
     Keys2 = orddict:fold(fun({E, A, C, ?ADD}, Ctx, [{E, Dots, CtxAcc} | Acc]) ->

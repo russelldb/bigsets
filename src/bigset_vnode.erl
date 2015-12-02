@@ -137,17 +137,14 @@ handle_command(?OP{set=Set, inserts=Inserts, removes=Removes, ctx=Ctx}, Sender, 
     #state{db=DB, partition=Partition, vnodeid=Id} = State,
     ClockKey = bigset:clock_key(Set, Id),
     Clock = clock(eleveldb:get(DB, ClockKey, ?READ_OPTS)),
-    {Clock2, InsertWrites, InsertReplicate} = gen_inserts(Set, Inserts, Id, Clock),
+    InsertCtx = insert_ctx(Clock, Ctx),
+    {Clock2, InsertWrites, InsertReplicate} = gen_inserts(Set, Inserts, Id, Clock, InsertCtx),
 
-    %% Each element has the context it was read with, generate
-    %% tombstones for those dots.
-    {Clock3, DeleteWrites, DeleteReplicate} = gen_removes(Set, Removes, Ctx, Clock2),
-
-    %% @TODO(rdb|optimise) technically you could ship the deletes
-    %% right now, if you wanted (in fact deletes can be broadcast
-    %% without a coordinator, how cool!)
+    %% Use the insert ctx from above
+    {Clock3, DeleteWrites, DeleteReplicate} = gen_removes(Set, Removes, Id, Clock2, InsertCtx),
 
     BinClock = bigset:to_bin(Clock3),
+    %% @TODO(rdb) only need the end_key if this is the first write to the set (i.e. clock not found)
     EndKey = bigset:end_key(Set),
     Writes = lists:append([[{put, ClockKey, BinClock}, {put, EndKey, <<>>}],  InsertWrites, DeleteWrites]),
     ok = eleveldb:write(DB, Writes, ?WRITE_OPTS),
@@ -172,8 +169,10 @@ handle_command(?REPLICATE_REQ{set=Set,
     %% Read local clock
     ClockKey = bigset:clock_key(Set, Id),
     {Clock, Inserts} = replica_inserts(eleveldb:get(DB, ClockKey, ?READ_OPTS), Ins),
-    {Clock1, Deletes} = replica_removes(Clock, Rems),
+    {Clock1, Deletes} = replica_inserts(Clock, Rems),
     BinClock = bigset:to_bin(Clock1),
+    %% @TODO(rdb) only need the end_key if this is the first write to
+    %% the set (i.e. clock not found)
     EndKey = bigset:end_key(Set),
     Writes = lists:append([[{put, ClockKey, BinClock}, {put, EndKey, <<>>}], Inserts, Deletes]),
     ok = eleveldb:write(DB, Writes, ?WRITE_OPTS),
@@ -417,17 +416,18 @@ clear_vnode_id(Partition) ->
 -spec gen_inserts(Set :: binary(),
                   Inserts :: [binary()],
                   Actor :: binary(),
-                  Clock :: riak_dt_vclock:vclock()) ->
-                         {NewClock :: riak_dt_vclock:vclock(),
+                  Clock :: bigset_clock:clock(),
+                  Ctx :: binary()) ->
+                         {NewClock :: bigset_clock:clock(),
                           Writes :: [level_put()],
                           ReplicationDeltas :: [delta_element()]}.
 
-gen_inserts(Set, Inserts, Id, Clock) ->
+gen_inserts(Set, Inserts, Id, Clock, Ctx) ->
     lists:foldl(fun(Element, {C, W, R}) ->
                         %% Generate a dot per insert
                         {{Id, Cnt}=Dot, C2} = bigset_clock:increment(Id, C),
                         ElemKey = bigset:insert_member_key(Set, Element, Id, Cnt),
-                        Val = <<>>,
+                        Val = Ctx,
                         {
                           C2, %% New Clock
                           [{put, ElemKey, Val} | W], %% To write
@@ -450,43 +450,26 @@ gen_inserts(Set, Inserts, Id, Clock) ->
 %% compaction will take it out again. Returns {clock, writes}
 -spec gen_removes(Set :: binary(),
                   Removes :: removes(),
-                  Ctx :: binary(),
-                  Clock :: bigset_clock:clock()) ->
+                  Actor :: binary(),
+                  Clock :: bigset_clock:clock(),
+                  Ctx :: binary()) ->
                          [level_put()].
-gen_removes(_Set, []=_Removes, _Ctx, Clock) ->
+gen_removes(_Set, []=_Removes, _Id, Clock, _Ctx) ->
     {Clock, [], []};
-gen_removes(Set, Removes, Ctx, Clock) ->
-    %% eugh, I hate this elements*actors iteration
-    Decoder = bigset_ctx_codec:new_decoder(Ctx),
-    {Clock2, Rems, Reps} = lists:foldl(fun({E, CtxBin}, {ClockAcc, Deletes, Replicates}) ->
-                                               %% decode dots and
-                                               %% iterate them, a
-                                               %% tombstone for each
-                                               %% @TODO(rdb|refactor)
-                                               %% why not just one
-                                               %% tombstone with
-                                               %% multiple dots? Find
-                                               %% a key that sorts
-                                               %% high, and use the
-                                               %% payload of multi
-                                               %% dots in the
-                                               %% accumulator/compaction
-                                               ECtx = bigset_ctx_codec:decode_dots(CtxBin, Decoder),
-                                               %% @TODO(rdb|refactor) Nested fold, sorry
-                                               lists:foldl(fun({Actor, Cnt}=Dot, {C, W, R}) ->
-                                                                   Key = bigset:remove_member_key(Set, E, Actor, Cnt),
-                                                                   Val = <<>>,
-                                                                   {bigset_clock:strip_dots(Dot, C),
-                                                                    [{put, Key, Val} | W], %% To write locally
-                                                                    [{Key, Val, Dot} | R] %% To replicate
-                                                                   }
-                                                           end,
-                                                           {ClockAcc, Deletes, Replicates},
-                                                           ECtx)
-                                       end,
-                                       {Clock, [], []},
-                                       Removes),
-    {Clock2, lists:flatten(Rems), lists:flatten(Reps)}.
+gen_removes(Set, Removes, Id, Clock, Ctx) ->
+    lists:foldl(fun(Element, {C, W, R}) ->
+                        %% Generate a dot per remove
+                        {{Id, Cnt}=Dot, C2} = bigset_clock:increment(Id, C),
+                        ElemKey = bigset:remove_member_key(Set, Element, Id, Cnt),
+                        Val = Ctx,
+                        {
+                          C2, %% New Clock
+                          [{put, ElemKey, Val} | W], %% To write
+                          [{ElemKey, Val, Dot} | R] %% To replicate
+                        }
+                end,
+                {Clock, [], []},
+                Removes).
 
 %% @private generate the write set, don't write stuff you wrote
 %% already. This is important, not just an optimisation. Imagine some
@@ -518,24 +501,12 @@ replica_inserts({ok, BinClock}, Elements) ->
         end,
     lists:foldl(F, {Clock0, []}, Elements).
 
-%% @private pull the causal information from replica delete payload
-%% into the clock. We _always_ write tombstones, even if we've seen
-%% their dots, since the dots or a remove are the same as the dots of
-%% an add. Seeing a dot might just mean we saw the add, so we need the
-%% tombstone. If we write a tombstone that has already been written,
-%% no biggy, and if we write a tombstone that has already been
-%% compacted? It will just get compacted again, again no effect on
-%% correctness.
--spec replica_removes(bigset_clock:clock(),
-                     [delta_element()]) ->
-                            [level_put()].
-replica_removes(Clock0, Elements) ->
-    F = fun({Key, Val, Dot}, {Clock, Writes}) ->
-                %% Strip the dot
-                C2 = bigset_clock:strip_dots(Dot, Clock),
-                {C2, [{put, Key, Val} | Writes]}
-        end,
-    lists:foldl(F, {Clock0, []}, Elements).
+insert_ctx(Clock, undefined) ->
+    bigset:to_bin(Clock);
+insert_ctx(_Clock, Ctx) when is_binary(Ctx) ->
+    Ctx;
+insert_ctx(_Clock, Ctx) ->
+    bigset:to_bin(Ctx).
 
 open_db(DataDir, Opts) ->
     open_db(DataDir, Opts, 30, undefined).

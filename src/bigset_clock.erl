@@ -9,7 +9,7 @@
 
 -compile(export_all).
 
--export_type([clock/0]).
+-export_type([clock/0, dot/0]).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -17,6 +17,7 @@
 
 %% lazy inefficient dot cloud of dict Actor->[count()]
 -type clock() :: {riak_dt_vclock:vclock(), [riak_dt:dot()]}.
+-type dot() :: riak_dt:dot().
 
 -define(DICT, orddict).
 
