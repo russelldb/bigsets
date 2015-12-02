@@ -351,7 +351,7 @@ weight(_S, _) ->
 %% the OR-Set impl.
 -spec prop_merge() -> eqc:property().
 prop_merge() ->
-    ?FORALL(Cmds, more_commands(5, commands(?MODULE)),
+    ?FORALL(Cmds, more_commands(2, commands(?MODULE)),
             begin
                 %% Store the state external to the statem for correct
                 %% shrinking. This is best practice.
@@ -378,21 +378,30 @@ prop_merge() ->
                                          better
                                  end
                              end || V <- S#state.compacted],
+
+                SizeBS = byte_size(term_to_binary(MergedBigset)),
+                SizeOR = byte_size(term_to_binary(MergedSwot)),
+
+                SizeDiff = SizeBS div SizeOR,
+
                 ets:delete(?MODULE),
                 pretty_commands(?MODULE, Cmds, {H, S, Res},
                                 aggregate(command_names(Cmds),
                                           aggregate(with_title('Compaction Effect'), Compacted,
                                                     measure(deltas, length(Deltas),
-                                                            measure(delivered, length(Delivered),
-                                                                    measure(undelivered, length(Deltas) - length(Delivered),
-                                                                            measure(replicas, length(S#state.replicas),
-                                                                                    measure(bs_ln, BigsetLength,
-                                                                                            measure(elements, length(?SWOT:value(MergedSwot)),
-                                                                                                    conjunction([{result, Res == ok},
-                                                                                                                 {equal, equals(sets_equal(MergedBigset, MergedSwot), true)}
-                                                                                                                ]))))))))))
+                                                            measure(commands, length(Cmds),
+                                                                    measure(size_diff, SizeDiff,
+                                                                            measure(delivered, length(Delivered),
+                                                                                    measure(undelivered, length(Deltas) - length(Delivered),
+                                                                                            measure(replicas, length(S#state.replicas),
+                                                                                                    measure(bs_ln, BigsetLength,
+                                                                                                            measure(elements, length(?SWOT:value(MergedSwot)),
+                                                                                                                    conjunction([{result, Res == ok},
+                                                                                                                                 {equal, equals(sets_equal(MergedBigset, MergedSwot), true)}
+                                                                                                                                ]))))))))))))
 
             end).
+
 
 %% this is the algo that level will run.
 %%
