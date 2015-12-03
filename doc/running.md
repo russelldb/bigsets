@@ -1,7 +1,6 @@
 # Getting Started
 
-Bigsets is a prototype hacked together by a de-motivated
-depressive. If you want to run it today this is what you have to do:
+Bigsets is hacked together prototype. If you want to run it today this is what you have to do:
 
 ## Erlang
 
@@ -109,6 +108,7 @@ If all that works you probably want to start benchmarking. First make a devrel.
 Clone basho_bench and checkout the bigsets branch:
 
      git clone git@github.com:basho/basho_bench.git
+     cd basho_bench
      git checkout rdb/bigset
      make
 
@@ -137,12 +137,12 @@ devrel (so `'bigset1@127.0.0.1', 'bigset2@127.0.0.1'` etc) and change
 `bigset_mynode` to something like `bigset_bench@127.0.0.1`.
 
 The `key_generator` and `value_generator` set the number of sets and
-size of the sets respectively. So by default make a chose the set name
+size of the sets respectively. So by default chose the set name
 from 1000 possible, with a pareto distribution, and the element name
 from 100,000 possible with uniform distribution. Maybe make
 `key_generator`smaller for a short local run.
 
-Now set up your devrel by running `./setup-dev`
+Now set up your devrel by changing back to the bigsets directory and running `./set-up-dev`
 
 When running `dev/dev1/bin/bigset-admin member-status` shows the
 cluster settled so that `pending` is `--` on every line like so:
@@ -162,7 +162,7 @@ You can run your benchmark:
     cd ../basho_bench
     ./basho_bench examples/bigsets.bm.config
 
-When it's over, run `make results` and open `tests/current/summary.png`
+When it's over, run `make results` and open `tests/current/summary.png`. Note that if you get a make error stating "Rscript: No such file or directory", then you need to install the R statistics language; see the Basho Bench [Prerequisites](http://docs.basho.com/riak/latest/ops/building/benchmarking/#Generating-Benchmark-Graphs) for generating benchmark graphs.
 
 All that remains is to set up a Riak 2.1 cluster devrel, and edit the
 `riakclient.sets.bm.config` to be equivalent to the
