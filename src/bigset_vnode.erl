@@ -49,6 +49,7 @@
 -type state() :: #state{}.
 -type status() :: orddict:orddict().
 -type level_put() :: {put, Key :: binary(), Value :: binary()}.
+-type db() :: eleveldb:db_ref().
 
 -define(READ_OPTS, [{fill_cache, true}]).
 -define(WRITE_OPTS, [{sync, false}]).
@@ -136,7 +137,7 @@ handle_command(?OP{set=Set, inserts=Inserts, removes=Removes, ctx=Ctx}, Sender, 
     %% Store elements in the set.
     #state{db=DB, partition=Partition, vnodeid=Id} = State,
     ClockKey = bigset:clock_key(Set, Id),
-    Clock = clock(eleveldb:get(DB, ClockKey, ?READ_OPTS)),
+    Clock = get_clock(ClockKey, DB),
     InsertCtx = insert_ctx(Clock, Ctx),
     {Clock2, InsertWrites, InsertReplicate} = gen_inserts(Set, Inserts, Id, Clock, InsertCtx),
 
@@ -168,7 +169,8 @@ handle_command(?REPLICATE_REQ{set=Set,
     riak_core_vnode:reply(Sender, {w, Partition}),
     %% Read local clock
     ClockKey = bigset:clock_key(Set, Id),
-    {Clock, Inserts} = replica_inserts(eleveldb:get(DB, ClockKey, ?READ_OPTS), Ins),
+    Clock0 = get_clock(ClockKey, DB),
+    {Clock, Inserts} = replica_inserts(Clock0, Ins),
     {Clock1, Deletes} = replica_inserts(Clock, Rems),
     BinClock = bigset:to_bin(Clock1),
     %% @TODO(rdb) only need the end_key if this is the first write to
@@ -317,7 +319,12 @@ terminate(_Reason, State) ->
     end,
     ok.
 
+
 %%%%% priv
+-spec get_clock(ClockKey::binary(), db()) -> bigset_clock:clock().
+get_clock(ClockKey, DB) ->
+    clock(eleveldb:get(DB, ClockKey, ?READ_OPTS)).
+
 -spec clock(not_found | {ok, binary()}) -> bigset_clock:clock().
 clock(not_found) ->
     %% @TODO(rdb|correct) -> is this _really_ OK, what if we _know_
@@ -480,14 +487,7 @@ gen_removes(Set, Removes, Id, Clock, Ctx) ->
 -spec replica_inserts(not_found | {ok, binary()},
                      [delta_element()]) ->
                             [level_put()].
-replica_inserts(not_found, Elements) ->
-    F = fun({Key, Val, Dot}, {Clock, Writes}) ->
-                C2 = bigset_clock:strip_dots(Dot, Clock),
-                {C2, [{put, Key, Val} | Writes]}
-        end,
-    lists:foldl(F, {bigset_clock:fresh(), []}, Elements);
-replica_inserts({ok, BinClock}, Elements) ->
-    Clock0 = bigset:from_bin(BinClock),
+replica_inserts(Clock0, Elements) ->
     F = fun({Key, Val, Dot}, {Clock, Writes}) ->
                 case bigset_clock:seen(Clock, Dot) of
                     true ->
@@ -534,58 +534,3 @@ open_db(DataDir, Opts, RetriesLeft, _) ->
         {error, Reason} ->
             {error, Reason}
     end.
-
--ifdef(TEST).
-
-%% @doc test that the clock correctly pulls dots from the removes.
-gen_removes_test() ->
-    %% Ctx is an binary encoded dict of actor->Id Each remove is a
-    %% pair {element, BinCtx::binary()} and that BinCtx can be decoded
-    %% into a list of dots with a decoder created from the Ctx
-    %% @todo(bad|rdb) knows about internals of clock
-
-    %% NOTE: probably b's clock, since there are no gaps for b.
-    Set = <<"friends">>,
-    Clock = {[{<<"a">>, 10},
-              {<<"b">>, 5},
-              {<<"c">>, 8}],
-             orddict:from_list([{<<"a">>, [12, 13, 22]},
-                                {<<"c">>, [14, 23]}])},
-
-    Encoder = bigset_ctx_codec:new_encoder(Clock),
-
-    %% dots from the clock above, best to add some gaps too
-    Elements = [{<<"element1">>, [ {<<"a">>, 22}, {<<"b">>, 5}]},
-                {<<"element2">>, [{<<"a">>, 2}, {<<"c">>, 14}]},
-                {<<"element3">>, [{<<"a">>, 10}, {<<"b">>, 2}]},
-                {<<"element4">>, [{<<"b">>, 1}, {<<"c">>, 23}]},
-                {<<"element5">>, [{<<"a">>, 13}, {<<"c">>, 4}]}],
-
-    Removes = lists:foldl(fun({Element, Dots}, Acc) ->
-                                  {BinCtx, _Enc} = bigset_ctx_codec:encode_dots(Dots, Encoder),
-                                  [{Element, BinCtx} | Acc]
-                          end,
-                          [],
-                          Elements),
-    Ctx =  bigset_ctx_codec:dict_ctx(Encoder),
-
-    {ResClock, Writes} = gen_removes(Set, Removes, Ctx, Clock),
-
-    %% Slurping the remove dots into same node/clock should mean no
-    %% change to clock
-    ?assertEqual(ResClock, Clock),
-    ?assertEqual(length(Elements) * 2, length(Writes)),
-
-    {ResClock2, Writes} = gen_removes(Set, Removes, Ctx, bigset_clock:fresh()),
-
-    %% Slurping remove dots into empty clock should have _just those
-    %% dots_ (with contiguous from base (0) compressed)
-    ExpectedFromEmptyClock = {[{<<"b">>, 2}],
-                               orddict:from_list([{<<"a">>, [2, 10, 13, 22]},
-                                                  {<<"b">>, [5]},
-                                                  {<<"c">>, [4, 14, 23]}])},
-
-    ?assertEqual(ExpectedFromEmptyClock, ResClock2).
-
-
--endif.
