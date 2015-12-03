@@ -240,19 +240,10 @@ handle_handoff_data(<<KeyLen:32/integer, Rest/binary>>, State) ->
             %% integrity here?
             EndKey = bigset:end_key(Set),
             ok = eleveldb:write(DB, [{put, Key, Val}, {put, EndKey, <<>>}], ?WRITE_OPTS);
-        {element, Set, _Elem, Actor, Counter, ?REM} ->
-            %% Tombstone, always store, maybe update clock
+        {element, Set, _Elem, Actor, Counter, _TSB} ->
+            %% only store if unseen
             ClockKey = bigset:clock_key(Set, ID),
-            Clock = clock(eleveldb:get(DB, ClockKey, ?READ_OPTS)),
-            Clock2 = bigset_clock:strip_dots({Actor, Counter}, Clock),
-            EndKey = bigset:end_key(Set),
-            ok = eleveldb:write(DB, [{put, ClockKey, bigset:to_bin(Clock2)},
-                                     {put, Key, Val},
-                                     {put, EndKey, <<>>}], ?WRITE_OPTS);
-        {element, Set, _Elem, Actor, Counter, ?ADD} ->
-            %% Add, only store if unseen
-            ClockKey = bigset:clock_key(Set, ID),
-            Clock = clock(eleveldb:get(DB, ClockKey, ?READ_OPTS)),
+            Clock = get_clock(ClockKey, DB),
             Dot = {Actor, Counter},
             case bigset_clock:seen(Clock, Dot) of
                 true ->
