@@ -32,8 +32,7 @@
                 logic = bigset_read_core:new(2),
                 options=[] :: list(),
                 timer=undefined :: reference() | undefined,
-                reply = undefined,
-                encoder %% for encoding context and dots
+                reply = undefined
                }).
 
 -type state() :: #state{}.
@@ -123,10 +122,9 @@ await_clocks({{clock, Clock}, Partition, From}, State) ->
     case bigset_read_core:r_clocks(Core2) of
         true ->
             {CtxClock, Core3} = bigset_read_core:get_clock(Core2),
-            CtxDict = bigset_ctx_codec:new_encoder(CtxClock),
-            ReplyCtx = bigset_ctx_codec:dict_ctx(CtxDict),
-            send_reply({ok, {ctx, ReplyCtx}}, State),
-            {next_state, await_elements, State#state{logic=Core3, encoder=CtxDict}};
+            CtxBin = bigset:to_bin(CtxClock),
+            send_reply({ok, {ctx, CtxBin}}, State),
+            {next_state, await_elements, State#state{logic=Core3}};
         false ->
             {next_state, await_clocks, State#state{logic=Core2}}
     end;
@@ -154,10 +152,9 @@ await_clocks({not_found, Partition, _From}, State) ->
             {next_state, await_clocks, State#state{logic=Core2}};
         {false, true} ->
             {CtxClock, Core3} = bigset_read_core:get_clock(Core2),
-            CtxDict = bigset_ctx_codec:new_encoder(CtxClock),
-            ReplyCtx = bigset_ctx_codec:dict_ctx(CtxDict),
-            send_reply({ok, {ctx, ReplyCtx}}, State),
-            {next_state, await_elements, State#state{logic=Core3, encoder=CtxDict}}
+            CtxBin = bigset:to_bin(CtxClock),
+            send_reply({ok, {ctx, CtxBin}}, State),
+            {next_state, await_elements, State#state{logic=Core3}}
     end.
 
 -spec await_elements(result(), state()) ->
@@ -197,20 +194,9 @@ maybe_send_results(undefined, _State) ->
     ok;
 maybe_send_results([], _State) ->
     ok;
-maybe_send_results(Results, State) ->
-    %% @TODO(rdb|optimise) It's a shame to have to iterate the list of
-    %% elements AGAIN here to encode the per element ctx
-    #state{encoder=Dict} = State,
-    Encoded = [
-               begin
-                   %% We have a complete encoder dict
-                   %% from the clock, so we do not need
-                   %% to keep the updated state,
-                   %% otherwise would use a fold
-                   {DotsBin, _NewEncoder} = bigset_ctx_codec:encode_dots(Dots, Dict),
-                   {E, DotsBin}
-               end || {E, Dots} <- Results],
-    send_reply({ok, {elems, Encoded}}, State).
+maybe_send_results(Results0, State) ->
+    Results = orddict:fetch_keys(Results0),
+    send_reply({ok, {elems, Results}}, State).
 
 send_reply(Reply, State) ->
     #state{from=From, req_id=ReqId} = State,

@@ -9,7 +9,7 @@
 
 -compile(export_all).
 
--export_type([clock/0]).
+-export_type([clock/0, dot/0]).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -17,6 +17,7 @@
 
 %% lazy inefficient dot cloud of dict Actor->[count()]
 -type clock() :: {riak_dt_vclock:vclock(), [riak_dt:dot()]}.
+-type dot() :: riak_dt:dot().
 
 -define(DICT, orddict).
 
@@ -139,9 +140,41 @@ compress(Cnt, [Cntr | Rest]) when Cntr - Cnt == 1 ->
 compress(Cnt, Cnts) ->
     {Cnt, Cnts}.
 
+%% true if A descends B, false otherwise
+descends({ClockA, _DotsA}=A, {ClockB, DotsB}) ->
+    riak_dt_vclock:descends(ClockA, ClockB)
+        andalso
+        (subtract_seen(A, orddict_to_proplist(DotsB)) == []).
+
+equal(A, B) ->
+    descends(A, B) andalso descends(B, A).
+
+dominates(A, B) ->
+    descends(A, B) andalso not descends(B, A).
+
+%% efficiency be damned!
+orddict_to_proplist(Dots) ->
+    orddict:fold(fun(K, V, Acc) ->
+                         Acc ++ [{K, C} || C <- V]
+                 end,
+                 [],
+                 Dots).
 
 -ifdef(TEST).
 
+%% @TODO EQC of bigset_clock properties (at least
+%% descends/merge/dominates/equal)
+
+descends_test() ->
+    A = B = {[{a, 1}, {b, 1}, {c, 1}], []},
+    ?assert(descends(A, B)),
+    ?assert(descends(B, A)),
+    ?assert(descends(A, fresh())),
+    C = {[{a, 1}], [{b, [3]}]},
+    ?assert(not descends(A, C) andalso not descends(C, A)),
+    ?assert(descends(merge(A, C), C)),
+    D = {[{a, 1}, {b, 1}, {c, 1}], [{b, [3]}]},
+    ?assert(descends(D, C)).
 
 fresh_test() ->
     ?assertEqual({[], []}, fresh()).

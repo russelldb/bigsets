@@ -34,12 +34,10 @@
           monitor :: reference(),
           me = self() :: pid(),
           current_elem :: binary(),
-          current_actor :: binary(),
-          current_cnt :: pos_integer(),
-          current_tsb :: <<_:1>>,
+          current_dots = ?EMPTY :: [bigset_clock:dot()],
+          current_ctx = bigset_clock:fresh() :: bigset_clock:clock(),
           elements = ?EMPTY
         }).
-
 
 send(Message, Acc) ->
     #fold_acc{sender=Sender, me=Me, monitor=Mon, partition=Partition} = Acc,
@@ -60,8 +58,22 @@ new(Set, Sender, BufferSize, Partition, Actor) ->
 
 %% @doc called by eleveldb:fold per key read. Uses `throw({break,
 %% Acc})' to break out of fold when last key is read.
-fold({Key, _Val}, Acc=#fold_acc{not_found=false}) ->
-    %% an element key, we've sent the clock (nf=false)
+fold({Key, Value}, Acc=#fold_acc{not_found=true}) ->
+    %% The first call for this acc, (not_found=true!)
+    #fold_acc{set=Set, actor=Actor} = Acc,
+    %% @TODO(rdb|robustness) what if the clock key is missing and
+    %% first_key finds something else from *this* Set?
+    case bigset:decode_key(Key) of
+        {clock, Set, Actor} ->
+            %% Set clock, send at once
+            Clock = bigset:from_bin(Value),
+            send({clock, Clock}, Acc),
+            Acc#fold_acc{not_found=false};
+        _ ->
+            throw({break, Acc})
+    end;
+fold({Key, Val}, Acc=#fold_acc{not_found=false}) ->
+    %% an element key? We've sent the clock (not_found=false)
     #fold_acc{set=Set, key_prefix=Pref, prefix_len=PrefLen} = Acc,
     case Key of
         <<Pref:PrefLen/binary, $c, _Rest/binary>> ->
@@ -69,88 +81,66 @@ fold({Key, _Val}, Acc=#fold_acc{not_found=false}) ->
             Acc;
         <<Pref:PrefLen/binary, $e, Rest/binary>> ->
             {element, Set, Element, Actor, Cnt, TSB} = bigset:decode_element(Rest, Set),
-            add(Element, Actor, Cnt, TSB, Acc);
+            Ctx = bigset:from_bin(Val),
+            add(Element, Actor, Cnt, TSB, Ctx, Acc);
         _ ->
             %% The end key
             throw({break, Acc})
-    end;
-fold({Key, Value}, Acc=#fold_acc{not_found=true}) ->
-    %% The first call for this acc, (nf=true!)
-    #fold_acc{set=Set, actor=Actor} = Acc,
-    %% @TODO(rdb|robustness) what if the clock key is missing and
-    %% first_key finds something else from *this* Set?
-    case bigset:decode_key(Key) of
-        {clock,Set, Actor} ->
-            %% Set clock, send at once
-            Clock = bigset:from_bin(Value),
-            send({clock, Clock}, Acc),
-            Acc#fold_acc{not_found=false};
-        _ ->
-            throw({break, Acc})
     end.
 
-%% @private leveldb compaction will do this too, but since we may
-%% always have lower `Cnt' writes for any `Actor' or a tombstone for
-%% any write, we only accumulate writes for an `Element' that are the
-%% highst `Cnt' for that `Element' and `Actor' and that are not
-%% deleted, which is shown as a `TSB' (Tombstone Bit) of `1' NOTE
-%% @TODO(rdb|corrrectness) tombstone cannot be removed by compaction
-%% until it is seen by the VV portion of the clock (the contiguous
-%% clock) other wise some gapped write could re-surface. Imagine
-%% writes {a, 1}, {a, 2}, {a,3}. Some replica sees {a,3} and
-%% tombstones it. If the ts is compacted away, and later the replica
-%% gets {a, 1} well technically {a, 3} removes {a, 1} but instead it
-%% re-surfaces. @TODO(rdb) tell Paulo
+%% @private For each element we most fold over all entries for that
+%% element. Entries for an element can be an add, or a remove (and if
+%% we ever get compaction working there maybe a special aggregrated
+%% tombstone too.) We merge all the Contexts of the entries (adds and
+%% removes) to get a context that represents all the "seen" additions
+%% for the element. We use the ctx to filter the dots in the Add
+%% entries. Each add entry that is not seen by the aggregaeted context
+%% "survives" and is in the local set.
 
-%% NOTE: for causal consistency with Action-At-A-Distance this all
-%% changes
+%% NOTE: for causal consistency with
+%% Action-At-A-Distance this all changes
 
 %% @TODO(rdb|refactor) abstract the accumulation logic for different
 %% behaviours (CC vs EC)
-add(Element, Actor, Cnt, TSB, Acc=#fold_acc{current_elem=Element,
-                                            current_actor=Actor}) ->
-    %% If this Element is the same as current and this actor is the
-    %% same as the current the count is greater or the TSB is set, add
-    %% current cnt, and tsb.
-    Acc#fold_acc{current_cnt=Cnt, current_tsb=TSB};
-add(Element, Actor, Cnt, TSB, Acc=#fold_acc{current_tsb=?ADD}) ->
-    %% If this element or actor is different look at TSB.  TSB is an
-    %% ?ADD so store the acc's current {element, {Actor, Cnt} to
-    %% elements and set current actor, current cnt, current tsb
+add(Element, Actor, Cnt, TSB, Ctx, Acc=#fold_acc{current_elem=Element}) ->
+    %% Same element, keep accumulating info
+    #fold_acc{current_ctx=CC, current_dots=Dots} = Acc,
+    AggCtx = bigset_clock:merge(Ctx, CC),
+    AggDots = maybe_add_dots({Actor, Cnt}, Dots, TSB),
+    Acc#fold_acc{current_ctx=AggCtx, current_dots=AggDots};
+add(Element, Actor, Cnt, TSB, Ctx, Acc=#fold_acc{current_elem=_}) ->
+    %% New element, maybe store the old one
     Acc2 = store_element(Acc),
     Acc3 = maybe_flush(Acc2),
-    Acc3#fold_acc{current_cnt=Cnt, current_elem=Element,
-                  current_actor=Actor, current_tsb=TSB};
+    Acc3#fold_acc{current_elem=Element,
+                  current_dots=maybe_add_dots({Actor, Cnt}, [], TSB),
+                  current_ctx=Ctx}.
 
-add(Element, NewActor, Cnt, TSB, Acc=#fold_acc{current_tsb=?REM}) ->
-
-    %% If this element or the actor is different look at TSB. TSB is
-    %% 1, do not add to Elements.
-    Acc#fold_acc{current_cnt=Cnt, current_elem=Element,
-                 current_actor=NewActor, current_tsb=TSB};
-add(Element, Actor, Cnt, TSB, Acc=#fold_acc{}) ->
-    %% Empty acc, first pass
-    Acc#fold_acc{current_elem=Element,
-                 current_actor=Actor,
-                 current_cnt=Cnt,
-                 current_tsb=TSB}.
+%% Only the ?ADD dots get added to the element's list of dots
+maybe_add_dots(_Dot, Dots, ?REM) ->
+    Dots;
+maybe_add_dots(Dot, Dots, ?ADD) ->
+    [Dot | Dots].
 
 %% @private add an element to the accumulator.
+store_element(Acc=#fold_acc{current_elem=undefined}) ->
+    Acc;
 store_element(Acc) ->
-    #fold_acc{current_actor=Actor,
-              current_cnt=Cnt,
-              current_elem=Elem,
+    #fold_acc{current_elem=Elem,
+              current_dots=Dots,
+              current_ctx=Ctx,
               elements=Elements,
               size=Size} = Acc,
+
     %% create a regular orswot from the bigset on disk
-    Elements2 = case Elements of
-                    [{Elem, Dots} | Rest] ->
-                        [{Elem, lists:umerge([{Actor, Cnt}], Dots)}
-                         | Rest];
-                    L ->
-                        [{Elem, [{Actor, Cnt}]} | L]
-                end,
-    Acc#fold_acc{elements=Elements2, size=Size+1}.
+    Remaining = bigset_clock:subtract_seen(Ctx, Dots),
+    case Remaining of
+        [] ->
+            Acc;
+        _ ->
+            Acc#fold_acc{elements=[{Elem, Remaining} | Elements],
+                         size=Size+1}
+    end.
 
 %% @private if the buffer is full, flush!
 maybe_flush(Acc=#fold_acc{size=Size, buffer_size=Size}) ->
@@ -191,14 +181,9 @@ flush(Acc) ->
 finalise(Acc=#fold_acc{not_found=true}) ->
     send(not_found, Acc),
     done(Acc);
-finalise(Acc=#fold_acc{current_tsb=?REM}) ->
-    done(Acc);
-finalise(Acc=#fold_acc{current_tsb=?ADD}) ->
-    AccFinal = store_element(Acc),
-    done(AccFinal);
 finalise(Acc) ->
-    %% the empty set
-    done(Acc).
+    AccFinal = store_element(Acc),
+    done(AccFinal).
 
 %% @private let the caller know we're done.
 done(Acc0) ->
@@ -210,74 +195,3 @@ done(Acc0) ->
 close(Acc) ->
     #fold_acc{monitor=Monitor} = Acc,
     erlang:demonitor(Monitor, [flush]).
-
--ifdef(TEST).
-%% add_test() ->
-%%     Acc2 = add(<<"A">>, <<"b">>, 1, <<0:1>>, new()),
-%%     ?assertEqual(#fold_acc{current_elem= <<"A">>,
-%%                            current_actor= <<"b">>,
-%%                            current_cnt= 1,
-%%                            current_tsb= <<0:1>>}, Acc2),
-%%     Acc3 = add(<<"A">>, <<"b">>, 4, <<0:1>>, Acc2),
-%%     ?assertEqual(#fold_acc{current_elem= <<"A">>,
-%%                            current_actor= <<"b">>,
-%%                            current_cnt= 4,
-%%                            current_tsb= <<0:1>>}, Acc3),
-%%     Acc4 = add(<<"A">>, <<"c">>, 99, <<0:1>>, Acc3),
-%%     ?assertEqual(#fold_acc{current_elem= <<"A">>,
-%%                            current_actor= <<"c">>,
-%%                            current_cnt= 99,
-%%                            current_tsb= <<0:1>>,
-%%                            elements=[{<<"A">>, [{<<"b">>, 4}]}]}, Acc4),
-%%     Acc5 = add(<<"A">>, <<"c">>, 99, <<1:1>>, Acc4),
-%%     ?assertEqual(#fold_acc{current_elem= <<"A">>,
-%%                            current_actor= <<"c">>,
-%%                            current_cnt= 99,
-%%                            current_tsb= <<1:1>>,
-%%                            elements=[{<<"A">>, [{<<"b">>, 4}]}]}, Acc5),
-%%     Acc6 = add(<<"A">>, <<"c">>, 100, <<0:1>>, Acc5),
-%%     ?assertEqual(#fold_acc{current_elem= <<"A">>,
-%%                            current_actor= <<"c">>,
-%%                            current_cnt= 100,
-%%                            current_tsb= <<0:1>>,
-%%                            elements=[{<<"A">>, [{<<"b">>, 4}]}]}, Acc6),
-%%     Acc7 = add(<<"A">>, <<"c">>, 103, <<1:1>>, Acc6),
-%%     ?assertEqual(#fold_acc{current_elem= <<"A">>,
-%%                            current_actor= <<"c">>,
-%%                            current_cnt= 103,
-%%                            current_tsb= <<1:1>>,
-%%                            elements=[{<<"A">>, [{<<"b">>, 4}]}]}, Acc7),
-%%     Acc8 = add(<<"A">>, <<"d">>, 3, <<0:1>>, Acc7),
-%%     ?assertEqual(#fold_acc{current_elem= <<"A">>,
-%%                            current_actor= <<"d">>,
-%%                            current_cnt= 3,
-%%                            current_tsb= <<0:1>>,
-%%                            elements=[{<<"A">>, [{<<"b">>, 4}]}]}, Acc8),
-%%     Acc9 = add(<<"Z">>, <<"a">>, 12, <<0:1>>, Acc8),
-%%     ?assertEqual(#fold_acc{current_elem= <<"Z">>,
-%%                            current_actor= <<"a">>,
-%%                            current_cnt= 12,
-%%                            current_tsb= <<0:1>>,
-%%                            elements=[{<<"A">>, [{<<"b">>, 4},
-%%                                                 {<<"d">>, 3}]}]}, Acc9),
-%%     Acc10 = add(<<"ZZ">>, <<"b">>, 19, <<1:1>>, Acc9),
-%%     ?assertEqual(#fold_acc{current_elem= <<"ZZ">>,
-%%                            current_actor= <<"b">>,
-%%                            current_cnt= 19,
-%%                            current_tsb= <<1:1>>,
-%%                            elements=[{<<"Z">>, [{<<"a">>, 12}]},
-%%                                      {<<"A">>, [{<<"b">>, 4},
-%%                                                 {<<"d">>, 3}]}
-%%                                     ]}, Acc10),
-%%     ?assertEqual([{<<"A">>, [{<<"b">>, 4},
-%%                              {<<"d">>, 3}]},
-%%                   {<<"Z">>, [{<<"a">>, 12}]}],
-%%                  finalise(Acc10)),
-%%     Acc11 = add(<<"ZZ">>, <<"b">>, 19, <<0:1>>, Acc9),
-%%     ?assertEqual([{<<"A">>, [{<<"b">>, 4},
-%%                              {<<"d">>, 3}]},
-%%                   {<<"Z">>, [{<<"a">>, 12}]},
-%%                   {<<"ZZ">>, [{<<"b">>, 19}]}],
-%%                  finalise(Acc11)).
-
--endif.

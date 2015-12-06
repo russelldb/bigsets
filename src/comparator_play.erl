@@ -91,32 +91,3 @@ key_vals() ->
      {bigset:insert_member_key(S2, E0, A2, 9), <<" S2, E0, A2, 9 Add">>},
      {bigset:remove_member_key(S1, E0, A2, 8), <<" S1, E0, A2, 8 Rem">>}].
 
-    %% Actor1 = <<"actor1">>,
-    %% lists:foldl(fun(Set, Acc) ->
-    %%                     Res = [{bigset:clock_key(Set, Actor1), val(Set)},
-    %%                            {biget:insert_member_key(Set, "000apple1"), val(Set ++ " elem " ++  "000appple1")},
-    %%                            {elem(Set, "zeba"), val(Set ++ " eleme " ++ "zeba")}],
-    %%                     lists:append(Res, Acc)
-    %%             end,
-    %%             [],
-    %%             ["zebra", "zeee", "abalone", "1230apple", "apple", "appl1",
-    %%              "aaaaaaaaaaaaaaaaaaaaaa","z", "a",  "za", "cat", "caatz", "barn"]).
-
-val(Key) ->
-    list_to_binary(Key).
-
-key(Key) ->
-    Bin = val(Key),
-    Len = byte_size(Bin),
-    <<Len:32/little-unsigned-integer, Bin:Len/binary>>.
-
-clock(Set) ->
-    Key = key(Set),
-    <<Key/binary, 0:32/little-unsigned-integer>>.
-
-elem(Set, Elem) ->
-    Key = key(Set),
-    EBin = key(Elem),
-    <<Key/binary, EBin/binary>>.
-
-

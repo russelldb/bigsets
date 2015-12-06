@@ -144,8 +144,6 @@ key_prefix(Set) when is_binary(Set) ->
 %% AAE/replication of clocks is safe. Like a decomposed VV, an actor
 %% may only update it's own clock.
 clock_key(Set, Actor) ->
-    %% @TODO(rbd|optimise) This could just be <<SetLen, Set, Actor>>
-    %% with maybe a single byte 0 | 1 for clock | element key!
     Pref = key_prefix(Set),
     <<Pref/binary,
       $c, %% means clock
@@ -184,17 +182,10 @@ decode_element(<<ElemLen:32/little-unsigned-integer, Rest/binary>>, Set) ->
               TSB>> = ActorEtc,
     {element, Set, Elem, Actor, Cnt, TSB}.
 
-%% @private sext encodes the element key so it is in order, on disk,
-%% with the other elements. Use the actor ID and counter (dot)
-%% too. This means at some extra storage, but makes for no reads
-%% before writes on replication/delta merge. See read for how the
-%% leveldb merge magic will work. Essentially every key {s, Set, E, A,
-%% Cnt, 0} that has some key {s, Set, E, A, Cnt', 0} where Cnt' > Cnt
-%% can be removed in compaction, as can every key {s, Set, E, A, Cnt,
-%% 0} which has some key {s, Set, E, A, Cnt', 1} whenre Cnt' >=
-%% Cnt. As can every key {s, Set, E, A, Cnt, 1} where the VV portion
-%% of the set clock >= {A, Cnt} @TODO(rdb) document how this tombstone
-%% reaping works! Crazy!!
+%% @private encodes the element key so it is in order, on disk, with
+%% the other elements. Use the actor ID and counter (dot) too. This
+%% means at some extra storage, but makes for no reads before writes
+%% on replication/delta merge.
 -spec insert_member_key(set(), member(), actor(), counter()) -> key().
 insert_member_key(Set, Elem, Actor, Cnt) ->
     Pref = key_prefix(Set),
@@ -207,8 +198,6 @@ insert_member_key(Set, Elem, Actor, Cnt) ->
       ActorLen:32/little-unsigned-integer,
       Actor:ActorLen/binary,
       Cnt:64/little-unsigned-integer,
- %% @TODO(rdb|optimise) no need for a 32-bit int to express 0 | 1 TSB,
- %% but the c++ comparator is beyond me!
       $a %% means an add
     >>.
 
@@ -226,8 +215,6 @@ remove_member_key(Set, Elem, Actor, Cnt) ->
       ActorLen:32/little-unsigned-integer,
       Actor:ActorLen/binary,
       Cnt:64/little-unsigned-integer,
-      %% @TODO(rdb|optimise) no need for a 32-bit int to express 0 | 1, but
-      %% the c++ comparator is beyond me!
       $r %% means a remove
     >>.
 
@@ -259,16 +246,3 @@ words_to_list({ok, Word0}, FD, N ,Acc) ->
 
 strip_cr(Word) ->
     list_to_binary(lists:reverse(tl(lists:reverse(Word)))).
-
-
-
-%% PL = bigset:preflist(<<"rdb-test-bm-2">>).
-%%  NPL = {1004782375664995756265033322492444576013453623296,
-%% bigset_vnode:get_db(NPL).
-%% DB = receive {_, {ok, DB}} -> DB end.
-%% {ok, Itr} = eleveldb:iterator(DB,  [{iterator_refresh, true}]).
-%% Decode = fun({ok, K, <<>>}) -> sext:decode(K);({ok, K, V}) -> {sext:decode(K) , binary_to_term(V)};(Other) -> Other end.
-
-%%  Frst = eleveldb:iterator_move(Itr, first).
-%%  Decode(Frst).
-%%  Rss = [Decode( eleveldb:iterator_move(Itr, prefetch)) || _N <- lists:seq(1, 1000)].
