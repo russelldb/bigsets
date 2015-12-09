@@ -118,6 +118,9 @@ create_replica(Id) ->
 create_replica_next(S=#state{replicas=R0}, _Value, [Id]) ->
     S#state{replicas=R0++[Id]}.
 
+create_replica_post(_S, [Replica], _) ->
+    post_equals(Replica).
+
 %% ------ Grouped operator: add
 add_args(#state{replicas=Replicas}) ->
     [elements(Replicas),
@@ -166,6 +169,14 @@ add(Replica, Element) ->
 add_next(S=#state{adds=Adds, deltas=Deltas}, Delta, [_Replica, Element]) ->
     S#state{adds=lists:umerge(Adds, [Element]),
             deltas=[Delta | Deltas]}.
+
+%% @doc add_post - Postcondition for add
+-spec add_post(S, Args, Res) -> true | term()
+    when S    :: eqc_state:dynamic_state(),
+         Args :: [term()],
+         Res  :: term().
+add_post(_S, [Replica, _Element], _) ->
+    post_equals(Replica).
 
 %% ------ Grouped operator: remove
 remove_args(#state{replicas=Replicas, adds=Adds}) ->
@@ -218,6 +229,9 @@ remove(From, Element) ->
 remove_next(S=#state{deltas=Deltas}, Delta, [_From, _RemovedElement]) ->
     S#state{deltas=[Delta | Deltas]}.
 
+remove_post(_S, [Replica, _E], _) ->
+    post_equals(Replica).
+
 %% ------ Grouped operator: replicate @doc replicate_args - Choose
 %% delta batch and target for replication. We pick a subset of the
 %% delta to simulate dropped, re-ordered, repeated messages.
@@ -241,7 +255,7 @@ replicate_pre(#state{replicas=Replicas, deltas=Deltas}, [Delta, To]) ->
 replicate(Delta, To) ->
     [#replica{id=To, delta_set=Set,
               bigset=BS=#bigset{clock=ToClock, keys=ToKeys}}=ToRep] = ets:lookup(?MODULE, To),
-    F = fun({{_Element, Actor, Cnt, ?ADD}=Key, V}, {Clock, Writes}) ->
+    F = fun({{_Element, Actor, Cnt, _}=Key, V}, {Clock, Writes}) ->
                 Dot = {Actor, Cnt},
                 case bigset_clock:seen(Clock, Dot) of
                     true ->
@@ -251,13 +265,7 @@ replicate(Delta, To) ->
                         %% Strip the dot
                         C2 = bigset_clock:strip_dots(Dot, Clock),
                         {C2, [{Key, V} | Writes]}
-                end;
-           ({{_Element, Actor, Cnt, ?REMOVE}=Key, V}, {Clock, Writes}) ->
-                %% Tombstones are always written, compaction can merge
-                %% them out later. But we must add the dots to the
-                %% clock!!
-                C2 = bigset_clock:strip_dots({Actor, Cnt}, Clock),
-                {C2, [{Key, V} | Writes]}
+                end
         end,
 
     {BSDelta, SwotDelta} = lists:foldl(fun(#delta{bs_delta=BSD, dt_delta=DT}, {B, D}) ->
@@ -282,6 +290,9 @@ replicate(Delta, To) ->
 
 replicate_next(S=#state{delivered=Delivered}, _, [Delta, _To]) ->
     S#state{delivered=[Delta | Delivered]}.
+
+replicate_post(_S, [_Delta, Replica], _) ->
+    post_equals(Replica).
 
 %% --- Operation: compact ---
 %% @doc compact_pre/1 - Precondition for generation
@@ -358,6 +369,7 @@ prop_merge() ->
                 (catch ets:delete(?MODULE)),
                 ets:new(?MODULE, [named_table, set, {keypos, #replica.id}]),
                 {H, S=#state{delivered=Delivered0, deltas=Deltas}, Res} = run_commands(?MODULE,Cmds),
+
                 {MergedBigset, MergedSwot, BigsetLength} = lists:foldl(fun(#replica{bigset=Bigset, delta_set=ORSWOT}, {MBS, MOS, BSLen}) ->
                                                                                {BigsetCompacted, _Saving} = compact_bigset(Bigset),
                                                                                {merge_bigsets(Bigset, MBS),
@@ -616,5 +628,19 @@ subset(Set) ->
 remove_keys(Element, {_Clock, Keys}) ->
     Keys2 = accumulate(Keys),
     [{E, A, C, ?REMOVE} || {E, A, C} <- Keys2, E == Element].
+
+post_equals(_Replica) ->
+    true.
+
+    %%  [#replica{id=Replica,
+    %%           bigset=BS=#bigset{clock=Clock},
+    %%           delta_set=ORSWOT}] = ets:lookup(?MODULE, Replica),
+    %% Acc = accumulate(BS),
+    %% case sets_equal(#bigset{keys=Acc, clock=Clock}, ORSWOT) of
+    %%     true ->
+    %%         true;
+    %%     Fail ->
+    %%         {Replica, Fail}
+    %% end.
 
 -endif.
