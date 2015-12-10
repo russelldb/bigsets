@@ -116,8 +116,8 @@ init([Partition]) ->
 
 %% COMMANDS(denosneold!)
 handle_command(get_db, _Sender, State) ->
-    #state{db=DB} = State,
-    {reply, {ok, DB}, State};
+    #state{db=DB, vnodeid=Id} = State,
+    {reply, {ok, DB, Id}, State};
 handle_command(dump_db, _Sender, State) ->
     #state{db=DB, partition=P} = State,
 
