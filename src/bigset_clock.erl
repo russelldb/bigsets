@@ -78,6 +78,7 @@ strip_dots({Actor, Cnt}, {Clock, Seen}) ->
                          Seen),
     compress_seen(Clock, Seen2).
 
+-spec seen(clock(), dot()) -> boolean().
 seen({Clock, Seen}, {Actor, Cnt}=Dot) ->
     (riak_dt_vclock:descends(Clock, [Dot]) orelse
      lists:member(Cnt, fetch_dot_list(Actor, Seen))).
@@ -141,6 +142,7 @@ compress(Cnt, Cnts) ->
     {Cnt, Cnts}.
 
 %% true if A descends B, false otherwise
+-spec descends(clock(), clock()) -> boolean().
 descends({ClockA, _DotsA}=A, {ClockB, DotsB}) ->
     riak_dt_vclock:descends(ClockA, ClockB)
         andalso
