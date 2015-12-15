@@ -302,6 +302,7 @@ handle_exit(_Pid, _Reason, State) ->
     {noreply, State}.
 
 terminate(_Reason, State) ->
+    lager:info("State ~p~n", [State]),
     case State#state.db of
         undefined ->
             ok;

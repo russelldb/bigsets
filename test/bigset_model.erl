@@ -16,6 +16,7 @@
 
 -define(ADD, add).
 -define(REMOVE, remove).
+-define(TOMBSTONE(E), {E, actor, counter, tsb}).
 
 -record(bigset, {
           clock=?CLOCK:fresh(),
@@ -31,7 +32,7 @@
                                tsb()}.
 -type tsb() :: add | remove.
 -type tombstone_key() :: {Element :: term(),
-                          tombstone}.
+                          actor, counter, tsb}.
 -type context() :: bigset_clock:clock().
 
 -type fold_acc() :: compaction_acc() | read_acc().
@@ -151,7 +152,7 @@ fold_bigset(#bigset{clock=Clock, keys=Keys}, FlushFun) ->
                                    Dots,
                                    bigset_clock:merge(Ctx, CtxAcc)
                                   } | Acc];
-                            ({E, tombstone}, Ctx, [{E, Dots, CtxAcc} | Acc]) ->
+                            (?TOMBSTONE(E), Ctx, [{E, Dots, CtxAcc} | Acc]) ->
                                  %% The per element tombstone, just the ctx needed
                                  [{E,
                                    Dots,
@@ -207,7 +208,7 @@ tombstone(E, _R, Ctx, Clock) ->
             %% it tombstones will not be written again
             [];
         false  ->
-            [{{E, tombstone}, Ctx}]
+            [{?TOMBSTONE(E), Ctx}]
     end.
 
 %% @private the vnode fold operation. Similar to compact but returns
@@ -323,7 +324,7 @@ merge(#bigset{clock=C1, keys=Set1}, #bigset{clock=C2, keys=Set2}) ->
                                                               {RHSU, orddict:store(Key, Ctx, Acc)}
                                                       end
                                               end;
-                                         ({_E, tombstone}=Key, Ctx, {RHSU, Acc}) ->
+                                         (?TOMBSTONE(_E)=Key, Ctx, {RHSU, Acc}) ->
                                               %% @TODO(rdb) what do we
                                               %% do here?  Always
                                               %% store? Only store if
