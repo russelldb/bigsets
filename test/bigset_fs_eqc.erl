@@ -344,22 +344,6 @@ prop_merge() ->
             end).
 
 
-%% this is the algo that level will run.
-%%
-%% Any add of E with dot {A, C} can be removed if it is dominated by
-%% the context of any other add of E. Or put another way, merge all
-%% the contexts for E,(adds and removes) and remove all {A,C} Adds
-%% that are dominated. NOTE: the contexts of removed adds must be
-%% retained in a special per-element tombstone if the set clock does
-%% not descend them.
-%%
-%% Tombstones:: write the fully merged context from the fold over E as
-%% a per-element tombstone, remove all others. Remove the per-element
-%% tombstone if it's value (Ctx) is descended by the set clock.
-
-%% @NOTE(rdb) all this will have a profound effect on AAE/Read Repair,
-%% so re-think it then. (Perhaps "filling" from the set clock in that
-%% event?)
 compact_bigset(BS) ->
     Before = bigset_model:size(BS),
     Compacted = bigset_model:compact(BS),

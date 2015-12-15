@@ -9,6 +9,8 @@
 
 -compile([export_all]).
 
+-export_type([bigset/0, delta/0, context/0]).
+
 -define(CLOCK, bigset_clock).
 -define(SET, set).
 
@@ -21,14 +23,50 @@
          }).
 
 -type bigset() :: #bigset{}.
+-type delta() :: op_key().
+-type key() :: delta() | tombstone_key().
+-type op_key() :: {Element :: term(),
+                    Actor   :: term(),
+                    Count   :: pos_integer(),
+                               tsb()}.
+-type tsb() :: add | remove.
+-type tombstone_key() :: {Element :: term(),
+                          tombstone}.
+-type context() :: bigset_clock:clock().
 
+-type fold_acc() :: compaction_acc() | read_acc().
+
+-type compaction_acc() :: [fold_acc_head() | {key(), context()}].
+-type read_acc() :: [fold_acc_head() | orswot_elem()].
+
+-type fold_acc_head() :: {Element :: term(),
+                          dotlist(),
+                          context()}.
+
+-type dotlist() :: [bigset_clock:dot()].
+
+-type orswot_elem() :: {Element :: term(),
+                        dotlist()}.
+
+-type merged_bigset() :: {bigset_clock:clock(),
+                          [orswot_elem()]}.
+
+-spec new() -> bigset().
 new() ->
     #bigset{}.
 
+-spec new_mbs() -> merged_bigset().
+new_mbs() ->
+    {bigset_clock:fresh(), orddict:new()}.
+
+-spec add(term(), term(), bigset()) ->
+                 {delta(), bigset()}.
 add(Element, ID, Bigset) ->
     #bigset{clock=Clock} = Bigset,
     add(Element, ID, Bigset, Clock).
 
+-spec add(term(), term(), bigset(), context()) ->
+                 {delta(), bigset()}.
 add(Element, ID, Bigset, Ctx) ->
     #bigset{clock=Clock, keys=Keys} = Bigset,
     {{ID, Cnt}, Clock2} = bigset_clock:increment(ID, Clock),
@@ -40,10 +78,14 @@ add(Element, ID, Bigset, Ctx) ->
     Keys2 = orddict:store(Key, Val, Keys),
     {{Key, Val}, #bigset{clock=Clock2, keys=Keys2}}.
 
+-spec remove(term(), term(), bigset()) ->
+                    {delta(), bigset()}.
 remove(Element, ID, Bigset) ->
     #bigset{clock=Clock} = Bigset,
     remove(Element, ID, Bigset, Clock).
 
+-spec remove(term(), term(), bigset(), context()) ->
+                    {delta(), bigset()}.
 remove(Element, ID, Bigset, Ctx) ->
     #bigset{clock=Clock, keys=Keys} = Bigset,
     {{ID, Cnt}, Clock2} = bigset_clock:increment(ID, Clock),
@@ -52,6 +94,7 @@ remove(Element, ID, Bigset, Ctx) ->
     Keys2 = orddict:store(Key, Val, Keys),
     {{Key, Val}, #bigset{clock=Clock2, keys=Keys2}}.
 
+-spec delta_join(delta(), bigset()) -> bigset().
 delta_join(Delta, Bigset) ->
     #bigset{clock=Clock, keys=Keys} = Bigset,
     {{_E, A, C, _}=Key, Val} = Delta,
@@ -63,16 +106,37 @@ delta_join(Delta, Bigset) ->
             Bigset#bigset{clock=C2, keys=orddict:store(Key, Val, Keys)}
     end.
 
-value(Bigset) ->
-    orddict:fetch_keys(accumulate(Bigset)).
+-spec value(merged_bigset() | bigset()) -> [term()].
+value(#bigset{}=Bigset) ->
+    orddict:fetch_keys(accumulate(Bigset));
+value({_C, Keys}) ->
+    orddict:fetch_keys(Keys).
 
+-spec size(bigset()) -> non_neg_integer().
 size(Bigset) ->
     orddict:size(Bigset#bigset.keys).
 
+%% this is the algo that level will run.
+%%
+%% Any add of E with dot {A, C} can be removed if it is dominated by
+%% the context of any other add of E. Or put another way, merge all
+%% the contexts for E,(adds and removes) and remove all {A,C} Adds
+%% that are dominated. NOTE: the contexts of removed adds must be
+%% retained in a special per-element tombstone if the set clock does
+%% not descend them.
+%%
+%% Tombstones:: write the fully merged context from the fold over E as
+%% a per-element tombstone, remove all others. Remove the per-element
+%% tombstone if it's value (Ctx) is descended by the set clock.
+
+%% @NOTE(rdb) all this will have a profound effect on AAE/Read Repair,
+%% so re-think it then. (Perhaps "filling" from the set clock in that
+%% event?)
+-spec compact(bigset()) -> bigset().
 compact(Bigset) ->
      fold_bigset(Bigset, fun compaction_flush_acc/2).
 
--spec fold_bigset(bigset(), function()) -> {bigset(), integer()}.
+-spec fold_bigset(bigset(), function()) -> bigset().
 fold_bigset(#bigset{clock=Clock, keys=Keys}, FlushFun) ->
     Keys2 = orddict:fold(fun({E, A, C, ?ADD}, Ctx, [{E, Dots, CtxAcc} | Acc]) ->
                                  %% Still same element, accumulate keys and Ctx
@@ -104,11 +168,15 @@ fold_bigset(#bigset{clock=Clock, keys=Keys}, FlushFun) ->
     #bigset{clock=Clock, keys= Keys3}.
 
 %% start over the per-element portition of the accumulator
+-spec new_acc(key(), context()) ->
+                     fold_acc_head().
 new_acc({E, A, C, ?ADD}, Ctx) ->
     {E, [{A, C}], Ctx};
 new_acc(K, Ctx) ->
     {element(1, K), [], Ctx}.
 
+-spec compaction_flush_acc(fold_acc(), context()) ->
+                                  compaction_acc().
 compaction_flush_acc([], _Clock) ->
     [];
 compaction_flush_acc([{Element, Dots, Ctx} | Acc], Clock) ->
@@ -124,6 +192,8 @@ compaction_flush_acc([{Element, Dots, Ctx} | Acc], Clock) ->
     [ {{Element, A, C, ?ADD}, bigset_clock:fresh()} || {A, C} <- Remaining]
         ++ Tombstone ++ Acc.
 
+-spec tombstone(Element :: term(), dotlist(), context(), context()) ->
+                       [] | [tombstone_key()].
 tombstone(E, _R, Ctx, Clock) ->
     %% Even though the remaining elements have been stripped of their
     %% contexts, it is safe to remove a tombstone that is dominated by
@@ -143,10 +213,7 @@ tombstone(E, _R, Ctx, Clock) ->
 %% @private the vnode fold operation. Similar to compact but returns
 %% an ordered list of Element->Dots mappings only, no tombstones or
 %% clock.
--spec accumulate(bigset()) -> [{Element::term(),
-                                Dots::[{Actor::term(),
-                                        Cnt::pos_integer()}]
-                               }].
+-spec accumulate(bigset()) -> [orswot_elem()].
 accumulate(BS) ->
     #bigset{keys=Keys} = fold_bigset(BS, fun accumulate_flush_acc/2),
     Keys.
@@ -156,6 +223,7 @@ accumulate(BS) ->
 %% accumulated, one entry per element, with a value that is the
 %% surviving dots set. This creates a structure like a traditional
 %% orswot.
+-spec accumulate_flush_acc(read_acc(), context()) -> read_acc().
 accumulate_flush_acc([], _Clock) ->
     [];
 accumulate_flush_acc([{Element, Dots, Ctx} | Acc], _Clock) ->
@@ -169,7 +237,69 @@ accumulate_flush_acc([{Element, Dots, Ctx} | Acc], _Clock) ->
             [{Element, RemDots} | Acc]
     end.
 
-%% @TODO orswot style merge, so, you know, ugly
+read(BS) ->
+    #bigset{clock=Clock} = BS,
+    Keys = accumulate(BS),
+    {Clock, Keys}.
+
+%% A merge as per the read path, where each bigset is first
+%% accumulated out of the backend into a regular orswot like
+%% structure.
+-spec read_merge(merged_bigset(), merged_bigset()) -> merged_bigset().
+read_merge(MBS1, MBS2) ->
+    {Clock1, Keys1} = MBS1,
+    {Clock2, Keys2} = MBS2,
+
+    {Set2Unique, Keep} = orddict:fold(fun(Elem, LDots, {RHSU, Acc}) ->
+                                              case orddict:find(Elem, Keys2) of
+                                                  {ok, RDots} ->
+                                                      %% In both, keep maybe
+                                                      RHSU2 = orddict:erase(Elem, RHSU),
+                                                      Both = ordsets:intersection([ordsets:from_list(RDots), ordsets:from_list(LDots)]),
+                                                      RHDots = bigset_clock:subtract_seen(Clock1, RDots),
+                                                      LHDots = bigset_clock:subtract_seen(Clock2, LDots),
+
+                                                      case lists:usort(RHDots ++ LHDots ++ Both) of
+                                                          [] ->
+                                                              %% it's gone!
+                                                              {RHSU2, Acc};
+                                                          Dots ->
+                                                              {RHSU2, orddict:store(Elem, Dots, Acc)}
+                                                      end;
+                                                  error ->
+                                                      %% Set 1 only, did set 2 remove it?
+                                                      case bigset_clock:subtract_seen(Clock2, LDots) of
+                                                          [] ->
+                                                              %% removed
+                                                              {RHSU, Acc};
+                                                          Dots ->
+                                                              %% unseen by set 2
+                                                              {RHSU, orddict:store(Elem, Dots, Acc)}
+                                                      end
+                                              end
+                                      end,
+                                      {Keys2, orddict:new()},
+                                      Keys1),
+    %% Do it again on set 2
+    MergedKeys = orddict:fold(fun(Elem, RDots, Acc) ->
+                                      %% Set 2 only, did set 1 remove it?
+                                      case bigset_clock:subtract_seen(Clock1, RDots) of
+                                          [] ->
+                                              %% removed
+                                              Acc;
+                                          Dots ->
+                                              %% unseen by set 1
+                                              orddict:store(Elem, Dots, Acc)
+                                      end
+                              end,
+                              Keep,
+                              Set2Unique),
+
+    {bigset_clock:merge(Clock1, Clock2),
+     MergedKeys}.
+
+%% Full state replication merge of two bigsets.
+-spec merge(bigset(), bigset()) -> bigset().
 merge(#bigset{clock=C1, keys=Set1}, #bigset{clock=C2, keys=Set2}) ->
     Clock = bigset_clock:merge(C1, C2),
     {Set2Unique, Keep} = orddict:fold(fun({_E, A, C, _TSB}=Key, Ctx, {RHSU, Acc}) ->
