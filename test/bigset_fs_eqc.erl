@@ -1,6 +1,6 @@
 %% -------------------------------------------------------------------
 %%
-%% a testing place for bigset ideas
+%% a testing place for bigset ideas (this one does full state replication)
 %%
 %% Copyright (c) 2007-2014 Basho Technologies, Inc.  All Rights Reserved.
 %%
@@ -19,7 +19,7 @@
 %%
 %% -------------------------------------------------------------------
 
--module(bigset_eqc).
+-module(bigset_fs_eqc).
 
 -ifdef(EQC).
 -include_lib("eqc/include/eqc.hrl").
@@ -28,26 +28,18 @@
 
 -compile(export_all).
 
--define(SWOT, riak_dt_delta_orswot).
--define(CLOCK, bigset_clock).
+-define(SWOT, riak_dt_orswot).
 -define(SET, set).
 
 -record(state, {replicas=[], %% Actor Ids for replicas in the system
                 adds=[],      %% Elements that have been added to the set
-                deltas=[], %% delta result of add/remove goes here for later replication/delivery
-                delivered=[], %% track which deltas actually get delivered (for stats/funsies)
                 compacted=[] %% how many keys were removed by a compaction
                }).
 
 -record(replica, {
           id,            %% The replica ID
-          bigset=bigset_model:new(),%% a sort of bigset type structure
-          delta_set=?SWOT:new()      %% the model delta for comparison
-         }).
-
--record(delta, {
-          bs_delta,
-          dt_delta
+          bigset=bigset_model:new(),  %% a sort of bigset type structure
+          set=?SWOT:new()      %% the old style orswot for comparison
          }).
 
 %% The set of possible elements in the set
@@ -125,17 +117,16 @@ add_pre(#state{replicas=Replicas}, [Replica, _]) ->
 add(Replica, Element) ->
     [#replica{id=Replica,
               bigset=BS,
-              delta_set=ORSWOT}=Rep] = ets:lookup(?MODULE, Replica),
+              set=ORSWOT}=Rep] = ets:lookup(?MODULE, Replica),
 
     %% In the absence of a client and AAAD, use the clock at the
     %% coordinating replica as the context of the add operation, any
     %% 'X' seen at this node will be removed by an add of an 'X'
-    {BSDelta, BS2} = bigset_model:add(Element, Replica, BS),
-    {ok, Delta} = ?SWOT:delta_update({add, Element}, Replica, ORSWOT),
-    ORSWOT2 = ?SWOT:merge(Delta, ORSWOT),
+    {_Delta, BS2} = bigset_model:add(Element, Replica, BS),
 
-    ets:insert(?MODULE, Rep#replica{bigset=BS2, delta_set=ORSWOT2}),
-    #delta{bs_delta=BSDelta, dt_delta=Delta}.
+    {ok, ORSWOT2} = ?SWOT:update({add, Element}, Replica, ORSWOT),
+
+    ets:insert(?MODULE, Rep#replica{bigset=BS2, set=ORSWOT2}).
 
 %% @doc add_next - Add the `Element' to the `adds' list so we can
 %% select from it when we come to remove. This increases the liklihood
@@ -144,9 +135,8 @@ add(Replica, Element) ->
 -spec add_next(S :: eqc_statem:symbolic_state(),
                V :: eqc_statem:var(),
                Args :: [term()]) -> eqc_statem:symbolic_state().
-add_next(S=#state{adds=Adds, deltas=Deltas}, Delta, [_Replica, Element]) ->
-    S#state{adds=lists:umerge(Adds, [Element]),
-            deltas=[Delta | Deltas]}.
+add_next(S=#state{adds=Adds}, _, [_Replica, Element]) ->
+    S#state{adds=lists:umerge(Adds, [Element])}.
 
 %% @doc add_post - Postcondition for add
 -spec add_post(S, Args, Res) -> true | term()
@@ -176,7 +166,7 @@ remove_pre(#state{replicas=Replicas, adds=Adds}, [From, Element]) ->
 %% @doc a dynamic precondition uses concrete state, check that the
 %% `From' set contains `Element'
 remove_dynamicpre(_S, [From, Element]) ->
-    [#replica{id=From, delta_set=Set}] = ets:lookup(?MODULE, From),
+    [#replica{id=From, set=Set}] = ets:lookup(?MODULE, From),
     lists:member(Element, ?SWOT:value(Set)).
 
 %% @doc perform a context remove using the context+element at `From'
@@ -184,23 +174,15 @@ remove_dynamicpre(_S, [From, Element]) ->
 remove(From, Element) ->
     [Rep=#replica{id=From,
                   bigset=BS,
-                  delta_set=ORSWOT=Set}] = ets:lookup(?MODULE, From),
+                  set=ORSWOT}] = ets:lookup(?MODULE, From),
 
+    {ok, ORSWOT2} = ?SWOT:update({remove, Element}, From, ORSWOT),
 
-    {ok, Delta} = ?SWOT:delta_update({remove, Element}, From, Set),
-    ORSWOT2 = ?SWOT:merge(Delta, ORSWOT),
-    {BSDelta, BS2} = bigset_model:remove(Element, From, BS),
-    ets:insert(?MODULE, Rep#replica{bigset=BS2, delta_set=ORSWOT2}),
-
-    #delta{bs_delta=BSDelta, dt_delta=Delta}.
-
-%% @doc remove_next - Add remove keys to the delta
-%% buffer.
--spec remove_next(S :: eqc_statem:symbolic_state(),
-                               V :: eqc_statem:var(),
-                               Args :: [term()]) -> eqc_statem:symbolic_state().
-remove_next(S=#state{deltas=Deltas}, Delta, [_From, _RemovedElement]) ->
-    S#state{deltas=[Delta | Deltas]}.
+    %% In the absence of a client and AAAD, use the clock at the
+    %% coordinating replica as the context of the remove operation,
+    %% any 'X' seen at this node will be removed
+    {_Delta, BS2} = bigset_model:remove(Element, From, BS),
+    ets:insert(?MODULE, Rep#replica{bigset=BS2, set=ORSWOT2}).
 
 remove_post(_S, [Replica, _E], _) ->
     post_equals(Replica).
@@ -208,44 +190,37 @@ remove_post(_S, [Replica, _E], _) ->
 %% ------ Grouped operator: replicate @doc replicate_args - Choose
 %% delta batch and target for replication. We pick a subset of the
 %% delta to simulate dropped, re-ordered, repeated messages.
-replicate_args(#state{replicas=Replicas, deltas=Deltas}) ->
-    [subset(Deltas),
+replicate_args(#state{replicas=Replicas}) ->
+    [elements(Replicas),
      elements(Replicas)].
 
 %% @doc replicate_pre - There must be at least one replica to replicate
 -spec replicate_pre(S :: eqc_statem:symbolic_state()) -> boolean().
-replicate_pre(#state{replicas=Replicas, deltas=Deltas}) ->
-    Replicas /= [] andalso Deltas /= [].
+replicate_pre(#state{replicas=Replicas}) ->
+    Replicas /= [].
 
 %% @doc replicate_pre - Ensure correct shrinking
 -spec replicate_pre(S :: eqc_statem:symbolic_state(),
                     Args :: [term()]) -> boolean().
-replicate_pre(#state{replicas=Replicas, deltas=Deltas}, [Delta, To]) ->
-    sets:is_subset(sets:from_list(Delta), sets:from_list(Deltas))
-        andalso lists:member(To, Replicas).
+replicate_pre(#state{replicas=Replicas}, [From, To]) ->
+    lists:member(From, Replicas) andalso lists:member(To, Replicas).
 
-%% @doc simulate replication by merging state at `To' with the delta
-replicate(Delta, To) ->
-    [#replica{id=To, delta_set=Set,
-              bigset=BS}=ToRep] = ets:lookup(?MODULE, To),
+%% @doc simulate replication by merging state at `To' with From
+replicate(From, To) ->
+    [#replica{id=From, set=FromSet,
+              bigset=FromBS}] = ets:lookup(?MODULE, From),
+    [#replica{id=To, set=Set,
+              bigset=ToBS}=ToRep] = ets:lookup(?MODULE, To),
 
-    {BS2, SwotDelta} = lists:foldl(fun(#delta{bs_delta=BSD, dt_delta=DT}, {B, D}) ->
-                                               {bigset_model:delta_join(BSD, B),
-                                                ?SWOT:merge(DT, D)}
-                                       end,
-                                       {BS, ?SWOT:new()},
-                                       Delta),
+    Set2 = ?SWOT:merge(Set, FromSet),
 
+    BS2 = bigset_model:merge(FromBS, ToBS),
 
-    Set2 = ?SWOT:merge(Set, SwotDelta),
     ets:insert(?MODULE, ToRep#replica{bigset=BS2,
-                                      delta_set=Set2}).
+                                      set=Set2}).
 
-replicate_next(S=#state{delivered=Delivered}, _, [Delta, _To]) ->
-    S#state{delivered=[Delta | Delivered]}.
-
-replicate_post(_S, [_Delta, Replica], _) ->
-    post_equals(Replica).
+replicate_post(_S, [_From, To], _) ->
+    post_equals(To).
 
 %% --- Operation: compact ---
 %% @doc compact_pre/1 - Precondition for generation
@@ -283,14 +258,17 @@ compact_next(S=#state{compacted=Compacted}, Value, [_Replica]) ->
     when S    :: eqc_state:dynamic_state(),
          Args :: [term()],
          Res  :: term().
-compact_post(_S, [_Replica], {_Diff, Before, After}) ->
-    case replica_value(Before) == replica_value(After) of
-        true ->
+compact_post(_S, [Replica], {_Diff, Before, After}) ->
+    case {replica_value(Before) == replica_value(After), post_equals(Replica)} of
+        {true, true} ->
             true;
-        false ->
-            {replica_value(Before), Before, '/=', replica_value(After), After}
+        {false, true} ->
+            {Before, '/=', After};
+        {false, E} ->
+            {{Before, '/=', After}, "&&", E};
+        {true, E} ->
+            E
     end.
-
 
 %% @doc weights for commands. Don't create too many replicas, but
 %% prejudice in favour of creating more than 1. Try and balance
@@ -321,19 +299,19 @@ prop_merge() ->
                 %% shrinking. This is best practice.
                 (catch ets:delete(?MODULE)),
                 ets:new(?MODULE, [named_table, set, {keypos, #replica.id}]),
-                {H, S=#state{delivered=Delivered0, deltas=Deltas}, Res} = run_commands(?MODULE,Cmds),
+                {H, S, Res} = run_commands(?MODULE,Cmds),
 
-                {MergedBigset, MergedSwot, BigsetLength} = lists:foldl(fun(#replica{bigset=Bigset, delta_set=ORSWOT}, {MBS, MOS, BSLen}) ->
+                {MergedBigset0, MergedSwot, BigsetLength} = lists:foldl(fun(#replica{bigset=Bigset, set=ORSWOT}, {MBS, MOS, BSLen}) ->
                                                                                BigsetCompacted = bigset_model:compact(Bigset),
-                                                                               ReadBigset = bigset_model:read(Bigset),
-                                                                               {bigset_model:read_merge(ReadBigset, MBS),
+                                                                               {bigset_model:merge(Bigset, MBS),
                                                                                 ?SWOT:merge(ORSWOT, MOS),
                                                                                 bigset_length(BigsetCompacted, BSLen)}
                                                                        end,
-                                                                       {bigset_model:new_mbs(), ?SWOT:new(), 0},
+                                                                       {bigset_model:new(), ?SWOT:new(), 0},
                                                                        ets:tab2list(?MODULE)),
 
-                Delivered = lists:flatten(Delivered0),
+                %% @TODO(rdb) compact bigset?
+                MergedBigset = bigset_model:compact(MergedBigset0),
                 Compacted = [begin
                                  case element(1, V) of
                                      N when N == 0 ->
@@ -354,28 +332,24 @@ prop_merge() ->
                 pretty_commands(?MODULE, Cmds, {H, S, Res},
                                 aggregate(command_names(Cmds),
                                           aggregate(with_title('Compaction Effect'), Compacted,
-                                                    measure(deltas, length(Deltas),
-                                                            measure(commands, length(Cmds),
-                                                                    measure(size_diff, SizeDiff,
-                                                                            measure(delivered, length(Delivered),
-                                                                                    measure(undelivered, length(Deltas) - length(Delivered),
-                                                                                            measure(replicas, length(S#state.replicas),
-                                                                                                    measure(bs_ln, BigsetLength,
-                                                                                                            measure(elements, length(?SWOT:value(MergedSwot)),
-                                                                                                                    conjunction([{result, Res == ok},
-                                                                                                                                 {equal, equals(sets_equal(MergedBigset, MergedSwot), true)}
-                                                                                                                                ]))))))))))))
+                                                    measure(commands, length(Cmds),
+                                                            measure(size_diff, SizeDiff,
+                                                                    measure(replicas, length(S#state.replicas),
+                                                                            measure(bs_ln, BigsetLength,
+                                                                                    measure(elements, length(?SWOT:value(MergedSwot)),
+                                                                                            conjunction([{result, Res == ok},
+                                                                                                         {equal, equals(sets_equal(MergedBigset, MergedSwot), true)}
+                                                                                                        ])))))))))
 
             end).
 
 
--spec compact_bigset(bigset_model:bigset()) ->
-                            {integer(), bigset_model:bigset()}.
 compact_bigset(BS) ->
     Before = bigset_model:size(BS),
     Compacted = bigset_model:compact(BS),
     After = bigset_model:size(Compacted),
     {Compacted, Before-After}.
+
 bigset_length(BS, BSLen) ->
     max(bigset_model:size(BS), BSLen).
 
@@ -404,7 +378,16 @@ subset(Set) ->
     ?LET(Keep, vector(length(Set), bool()), %%frequency([{1, false}, {2, true}])),
          return([ X || {X, true}<-lists:zip(Set, Keep)])).
 
-post_equals(_Replica) ->
-    true.
+
+post_equals(Replica) ->
+     [#replica{id=Replica,
+              bigset=BS,
+              set=ORSWOT}] = ets:lookup(?MODULE, Replica),
+    case sets_equal(BS, ORSWOT) of
+        true ->
+            true;
+        Fail ->
+            {Replica, Fail}
+    end.
 
 -endif.
