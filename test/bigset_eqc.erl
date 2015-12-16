@@ -65,7 +65,7 @@ run() ->
     run(?NUMTESTS).
 
 run(Count) ->
-    eqc:quickcheck(eqc:numtests(Count, prop_merge())).
+    eqc:quickcheck(eqc:numtests(Count, decorate(prop_merge()))).
 
 check() ->
     eqc:check(prop_merge()).
@@ -406,5 +406,14 @@ subset(Set) ->
 
 post_equals(_Replica) ->
     true.
+
+decorate(P) ->
+  on_output(fun(".", []) ->
+                io:format("~ts ", [<<240,159,142,132>>]);
+               ("x", []) ->
+                io:format("~ts ", [<<240,159,142,133>>]);
+               (S,Args) ->
+                io:format(S, Args)
+            end, P).
 
 -endif.
