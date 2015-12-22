@@ -200,7 +200,7 @@ delta-CRDT work cited above. The fundamental difference is that rather
 than a set per-object, instead the Set is decomposed into multiple
 keys. At least one key per element, and an extra key for metadata.
 
-### Design Overview
+## Design Overview
 
 So far bigset is not in riak, but is a riak_core project. You can find
 it in [here](https://github.com/basho-bin/bigsets "Bigsets -
@@ -210,7 +210,7 @@ you know about rings, replicas and vnodes.
 What follows is how the prototype works today, and what I imagine
 would be the next steps, but I've been wrong before.
 
-#### The backend
+### The backend
 
 Bigsets requires a sorted backend, it uses leveldb, maybe other
 backends are also suitable.
@@ -224,7 +224,7 @@ the logical clock is the first key in each set.
 
 ![Sets in Bigsets: Decomposed](bigset-backend.png "Sets in Bigsets: Decomposed")
 
-#### Hashing
+### Hashing
 
 In Riak a Bucket and Key pair are hashed to decide the preflist and
 nodes that will store the data, in bigsets only the Set name is
@@ -234,15 +234,170 @@ locations. Does this mean we can model buckets as sets, and
 riak_objects as elements and get something like the global logical
 clocks work? Maybe.
 
-### Write operations - Insert
+### <a id="key-scheme"></a>Key Scheme
+
+The bulk of how bigset works is down to the way keys are named and
+stored. Based on the observation that we can't store more than 1mb max
+in a riak object, and that reading, deserialising, inserting,
+reserialising, and writing is wasteful if all we want to do is add an
+integer to a set of 1million integers, the key scheme attempts to read
+as little information as possible before insert/remove.
+
+#### Structure of a Bigset
+
+A bigset has a clock. It's a logical clock made up of a Version Vector
+and a Dot Cloud. I borrowed the name "Dot Cloud" from Carlos
+Baquero. The Version Vector summerises all the contiguous events seen
+at the replica. The Dot Cloud lists the non-contiguous events seen at
+the replica. There are non-contiguous events because we use delta
+replication. We want a Set to be stored in order. We want Sets to be
+ordered too. To this end there is a custom comparator for leveldb that
+ensures the sort order.
+
+##### Clock Keys
+
+The clock key(s) are the first keys in the Set. There are multiple
+clock keys: one per actor. Each actor only reads and writes it own
+clock key. An actor stores another actor's clock keys to simplify
+interaction with hand off and AAE. The clock Key is a binary that is
+made up of the set name, the special key designation character `c`
+(for clock) and the actor name.
+
+    <<SetNameLength:32/little-unsigned-integer,
+      SetName:SetNameLength/binary,
+      $c:1/binary,
+      ActorName/binary>>
+
+##### Element Keys
+
+An element or member of the set is a client provided opaque
+binary. When an element is added to the set or removed from the set, a
+key is written. This means there maybe more keys in the set than
+elements. This also means that there are temporary tombstones in the
+set, we'll look at this more later.
+
+An element key is a binary made up of the Set name, a special key
+designation character `e` that means `element key`, the element, the
+actor that coordinated the insert/remove, the actor's event counter
+for the insert/remove event which together make a _dot_ for the
+insert, and yes, we increment the clock for removes, and a special
+tombstone designation character `a` or `r` that denotes if the
+operation is an add or a remove.
+
+    <<SetNameLength:32/little-unsigned-integer,
+      SetName:SetNameLength/binary,
+      $e:1/binary,
+      ElementLen:32/little-unsigned-integer,
+      Element:ElementLen/binary,
+      ActorLen:32/little-unsigned-integer,
+      Actor:ActorLen/binary,
+      Counter:64/little-unsigned-integer,
+      $a | $r:1/binary>>
+
+The comparator sorts so that keys for the same element are together
+and sorted by actor, then event, and finally adds `a` before removes
+`r`. That last is a carry over from before the clock was incremented
+for removes.
+
+##### Tombstone Keys
+
+Yet to be implemented as the prototype has no compaction, though they
+are in the EQC model. As a result of compaction (see below) we will
+remove some element keys, but need to retain their payload information
+until a the set clock has seen all the events covered by the merged
+contexts of all inserts and removes for that element. That information
+will be stored in a special per-element tombstone key (that is also
+temporary, see compaction below.)
+
+A per-element tombstone key is made up of the Set name, the special
+key designation charater `t`, the element, and the actor who made the
+tombstone by compacting.
+
+    <<SetNameLength:32/little-unsigned-integer,
+      SetName:SetNameLength/binary,
+      $c:1/binary,
+      ActorName/binary>>
+
+#### End Key
+
+The end key is a key that sorts highest of all. It is used for
+streaming-folds end key, and to signify the end of the set. It is made
+up of the Set name and the special key designation character `z`.
+
+    <<SetNameLen:32/little-unsigned-integer,
+      SetName:SetNameLen/binary,
+      $z>>
+
+##### Comparator
+
+The comparator sorts the keys so that clock keys come first, then
+element keys, the last keys for any element 'X' will be the
+per-element-tombstone keys. Finally the end-key sorts last.
+
+#### Payload
+
+We've seen the keys, what are their values?
+
+##### Clock Value
+
+The clock is coded in the `bigset_clock` module. It's a Version
+Vector, and a set of non-contiguous dots. Any actor `A` will always
+have only contiguous events for it's own clock.
+
+##### Element Value
+
+Each element key has a payload of a full `bigset_clock` as a context
+of the operation the key expresses. Yes, that seems "kinda large", I'm
+not sure what to do about it right now. It's a consequence of Riak's
+"action-at-a-distance" model. It doesn't matter about the order of
+operations as the vnodes see it, what matters is how the clients see
+events. I'll cover all the "why" later, for now, just sigh and accept
+it. Hopefully we can find an efficient way to encode the
+context-clock-as-value. See also compaction.
+
+It is possible that instead of the full context we could return a
+per-element context at read time, and only store that. We should
+benchmark the difference.
+
+##### Per Element Tombstone Value
+
+As above, a bigset clock. This is the merged clock of all seen inserts
+for a given element. See compaction for how it gets removed.
+
+### Write operations - Insert and Remove
 
 As with Riak sets, the client sends an operation to the server, saying
-`"add X to set Y"`. An FSM hashes the set name, and sends the
-operation to a vnode
+`"add X to set Y"`. We don't have a client API yet, and I'm
+hoping/aiming for API compatability with riak data types. For now we
+use an internal client interface, much like Riak's local client. The
+module is `bigset_client` and you can use that and the helper module
+`bigset` for playing with bigsets when you attach to a node.
 
+When a client wants to add or remove elements to a set it sends a
+request via the client.
 
+#### Write FSM
 
+Just as in Riak an FSM hashes the set name, and sends the operation to
+a vnode to coordinate. The coorindating vnode returns a payload to be
+replicated, and the FSM sends the payload to N-1 vnodes. When one of
+them replies the FSM tells the client `ok`. Hard coded in bigset is
+the default `n_val` of `3` and `w` val of `2` and `dw` val of `2`. See
+Riak docs for the meaning of these properties. This default exists for
+parity with Riak defaults when benchmarking.
 
-##### <a id="key-scheme"></a>Key Scheme
+#### Coorindating Vnode
+
+The coorindating vnode
+
+#### Replicating Vnode
+
+### Read
+
+#### Fold/Accumulate per vnode
+
+#### Read FSM/Core Merge
+
+### Compaction
 
 
