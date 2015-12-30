@@ -28,7 +28,7 @@
                 members :: [member()], %% for a contains query
                 preflist :: riak_core_apl:preflist(),
                 %% default to r=2 for demo/proto, defaults to
-                %% basic_quorum=false and notfound_ok=true, too
+                %% notfound_ok=true, too
                 logic = bigset_read_core:new(2),
                 options=[] :: list(),
                 timer=undefined :: reference() | undefined,
