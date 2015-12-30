@@ -1,6 +1,6 @@
 # Bigset
 
-## Why?
+## 1. Why?
 
 Set CRDTs stored in riak are just `riak_dt_orswot`s, binary encoded,
 and stuffed in a `riak_object`. As a result they have a size limit of
@@ -13,7 +13,7 @@ are, _if_ you have a `riak_dt_orswot` in memory. But riak is a
 database that persists data to disk and riak is a
 distributed/replciated database that replicates data over a network.
 
-### Sets in Riak 2+
+### 2. Sets in Riak 2+
 
 In riak 2+ the CRDT set is stored as a binary, inside a
 `riak_object`. We took this decision so that a CRDT could be
@@ -36,7 +36,7 @@ itself.
 
 ![Sets in Riak: Matryoshka!](sets_in_riak.png "Sets in Riak: Matryoshka")
 
-#### Writes
+#### 2.1. Writes
 
 When adding to a set in riak today the client sends an *Operation* to
 Riak, something like:
@@ -114,7 +114,7 @@ the shorter run time and less extreme outliers
 ![Sets in Riak: Shorter run](short-run-dt-writes.png "Sets in Riak:Shorter run")
 
 
-#### Reads
+#### 2.2. Reads
 
 Reading a CRDT Set is just like reading a regular
 `riak_object`. Though if the `riak_object` version vectors indicate
@@ -134,7 +134,7 @@ benchmark was run. 20 workers, 10 minutes, pareto distribution over
 the one thousand sets, reading the full set. I don't think that is too
 bad, though it could certainly be improved.
 
-#### Queries
+#### 2.3. Queries
 
 There are none. If you want to ask questions of your set (size, is 'X'
 a member, 100 lowest members etc) you have to read it, and query it in
@@ -143,7 +143,7 @@ members, or to know if 'X' is in the Set, and gets more wasteful the
 larger the Set is.
 
 
-### What About Deltas?
+### <a id="section-3"></a>3. What About Deltas?
 
 In
 [Efficient State-based CRDTs by Delta-Mutation](http://arxiv.org/abs/1410.2803)
@@ -160,7 +160,7 @@ above. However merely replacing the `riak_dt_orswot` in riak with a
 `riak_dt_delta_orswot` is not enough. In fact, we tried, and it was
 worse.
 
-#### Accidental Optimisation
+#### 3.1. Accidental Optimisation
 
 Recall the steps at the replica above for Set writes:
 
@@ -187,12 +187,12 @@ replica. Sadly the plots are misplaced, but our experiments with this
 showed deltas to perform mostly worse than full state replication in
 riak.
 
-### Summary
+### 4. Summary
 
 In summary, the answer to "why bigsets?" is that a set per-object is
 inefficient and restrictive.
 
-## What is Bigset?
+## 5. What is Bigset?
 
 Bigset is the temporary name for a prototype/proof of concept
 idea. The aim is to engineer a system that takes advantage of the
@@ -200,7 +200,7 @@ delta-CRDT work cited above. The fundamental difference is that rather
 than a set per-object, instead the Set is decomposed into multiple
 keys. At least one key per element, and an extra key for metadata.
 
-## Design Overview
+## 6. Design Overview
 
 So far bigset is not in riak, but is a riak_core project. You can find
 it in [here](https://github.com/basho-bin/bigsets "Bigsets -
@@ -210,7 +210,7 @@ you know about rings, replicas and vnodes.
 What follows is how the prototype works today, and what I imagine
 would be the next steps, but I've been wrong before.
 
-### The backend
+### 6.1. The backend
 
 Bigsets requires a sorted backend, it uses leveldb, maybe other
 backends are also suitable.
@@ -224,7 +224,7 @@ the logical clock is the first key in each set.
 
 ![Sets in Bigsets: Decomposed](bigset-backend.png "Sets in Bigsets: Decomposed")
 
-### Hashing
+### 6.2. Hashing
 
 In Riak a Bucket and Key pair are hashed to decide the preflist and
 nodes that will store the data, in bigsets only the Set name is
@@ -234,7 +234,7 @@ locations. Does this mean we can model buckets as sets, and
 riak_objects as elements and get something like the global logical
 clocks work? Maybe.
 
-### <a id="key-scheme"></a>Key Scheme
+### 6.3. <a id="key-scheme"></a>Key Scheme
 
 The bulk of how bigset works is down to the way keys are named and
 stored. Based on the observation that we can't store more than 1mb max
@@ -243,18 +243,7 @@ reserialising, and writing is wasteful if all we want to do is add an
 integer to a set of 1million integers, the key scheme attempts to read
 as little information as possible before insert/remove.
 
-#### Structure of a Bigset
-
-A bigset has a clock. It's a logical clock made up of a Version Vector
-and a Dot Cloud. I borrowed the name "Dot Cloud" from Carlos
-Baquero. The Version Vector summerises all the contiguous events seen
-at the replica. The Dot Cloud lists the non-contiguous events seen at
-the replica. There are non-contiguous events because we use delta
-replication. We want a Set to be stored in order. We want Sets to be
-ordered too. To this end there is a custom comparator for leveldb that
-ensures the sort order.
-
-##### Clock Keys
+#### 6.3.1. Clock Keys
 
 The clock key(s) are the first keys in the Set. There are multiple
 clock keys: one per actor. Each actor only reads and writes it own
@@ -268,7 +257,7 @@ made up of the set name, the special key designation character `c`
       $c:1/binary,
       ActorName/binary>>
 
-##### Element Keys
+#### 6.3.2. Element Keys
 
 An element or member of the set is a client provided opaque
 binary. When an element is added to the set or removed from the set, a
@@ -299,7 +288,7 @@ and sorted by actor, then event, and finally adds `a` before removes
 `r`. That last is a carry over from before the clock was incremented
 for removes.
 
-##### Tombstone Keys
+#### 6.3.3. Tombstone Keys
 
 Yet to be implemented as the prototype has no compaction, though they
 are in the EQC model. As a result of compaction (see below) we will
@@ -318,7 +307,7 @@ tombstone by compacting.
       $c:1/binary,
       ActorName/binary>>
 
-#### End Key
+#### 6.3.4. End Key
 
 The end key is a key that sorts highest of all. It is used for
 streaming-folds end key, and to signify the end of the set. It is made
@@ -328,23 +317,24 @@ up of the Set name and the special key designation character `z`.
       SetName:SetNameLen/binary,
       $z>>
 
-##### Comparator
+#### 6.3.5. Comparator
 
 The comparator sorts the keys so that clock keys come first, then
 element keys, the last keys for any element 'X' will be the
 per-element-tombstone keys. Finally the end-key sorts last.
 
-#### Payload
+### 6.4. Payload
 
 We've seen the keys, what are their values?
 
-##### Clock Value
+#### 6.4.1. Clock Value
 
 The clock is coded in the `bigset_clock` module. It's a Version
 Vector, and a set of non-contiguous dots. Any actor `A` will always
-have only contiguous events for it's own clock.
+have only contiguous events for it's own clock. There's a section on
+the clock below.
 
-##### Element Value
+#### 6.4.2. Element Value
 
 Each element key has a payload of a full `bigset_clock` as a context
 of the operation the key expresses. Yes, that seems "kinda large", I'm
@@ -359,12 +349,13 @@ It is possible that instead of the full context we could return a
 per-element context at read time, and only store that. We should
 benchmark the difference.
 
-##### Per Element Tombstone Value
+#### 6.4.3. Per Element Tombstone Value
 
 As above, a bigset clock. This is the merged clock of all seen inserts
-for a given element. See compaction for how it gets removed.
+for a given element. See [compaction](#compaction) for how it gets
+created and removed.
 
-### Write operations - Insert and Remove
+### 6.5. Write operations - Insert and Remove
 
 As with Riak sets, the client sends an operation to the server, saying
 `"add X to set Y"`. We don't have a client API yet, and I'm
@@ -376,7 +367,7 @@ module is `bigset_client` and you can use that and the helper module
 When a client wants to add or remove elements to a set it sends a
 request via the client.
 
-#### Write FSM
+#### 6.5.1. Write FSM
 
 Just as in Riak an FSM hashes the set name, and sends the operation to
 a vnode to coordinate. The coorindating vnode returns a payload to be
@@ -384,20 +375,379 @@ replicated, and the FSM sends the payload to N-1 vnodes. When one of
 them replies the FSM tells the client `ok`. Hard coded in bigset is
 the default `n_val` of `3` and `w` val of `2` and `dw` val of `2`. See
 Riak docs for the meaning of these properties. This default exists for
-parity with Riak defaults when benchmarking.
+parity with Riak defaults when benchmarking. In production these
+parameters will need be variable and set via the client.
 
-#### Coorindating Vnode
+#### 6.5.2. Coorindating Vnode
 
-The coorindating vnode
+Just as in Riak we need a coordinating vnode. The vnode acts as a
+proxy for the client. This keeps version vector size down and
+simplifies life for client/application developers. Continuing with the
+example started above, when a client issues an `insert` and/or
+`remove` operation, the coordinating vnode performs the following:
 
-#### Replicating Vnode
+1. Read it's `bigset_clock` for the Set (see `bigset:clock_key/2`)
+2. For each element being inserted OR removed
+   1. Increment the clock (which generates a dot)
+   2. Create an "insert key" for the element
+   3. assign a `context` value to the key (see `contexts` below)
+   4. add `{put, Key, Value}` to a list of writes for leveldb
+   5. add `{Key, Value, Dot}` to a list for replicating
+3. add `{put, ClockKey, Clock}` to the `write list`
+4. Write the `write list` to leveldb
+5. Return the `replicate list` to the write FSM
+   (note, _not_ the updated bigset clock, just the list)
 
-### Read
+#### 6.5.3. Replicating Vnode
 
-#### Fold/Accumulate per vnode
+When the `N-1` replica vnodes receive the `replica list` they store
+unseen updates as follow:
 
-#### Read FSM/Core Merge
+0. return `w` to the write fsm
+1. Read own `bigset_clock` from the set
+2. For each element in the `replica list`
+   1. If the `dot` for the element has been seen, do nothing
+   2. If the `dot` is not seen
+      1. add `dot` to `bigset_clock`
+      2. add `{put, Key, Value}` to `write list`
+3. Add `{put, ClockKey, Clock}` to `write list`
+4. Write the `write list` to leveldb
+5. return `dw` to the write fsm
+
+#### 6.5.4. The `replicate list`
+
+What is the `replicate list`? It's deltas. Not strictly speaking the
+deltas of [the paper](http://arxiv.org/abs/1410.2803), but they are
+not full state either, so what are they exactly?
+
+Each item in the `replicate list` is a binary encoded key (see
+[Key Scheme](#key-scheme)) a binary encoded `context` and an unencoded
+`dot` (an `{actor, counter}` pair). The `dot` saves the replica actor
+the effort of decoding the key, that's all it is there for.
+
+In the Delta paper, the delta consists of the new dot, and a context
+made up of the dots removed by the new dot. Imagine an orswot with the
+element `paul` with dots `[{a, 1}, {b, 6}, {c, 9}]`.  Adding `paul` by
+actor `a` at event `3` would generate a delta that contained the new
+dot `{a, 3}` but also a context of `[{a, 1}, {b, 6}, {c, 9}]`. The add
+at `a` says "I've seen all these `paul`s at `a` so this new add
+replaces them!" With bigset we can't do that for two reasons.
+
+1. We don't want to read all the `paul`s at vnode `a` in order to write `paul`
+2. It doesn't matter what vnode `a` has seen, what matters is what the client has seen
+
+The second point is why we prefer a client to read `paul` from the set
+before adding him: it provides a `context` that ensures this insert of
+`paul` supercedes all others. The first point is why we store a whole
+bigset_clock as a `context` against each key. Rather than read all
+`paul`s we use a clock to say "all the `paul`s whose `dot` is covered
+by this `context` have been seen". There will be more on this later
+under "Consistency" and Contexts", but a summary is that an add of an
+element when the element alredy exists is equivalent to removing the
+element at the time of the add and re-adding it with a new dot.
+
+### 6.6. Read
+
+Reading a bigset is maybe dumb. If you have a set that is actually "big" why do you want to read it all? You probably want instead to ask it questions:
+
+* Do you contain 'X'?
+* How many elements start with "Rus*"?
+* Give me the first 1000 elements between "A" and "C"
+* Is `[a, b, f, g]` a subset?
+
+etc.
+
+However, the aim, of providing API compatability with the existing
+sets data type means a full read is the simplest and first query we
+will deliver.
+
+By default we _stream_ results to the client in order. We require the
+vnodes to send data to the read fsm in order for the CRDT merge logic
+(more below.) By default we return results in lumps as soon as we have
+"enough" results. More details below, but this is partially governed
+by the application setting `batch_size` which defaults to `1000`.
+
+#### 6.6.1. Read FSM
+
+As in Riak there is a `gen_fsm` for reads. In bigsets `r=2,
+notfound_ok=true` by default. In production we will have to make this
+a variable.
+
+When asked to read a Set, a read fsm is started, a preflist generated,
+and a read request sent to all `n=3` vnodes on the preflist.
+
+See below for more details, but in brief the read fsm waits for `r=2`
+clocks from the replicas, and then uses only those first `r`
+responding replicas for the rest of the read. The 3rd replica is told
+to stop folding/sending results.
+
+As the read fsm received data it uses `bigset_read_core` to build a
+response for the client. As noted above, results are sent as soon as
+they are ready, rather than waiting to build the whole set in memory.
+
+Conceptually you can think of a _local set_ per vnode, that is the
+replica's local copy of the set, and a _global set_ that is the true
+"eventually consistent" view of the set, obtained by the merge of all
+_local sets_ at a time of system quiesence.
+
+It is the job of the read to build a local set per vnode, and then
+merge `r` local sets into a set we send the client.
+
+#### 6.6.2. Fold/Accumulate per vnode
+
+A read is an async vnode worker task and does not block the vnode like
+it does it riak. The main reason is that we expect our sets to be,
+well, big. Since a bigset read looks most like a 2i query read at the
+vnode level, we use an async task. This needs looking at/bikshedding
+for production as we need to ensure that correct size pool for async
+workers, or do we just spawn a new process, or what should we do? For
+now we use worker pools, with a default size of `100` per vnode.
+
+When a read request hits a vnode is immediately hands over to a
+worker. I'm hoping mixed workload benchmarking will show this to be
+win.
+
+##### 6.6.2.1. Vnode Worker
+
+A bigset read is an eleveldb fold operation. It iterates over a
+portion of the keyspace to build a portition of regular looking
+optimised orset (something like `riak_dt_orswot`). The vnode worker
+sets up the fold by creating a new `bigset_fold_acc` buffer record,
+creating a `start_key` and `end_key` for the `streaming_fold`
+operation, and calling `eleveldb:fold/4` with the accumulator, fold
+function, and options. When the eleveldb reports the fold complete,
+the vnode worker cleans up by calling `finalise` on the buffer to send
+any last messages, and is returned to the pool.
+
+##### 6.6.2.2. Fold/Accumulate
+
+We're in the process of moving this logic to c++ in eleveldb, but
+until then it is relevant, and the logic itself will be mostly
+unchanged.
+
+The main trick of the bigset design is to "just get it on disk" for
+writes, and defer all the resolution logic until read time. That logic
+gets run here. The fold/accumulate logic takes the log of writes in
+leveldb and turns them into a local `riak_dt_orswot` in `batch_size`
+lumps.
+
+Logically a bigset is as per the diagram above, it has a clock,
+elements, and an end key. The `start_key` for the fold operation is
+the clock key for the vnode/replica that is being folded over. In an
+`eleveldb:fold` each key from `start_key` to `end_key` is passed to
+2-arity fold function, the signature of which is `Fun({Key, Value,
+Accumulator})`. In bigsets that function is
+`bigset_fold_acc:fold/2`. The accumulator is a record wrapped by the
+`bigset_fold_acc` module.
+
+If the first key given to the fold function is _not_ the vnode's clock
+key, that is treated as a `not_found` by bigsets, and a `not_found`
+message is sent from the vnode worker process to the read fsm process,
+and the worker stops there, and is returned to the pool.
+
+If the first key _is_ the vnode's clock, then the clock is decoded and
+sent to the read fsm.
+
+Eleveldb will then call `fold/2` for every element key it
+encounters. The key is decoded into its constituent parts (`element`,
+`actor`, `counter`, `add` or `remove` designation) and considered for
+inclusion in the local orswot.
+
+##### 6.6.2.3. Two accumulators
+
+The fold logic works by considering a single element at a time. There
+may be mutiple keys for any element, which is why the sort order
+matters: the keys for element `X` must be folded over together so we
+can decide if element `X` is in the local set.
+
+The accumulator can be conceptually broken into two accumulators: the
+_element accumulator_ and the _set accumulator_. An element only gets
+added to the set accumulator if it "passes" the element accumulator
+logic.
+
+##### 6.6.2.4. Per element accumulator
+
+It's probably best to illustrate the fold logic with an example. Why
+might there may be multiple keys for a single element? Imagine `paul`
+was added 3 times to the Set `friends`, and subsequnetly removed. We
+might have keys as follows for the element `paul` (NOTE: using erlang
+tuple syntax like `{SetName, Element, Actor, Counter, Add | Remove} ->
+Context`)
+
+    %% paul added as the first event by a
+    {friends, paul, vnode_a, 1, add} -> []
+    
+    %% paul added as the first event by b
+    %% NOTE the context means this is concurrent
+    %% with the add on a
+    {friends, paul, vnode_b, 1, add} -> []
+    
+    %% paul added by `c` after seeing only the add by `a`
+    {friends, paul, vnode_c, 1, add} -> [{a, 1}]
+    
+    %% paul removed after a r=2 read of a & c
+    {friends, paul, vnode_d, 1, remove} -> [{a, 1}, {c, 1}]
+
+The per-element accumulator is made up of an aggregated context, and a
+set of dots. For each key for element `paul` the value (the context of
+the write) is merged into the aggregate context, which starts off as a
+`bigset_clock:fresh()`. The dot of only the `add` keys is added to the
+set of dots. For the example above the dots `{vnode_a, 1}`, `{vnode_b,
+1}`, and `{vnode_c, 1}` would be in the accumulated dot set. When the
+last element key for `paul` has been folded over we determine if
+`paul` should be added to the set accumulator, and thus the local
+orswot.
+
+`paul` is in the set if subtracting the accumulated set of dots:
+
+     [{vnode_a, 1}, {vnode_b, 1}, {vnode_c, 1}]
+
+from the accumulated context:
+
+    [{a, 1}, {c, 1}]
+
+Does not lead to the empty set. Subtracting dots from the accumulated
+set of dots means removing those dots _seen_ by the accumulated
+context.
+
+The result in the above example is
+
+    [{b, 1}]
+
+`paul` is added to the set accumulator with the dots `[{b, 1}]` since
+that is an add of `paul` that has not been removed or superceded by a
+removed add.
+
+It's perfectly possible for there to be keys for an element that is
+absent from the local set. For example:
+
+    %% paul added as the first event by a
+    {friends, paul, vnode_a, 1, add} -> []
+    
+    %% paul removed by a
+    {friends, paul, vnode_a, 2, remove} -> [{a, 1}]
+
+Here `[{a,1}] - {a, 1} == []`. No dots left, no `paul` in the set.
+
+##### 6.6.2.5. Set Accumulator
+
+The set accumulator is a buffer for elements. When an element passes
+the above element accumulator it is added to the local orswot. When
+the local orswot has `batch_size` (for example 1000) elements, the
+buffer is flushed and the 1000 element local orswot is sent to the
+read fsm. There is some back pressure here. The buffer is only flushed
+if it has received an `ack` from the read fsm for it's last
+message. The buffer also monitors the read fsm, in the case that the
+read fsm goes away, the folding work stops.
+
+We depend on the sorted set to allow us to break an orswot into
+chunks. We can work on the first 1000 elements, or any `K` contiguous
+elements, of an orswot and treat it as a whole set if we have the
+clock for the set. All events concerning the elements in the 1000
+element chunk are covered by the logical clock already at the read
+fsm. Since elements are independent of each other, we can evaluate
+them without the rest of the set. It is worth reading about the
+concept of "extrinsic event sets" from section 3.1, definition of
+`extrinsic` in the
+[global version vectors paper](http://haslab.uminho.pt/tome/publications/concise-server-wide-causality-management-eventually-consistent-data-stores)
+to understand why this works. More details in
+[Read Core merge](#Read-core-merge) below.
+
+
+#### <a id="Read-core-merge"></a> Read Core Merge
+
+Each of `r` vnode replicas is sending `batch_size` chunks of orswot to
+the read fsm. When the read fsm receives a chunk of orswot it adds the
+chunk to the `bigset_read_core` and decides if it has enough results
+to perform a CRDT orswot merge on the results and return some portion
+of the set to the client. If we know that the chunks are ordered, and
+we have the `bigset_clock` for the whole replica, we can treat each
+chunk as an orswot. In order to merge any pair of _local sets_ into an
+orswot we only need to ensure that we consider a pair of chunks that
+are the same subset. This is most like a streaming merge sort. The
+algorithm is the same for any `r` number, but `r=2` is the simplest to
+think about.
+
+1. For each of `r` sets take the last/highest element
+2. Find the least/lowest of the highest elements, call it least-last
+3. Take the subset of each of `r` sets where the elements are =< than least-last
+4. standard CRDT Orswot merge on the `r` subsets
+5. return the merged result to the client
+
+The subsets of each of `r` that are > than least-last are retained and
+added to as messages come into the read fsm, until such a time as they
+can be merged.
+
+The client receives the `bigset_clock` as an opaque `context` as soon
+as `r` clocks are received by the read fsm. This means the client can
+start to add/remove elements as soon as it receives them as results.
 
 ### Compaction
+
+If we always only write, for inserts and removes, sets really would be
+bigsets. The design is a decomposed log of deltas to an orswot, and
+orswot stands for Observed Remove Set _WITHOUT_ tombstones. And we
+write tombstones. What gives?
+
+From [section 3](#section-3) on Deltas above we learned the biggest
+cost with sets today is reading and deserialising in order to
+add/remove an element. This leads to the approach to always write, and
+handle resolution at read time. Eventually we will have to remove
+superceded writes and tombstones, or the disk could be full for a set
+with only two active elements! Compaction is the method. Unlike early
+tombstoning CRDTs as described in the
+[comprehensive paper](https://hal.inria.fr/inria-00555588/en/) there
+is no coordiation required for garbage collection/tombstone
+removal. Each vnode has the causal information it needs to remove
+superceded writes and tombstones unilaterally.
+
+My initial hope was to implement this logic in the leveldb compation
+code, but I think I confused the logical structure of level with the
+actual structure, and this compaction algorithm runs on the logically
+ordered set of keys for a set. In the worst case we can use reads (see
+above) to detect when a set is at a certain garbage-to-key ratio (yet
+to be determined) and submit it to be compacted. In that case
+compaction consists of a fold/read that identifies keys to be
+removed. The current test code actually re-writes the entire set at
+compaction time, which is probably impossible in production. This
+feature is essential but also the most contentious and difficult, if
+we can't find a way to do this efficiently bigsets may be dead in the
+water for the current design. We may have to consider going back to
+read-before-write for each element added. This would make batch writes
+pretty bad, I imagine.
+
+This algorithm has been implemented in the eqc test `bigset_eqc` and
+statistics are displayed after the run.
+
+The compaction algo is almost the same as the read fold logic, but
+I'll reproduce in total here. Again we consider each element.
+
+1. for each element merge all the contexts
+2. every add element key that is seen by the context can be removed
+3. every remove element key can be removed
+4. every surviving add key can have it's context value removed
+5. if the set bigset_clock for vnode does not descend the merged context
+   write a key {Set, Element, Actor, $tombstone} -> MergedCtx
+   Otherwise, remove/do not write a per-element tombstone key
+
+Why the per-element tombstone? If we remove an add key that has a
+context that means it supercedes an add key this replica has not seen
+we need to _remember_ that.
+
+Another, simpler algorithm is simply
+
+1. for each element merge all the contexts
+2. every add key that is seen by the merged context, _AND_ whose context value is descended by the bigset_clock for the replica can be removed
+3. every remove key whose context value is descended by the bigset_clock for the replica can be removed
+
+This saves re-writing the whole set, and doesn't require the temporary
+per-element tombstone. I imagine it means extra keys hangaround
+longer. It does mean, however that compaction as a process outside
+level need only be a fold, and a set of deletes.
+
+
+### Bigset Clock
+
+### Contexts and Consistency
 
 
