@@ -511,7 +511,7 @@ win.
 
 A bigset read is an eleveldb fold operation. It iterates over a
 portion of the keyspace to build a portion of regular looking
-optimised orset (something like `riak_dt_orswot`). The vnode worker
+optimized orset (something like `riak_dt_orswot`). The vnode worker
 sets up the fold by creating a new `bigset_fold_acc` buffer record,
 creating a `start_key` and `end_key` for the `streaming_fold`
 operation, and calling `eleveldb:fold/4` with the accumulator, fold
@@ -556,7 +556,7 @@ inclusion in the local orswot.
 ##### 6.6.2.3. Two accumulators
 
 The fold logic works by considering a single element at a time. There
-may be mutiple keys for any element, which is why the sort order
+may be multiple keys for any element, which is why the sort order
 matters: the keys for element `X` must be folded over together so we
 can decide if element `X` is in the local set.
 
@@ -569,7 +569,7 @@ logic.
 
 It's probably best to illustrate the fold logic with an example. Why
 might there may be multiple keys for a single element? Imagine `paul`
-was added 3 times to the Set `friends`, and subsequnetly removed. We
+was added 3 times to the Set `friends`, and subsequently removed. We
 might have keys as follows for the element `paul` (NOTE: using erlang
 tuple syntax like `{SetName, Element, Actor, Counter, Add | Remove} ->
 Context`)
@@ -615,7 +615,7 @@ The result in the above example is
     [{b, 1}]
 
 `paul` is added to the set accumulator with the dots `[{b, 1}]` since
-that is an add of `paul` that has not been removed or superceded by a
+that is an add of `paul` that has not been removed or superseded by a
 removed add.
 
 It's perfectly possible for there to be keys for an element that is
@@ -654,7 +654,7 @@ to understand why this works. More details in
 [Read Core merge](#Read-core-merge) below.
 
 
-#### <a id="Read-core-merge"></a> Read Core Merge
+#### 6.6.2.6 <a id="Read-core-merge"></a> Read Core Merge
 
 Each of `r` vnode replicas is sending `batch_size` chunks of orswot to
 the read fsm. When the read fsm receives a chunk of orswot it adds the
@@ -682,7 +682,7 @@ The client receives the `bigset_clock` as an opaque `context` as soon
 as `r` clocks are received by the read fsm. This means the client can
 start to add/remove elements as soon as it receives them as results.
 
-### Compaction
+### 6.7  Compaction
 
 If we always only write, for inserts and removes, sets really would be
 bigsets. The design is a decomposed log of deltas to an orswot, and
@@ -693,15 +693,15 @@ From [section 3](#section-3) on Deltas above we learned the biggest
 cost with sets today is reading and deserialising in order to
 add/remove an element. This leads to the approach to always write, and
 handle resolution at read time. Eventually we will have to remove
-superceded writes and tombstones, or the disk could be full for a set
+superseded writes and tombstones, or the disk could be full for a set
 with only two active elements! Compaction is the method. Unlike early
 tombstoning CRDTs as described in the
 [comprehensive paper](https://hal.inria.fr/inria-00555588/en/) there
-is no coordiation required for garbage collection/tombstone
+is no coordination required for garbage collection/tombstone
 removal. Each vnode has the causal information it needs to remove
-superceded writes and tombstones unilaterally.
+superseded writes and tombstones unilaterally.
 
-My initial hope was to implement this logic in the leveldb compation
+My initial hope was to implement this logic in the leveldb compaction
 code, but I think I confused the logical structure of level with the
 actual structure, and this compaction algorithm runs on the logically
 ordered set of keys for a set. In the worst case we can use reads (see
@@ -736,8 +736,11 @@ chosen as it allows compaction as a process outside level, needing
 only a fold, and resulting in a a set of deletes to be submitted to
 `eleveldb:write`.
 
-### Bigset Clock
+### 6.8 Bigset Clock
 
-### Contexts and Consistency
+### 6.9 Contexts and Consistency
 
+### 6.10 Anti-Entropy
 
+#### 6.10.1 Read Repair
+#### 6.10.2 AAE
