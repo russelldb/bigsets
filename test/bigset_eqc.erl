@@ -65,7 +65,7 @@ run() ->
     run(?NUMTESTS).
 
 run(Count) ->
-    eqc:quickcheck(eqc:numtests(Count, decorate(prop_merge()))).
+    eqc:quickcheck(eqc:numtests(Count, prop_merge())).
 
 check() ->
     eqc:check(prop_merge()).
@@ -345,28 +345,27 @@ prop_merge() ->
                                  end
                              end || V <- S#state.compacted],
 
-                SizeBS = byte_size(term_to_binary(MergedBigset)),
-                SizeOR = byte_size(term_to_binary(MergedSwot)),
-
-                SizeDiff = SizeBS div SizeOR,
-
                 ets:delete(?MODULE),
                 pretty_commands(?MODULE, Cmds, {H, S, Res},
                                 aggregate(command_names(Cmds),
                                           aggregate(with_title('Compaction Effect'), Compacted,
                                                     measure(deltas, length(Deltas),
                                                             measure(commands, length(Cmds),
-                                                                    measure(size_diff, SizeDiff,
-                                                                            measure(delivered, length(Delivered),
-                                                                                    measure(undelivered, length(Deltas) - length(Delivered),
-                                                                                            measure(replicas, length(S#state.replicas),
-                                                                                                    measure(bs_ln, BigsetLength,
-                                                                                                            measure(elements, length(?SWOT:value(MergedSwot)),
-                                                                                                                    conjunction([{result, Res == ok},
-                                                                                                                                 {equal, equals(sets_equal(MergedBigset, MergedSwot), true)}
-                                                                                                                                ]))))))))))))
+                                                                    measure(delivered, length(Delivered),
+                                                                            measure(undelivered, length(Deltas) - length(Delivered),
+                                                                                    measure(replicas, length(S#state.replicas),
+                                                                                            measure(bs_ln, BigsetLength,
+                                                                                                    measure(elements, length(?SWOT:value(MergedSwot)),
+                                                                                                            conjunction([{result, Res == ok},
+                                                                                                                         {equal, equals(sets_equal(MergedBigset, MergedSwot), true)}
+                                                                                                                        ])))))))))))
 
             end).
+
+lmax([]) ->
+    0;
+lmax(L) ->
+    lists:max(L).
 
 %% calculates the lenth as if it were a bigset, basically
 %% Elements*Dots
@@ -385,6 +384,7 @@ compact_bigset(BS) ->
     Compacted = bigset_model:compact(BS),
     After = bigset_model:size(Compacted),
     {Compacted, Before-After}.
+
 bigset_length(BS, BSLen) ->
     max(bigset_model:size(BS), BSLen).
 
@@ -415,14 +415,5 @@ subset(Set) ->
 
 post_equals(_Replica) ->
     true.
-
-decorate(P) ->
-  on_output(fun(".", []) ->
-                io:format("~ts ", [<<240,159,142,132>>]);
-               ("x", []) ->
-                io:format("~ts ", [<<240,159,142,133>>]);
-               (S,Args) ->
-                io:format(S, Args)
-            end, P).
 
 -endif.

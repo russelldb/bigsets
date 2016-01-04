@@ -35,9 +35,6 @@
                           actor, counter, tsb}.
 -type context() :: bigset_clock:clock().
 
--type fold_acc() :: compaction_acc() | read_acc().
-
--type compaction_acc() :: [fold_acc_head() | {key(), context()}].
 -type read_acc() :: [fold_acc_head() | orswot_elem()].
 
 -type fold_acc_head() :: {Element :: term(),
@@ -155,8 +152,7 @@ compact(Bigset) ->
                                               end,
                                               #compaction_acc{},
                                               Keys),
-     #compaction_acc{acc=Keys2} = flush_acc(AccFinal, Clock),
-
+    #compaction_acc{acc=Keys2} = flush_acc(AccFinal, Clock),
     #bigset{clock=Clock, keys=orddict:from_list(Keys2)}.
 
 flush_acc(Acc, Clock) ->
@@ -232,12 +228,6 @@ fold_bigset(#bigset{clock=Clock, keys=Keys}, FlushFun) ->
                                    Dots,
                                    bigset_clock:merge(Ctx, CtxAcc)
                                   } | Acc];
-                            (?TOMBSTONE(E), Ctx, [{E, Dots, CtxAcc} | Acc]) ->
-                                 %% The per element tombstone, just the ctx needed
-                                 [{E,
-                                   Dots,
-                                   bigset_clock:merge(Ctx, CtxAcc)
-                                  } | Acc];
                             (Key, Ctx, Acc) ->
                                  Acc2 = FlushFun(Acc, Clock),
                                  Hd = new_acc(Key, Ctx),
@@ -255,42 +245,6 @@ new_acc({E, A, C, ?ADD}, Ctx) ->
     {E, [{A, C}], Ctx};
 new_acc(K, Ctx) ->
     {element(1, K), [], Ctx}.
-
-
--spec compaction_flush_acc(fold_acc(), context()) ->
-                                  compaction_acc().
-compaction_flush_acc([], _Clock) ->
-    [];
-compaction_flush_acc([{Element, Dots, Ctx} | Acc], Clock) ->
-    %% - Subtract dots from Ctx - Each remaining dot is a key that
-    %% "survived" the compaction - If no keys survived and the Clock
-    %% >= Ctx, no tombstone - otherwise keep the Ctx as tombstone with
-    %% special key so yet to be seen writes that are superceded by
-    %% writes we've removed get removed
-    Remaining = bigset_clock:subtract_seen(Ctx, Dots),
-    Tombstone = tombstone(Element, Remaining, Ctx, Clock),
-    %% @TODO(rdb) do keys need their original contexts now that the
-    %% tombstone has them? NO!!!
-    [ {{Element, A, C, ?ADD}, bigset_clock:fresh()} || {A, C} <- Remaining]
-        ++ Tombstone ++ Acc.
-
--spec tombstone(Element :: term(), dotlist(), context(), context()) ->
-                       [] | [tombstone_key()].
-tombstone(E, _R, Ctx, Clock) ->
-    %% Even though the remaining elements have been stripped of their
-    %% contexts, it is safe to remove a tombstone that is dominated by
-    %% the set clock. The set clock will not write any element it has
-    %% seen already. In effect we are moving the tombstone up to the
-    %% head of the set once it has no use i.e. there are no deferred
-    %% operations.
-    case bigset_clock:descends(Clock, Ctx) of
-        true ->
-            %% Discard tombstone, clock has seen it all, so anything
-            %% it tombstones will not be written again
-            [];
-        false  ->
-            [{?TOMBSTONE(E), Ctx}]
-    end.
 
 %% @private the vnode fold operation. Similar to compact but returns
 %% an ordered list of Element->Dots mappings only, no tombstones or
@@ -393,7 +347,8 @@ merge(#bigset{clock=C1, keys=Set1}, #bigset{clock=C2, keys=Set2}) ->
                                                       %% empty context and a tombstone, so no, they may not be the same.
                                                       %% Not sure how much this matters in the _real_ bigset world,
                                                       %% since there is no full state merge
-                                                      {orddict:erase(Key, RHSU), orddict:store(Key, bigset_clock:merge(Ctx, LHSCtx), Acc)};
+                                                      {orddict:erase(Key, RHSU),
+                                                       orddict:store(Key, bigset_clock:merge(Ctx, LHSCtx), Acc)};
                                                   error ->
                                                       %% Set 1 only, did set 2 remove it?
                                                       case bigset_clock:seen(C2, {A, C}) of
@@ -404,46 +359,25 @@ merge(#bigset{clock=C1, keys=Set1}, #bigset{clock=C2, keys=Set2}) ->
                                                               %% unseen by set 2
                                                               {RHSU, orddict:store(Key, Ctx, Acc)}
                                                       end
-                                              end;
-                                         (?TOMBSTONE(_E)=Key, Ctx, {RHSU, Acc}) ->
-                                              %% @TODO(rdb) what do we
-                                              %% do here?  Always
-                                              %% store? Only store if
-                                              %% Ctx is unseen? What
-                                              %% about if RHSU has a
-                                              %% tombstone too?
-                                              TS2 = fetch_tombstone(Key, RHSU),
-                                              MergedCtx = bigset_clock:merge(Ctx, TS2),
-                                              {orddict:erase(Key, RHSU), orddict:store(Key, MergedCtx, Acc)}
-
+                                              end
                                       end,
                                       {Set2, []},
                                       Set1),
     %% Do it again on set 2
     InSet =  orddict:fold(fun({_E, A, C, _TSB}=Key, Ctx, Acc) ->
-                                   %% Set 2 only, did set 1 remove it?
-                                   case bigset_clock:seen(C1, {A, C}) of
-                                       true ->
-                                           %% removed
-                                           Acc;
-                                       false ->
-                                           %% unseen by set 1
-                                           orddict:store(Key, Ctx, Acc)
-                                   end;
-                              (TSKey, TSCtx, Acc) ->
-                                   orddict:store(TSKey, TSCtx, Acc)
-                           end,
-                           Keep,
-                           Set2Unique),
+                                  %% Set 2 only, did set 1 remove it?
+                                  case bigset_clock:seen(C1, {A, C}) of
+                                      true ->
+                                          %% removed
+                                          Acc;
+                                      false ->
+                                          %% unseen by set 1
+                                          orddict:store(Key, Ctx, Acc)
+                                  end;
+                             (TSKey, TSCtx, Acc) ->
+                                  orddict:store(TSKey, TSCtx, Acc)
+                          end,
+                          Keep,
+                          Set2Unique),
 
     #bigset{clock=Clock, keys=InSet}.
-
--spec fetch_tombstone(term(), orddict:orddict()) -> bigset_clock:clock().
-%% return either the tombstone or a fresh clock to merge with
-fetch_tombstone(Key, Dict) ->
-    case orddict:find(Key, Dict) of
-        {ok, TS} ->
-            TS;
-        error ->
-            bigset_clock:fresh()
-    end.
