@@ -133,9 +133,89 @@ size(Bigset) ->
 %% @NOTE(rdb) all this will have a profound effect on AAE/Read Repair,
 %% so re-think it then. (Perhaps "filling" from the set clock in that
 %% event?)
+
+-record(compaction_acc, {current_element,
+                         adds=[],
+                         removes=[],
+                         current_ctx=bigset_clock:fresh(),
+                         acc=[]}).
+
 -spec compact(bigset()) -> bigset().
 compact(Bigset) ->
-     fold_bigset(Bigset, fun compaction_flush_acc/2).
+     %% fold_bigset(Bigset, fun compaction_flush_acc/2).
+    #bigset{clock=Clock, keys=Keys} = Bigset,
+    AccFinal = orddict:fold(fun({E, _, _, _}=K, V, Acc=#compaction_acc{current_element=E}) ->
+                                                      %% same element
+                                                      accumulate_key(K, V, Acc);
+                                                 (K, V, Acc) ->
+                                                      %% New element, consider the current
+                                                      %% element, and start over
+                                                      Acc2 = flush_acc(Acc, Clock),
+                                                      accumulate_key(K, V, Acc2)
+                                              end,
+                                              #compaction_acc{},
+                                              Keys),
+     #compaction_acc{acc=Keys2} = flush_acc(AccFinal, Clock),
+
+    #bigset{clock=Clock, keys=orddict:from_list(Keys2)}.
+
+flush_acc(Acc, Clock) ->
+    #compaction_acc{adds=Adds, removes=Rems, current_ctx=Ctx, acc=Keys} = Acc,
+    {SurvivingAdds, SurvivingDots} = lists:foldl(fun({{_, A, C, _}=K, V}, {SA, SD}) ->
+                                                         case add_survives({A, C}, V, Ctx, Clock) of
+                                                             true ->
+                                                                 {[{K, V} | SA],
+                                                                  [{A, C} | SD]};
+                                                             false ->
+                                                                 {SA, SD}
+                                                         end
+                                                 end,
+                                                 {[], []},
+                                                 Adds),
+
+    SurvivingRems = lists:foldl(fun({K, V}, SR) ->
+                              case rem_survives(SurvivingDots, V, Clock) of
+                                  true ->
+                                      [{K, Ctx} | SR];
+                                  false ->
+                                      SR
+                              end
+                                end,
+                                [],
+                                Rems),
+    #compaction_acc{acc= Keys ++ SurvivingAdds ++ SurvivingRems}.
+
+%% if an Add's dot is covered by the aggregate element context &&
+%% its payload ctx is descended by the clock, it can be removed,
+%% otherwise need to keep it around (like a deferred operation)
+add_survives(Dot, Payload, Ctx, Clock) ->
+    %% This add is superceded
+    not (bigset_clock:seen(Ctx, Dot) andalso
+         %% All adds it supercedes have been seen already and will not
+         %% resurface
+         %% @TODO is there a chance that this k->removed but some k->v it removes is not?
+         %% @TODO write up why I think this is safe (@see rem_survives)
+         bigset_clock:descends(Clock, Payload)).
+
+%% If a remove's context is descended by the bigset clock && no
+%% adds it removes have remained, it can be safely removed,
+%% otherwise, it too must remain, like a deferred operation
+rem_survives(SurvivingDots, Payload, Clock) ->
+    %% Tombstone stil needed (deferred)
+    (bigset_clock:descends(Clock, Payload) == false) orelse
+        %% Tombstone still needed (some add it removes is deferred)
+        (bigset_clock:subtract_seen(Clock, SurvivingDots) /= SurvivingDots).
+
+accumulate_key({E, _, _, ?ADD}=K, V, A) ->
+    #compaction_acc{adds=Adds, current_ctx=Ctx} = A,
+    Adds2 = [{K, V} | Adds],
+    Ctx2 = bigset_clock:merge(Ctx, V),
+    A#compaction_acc{adds=Adds2, current_ctx=Ctx2, current_element=E};
+accumulate_key({E, _, _, ?REMOVE}=K, V, A) ->
+    #compaction_acc{removes=Rems, current_ctx=Ctx} = A,
+    Ctx2 = bigset_clock:merge(Ctx, V),
+    Rems2 = [{K, V} | Rems],
+    A#compaction_acc{removes=Rems2, current_ctx=Ctx2, current_element=E}.
 
 -spec fold_bigset(bigset(), function()) -> bigset().
 fold_bigset(#bigset{clock=Clock, keys=Keys}, FlushFun) ->
@@ -175,6 +255,7 @@ new_acc({E, A, C, ?ADD}, Ctx) ->
     {E, [{A, C}], Ctx};
 new_acc(K, Ctx) ->
     {element(1, K), [], Ctx}.
+
 
 -spec compaction_flush_acc(fold_acc(), context()) ->
                                   compaction_acc().

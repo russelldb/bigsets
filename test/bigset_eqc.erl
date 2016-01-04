@@ -288,7 +288,7 @@ compact_post(_S, [_Replica], {_Diff, Before, After}) ->
         true ->
             true;
         false ->
-            {replica_value(Before), Before, '/=', replica_value(After), After}
+            {post_compaction_not_eq, {before, replica_value(Before), Before}, '/=', {aft, replica_value(After), After}}
     end.
 
 
@@ -368,6 +368,15 @@ prop_merge() ->
 
             end).
 
+%% calculates the lenth as if it were a bigset, basically
+%% Elements*Dots
+orswot_length(ORSWOT) ->
+    E = ?SWOT:value(pec, ORSWOT),
+    orddict:fold(fun(_E, D, Acc) ->
+                         length(D) + Acc
+                 end,
+                 0,
+                 E).
 
 -spec compact_bigset(bigset_model:bigset()) ->
                             {integer(), bigset_model:bigset()}.
