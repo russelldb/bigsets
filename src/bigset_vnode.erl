@@ -237,7 +237,8 @@ handle_handoff_data(<<KeyLen:32/integer, Rest/binary>>, State) ->
         {clock, Set, _Actor} ->
             %% Some other actors key, just store it
             %% @TODO(rdb|robustness) can we do something to check
-            %% integrity here?
+            %% integrity here? Do we want to store forever some key
+            %% for an old replica?
             EndKey = bigset:end_key(Set),
             ok = eleveldb:write(DB, [{put, Key, Val}, {put, EndKey, <<>>}], ?WRITE_OPTS);
         {element, Set, _Elem, Actor, Counter, _TSB} ->
