@@ -386,17 +386,17 @@ merge(#bigset{clock=C1, keys=Set1}, #bigset{clock=C2, keys=Set2}) ->
 %% after receiving handoff.
 -spec handoff(From :: bigset(), To :: bigset()) -> NewTo :: bigset().
 handoff(From, To) ->
-    %% #bigset{keys=FromKeys} = From,
-    %% #bigset{clock=ToClock, keys=ToKeys} = To,
-    %% {ToClock2, ToKeys2} = orddict:fold(fun({_E, A, C, _}=K, V, {Clock, Keys}) ->
-    %%                                            case bigset_clock:seen(Clock, {A, C}) of
-    %%                                                true ->{Clock, Keys};
-    %%                                                false ->
-    %%                                                    {bigset_clock:strip_dots({A, C}, Clock),
-    %%                                                     orddict:store(K, V, Keys)}
-    %%                                            end
-    %%                                    end,
-    %%                                    {ToClock, ToKeys},
-    %%                                    FromKeys),
-    %% To#bigset{clock=ToClock2, keys=ToKeys2}.
-    merge(From, To).
+    #bigset{keys=FromKeys, clock=FromClock} = From,
+    #bigset{clock=ToClock, keys=ToKeys} = To,
+    {ToClock2, ToKeys2} = orddict:fold(fun({_E, A, C, _}=K, V, {Clock, Keys}) ->
+                                               case bigset_clock:seen(Clock, {A, C}) of
+                                                   true ->{Clock, Keys};
+                                                   false ->
+                                                       {bigset_clock:strip_dots({A, C}, Clock),
+                                                        orddict:store(K, V, Keys)}
+                                               end
+                                       end,
+                                       {ToClock, ToKeys},
+                                       FromKeys),
+    To#bigset{clock=bigset_clock:merge(ToClock2, FromClock), keys=ToKeys2}.
+%%    merge(From, To).
