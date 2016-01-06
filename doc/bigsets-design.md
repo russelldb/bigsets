@@ -304,7 +304,7 @@ tombstone by compacting.
 
     <<SetNameLength:32/little-unsigned-integer,
       SetName:SetNameLength/binary,
-      $c:1/binary,
+      $t:1/binary,
       ActorName/binary>>
 
 #### 6.3.4. End Key
