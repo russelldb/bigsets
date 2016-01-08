@@ -101,15 +101,16 @@ contains(PrefList, Req=?CONTAINS_REQ{}) ->
                                    bigset_vnode_master).
 
 init([Partition]) ->
+    VnodeId = vnode_id(Partition),
     DataDir = integer_to_list(Partition),
     Opts =  [{create_if_missing, true},
              {write_buffer_size, 1024*1024},
              {max_open_files, 20},
-             {bigsets, true}],
+             {bigsets, true},
+             {vnode, VnodeId}],
     {ok, DB} = open_db(DataDir, Opts),
     %% @TODO(rdb|question) Maybe this pool should be BIIIIG for many gets
     PoolSize = app_helper:get_env(bigset, worker_pool_size, ?DEFAULT_WORKER_POOL),
-    VnodeId = vnode_id(Partition),
     BatchSize  = app_helper:get_env(bigset, batch_size, ?DEFAULT_BATCH_SIZE),
     {ok, #state {data_dir=DataDir, vnodeid=VnodeId,  partition=Partition, db=DB},
      [{pool, bigset_vnode_worker, PoolSize, [{batch_size, BatchSize}]}]}.
