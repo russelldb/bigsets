@@ -288,26 +288,7 @@ and sorted by actor, then event, and finally adds `a` before removes
 `r`. That last is a carry over from before the clock was incremented
 for removes.
 
-#### 6.3.3. Tombstone Keys
-
-Yet to be implemented as the prototype has no compaction, though they
-are in the EQC model. As a result of compaction (see below) we will
-remove some element keys, but need to retain their payload information
-until a the set clock has seen all the events covered by the merged
-contexts of all inserts and removes for that element. That information
-will be stored in a special per-element tombstone key (that is also
-temporary, see compaction below.)
-
-A per-element tombstone key is made up of the Set name, the special
-key designation character `t`, the element, and the actor who made the
-tombstone by compacting.
-
-    <<SetNameLength:32/little-unsigned-integer,
-      SetName:SetNameLength/binary,
-      $t:1/binary,
-      ActorName/binary>>
-
-#### 6.3.4. End Key
+#### 6.3.3. End Key
 
 The end key is a key that sorts highest of all. It is used for
 streaming-folds end key, and to signify the end of the set. It is made
@@ -317,11 +298,12 @@ up of the Set name and the special key designation character `z`.
       SetName:SetNameLen/binary,
       $z>>
 
-#### 6.3.5. Comparator
+#### 6.3.4. Comparator
 
 The comparator sorts the keys so that clock keys come first, then
-element keys, the last keys for any element 'X' will be the
-per-element-tombstone keys. Finally the end-key sorts last.
+element keys. Finally the end-key sorts last. The code is in C++ (my
+first ever!) and can be found in the leveldb repo, it should not be
+there.
 
 ### 6.4. Payload
 
@@ -332,7 +314,7 @@ We've seen the keys, what are their values?
 The clock is coded in the `bigset_clock` module. It's a Version
 Vector, and a set of non-contiguous dots. Any actor `A` will always
 have only contiguous events for it's own clock. There's a section on
-the clock below.
+the clock [below](#bigset-clock).
 
 #### 6.4.2. Element Value
 
@@ -348,12 +330,6 @@ context-clock-as-value. See also compaction.
 It is possible that instead of the full context we could return a
 per-element context at read time, and only store that. We should
 benchmark the difference.
-
-#### 6.4.3. Per Element Tombstone Value
-
-As above, a bigset clock. This is the merged clock of all seen inserts
-for a given element. See [compaction](#compaction) for how it gets
-created and removed.
 
 ### 6.5. Write operations - Insert and Remove
 
@@ -736,7 +712,7 @@ chosen as it allows compaction as a process outside level, needing
 only a fold, and resulting in a a set of deletes to be submitted to
 `eleveldb:write`.
 
-### 6.8 Bigset Clock
+### 6.8 <a id="bigset-clock"></a>Bigset Clock
 
 ### 6.9 Contexts and Consistency
 
