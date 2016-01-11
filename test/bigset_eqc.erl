@@ -71,6 +71,11 @@ run(Count) ->
 check() ->
     eqc:check(prop_merge()).
 
+check(File) ->
+    {ok, Bytes} = file:read_file(File),
+    CE = binary_to_term(Bytes),
+    eqc:check(prop_merge(), CE).
+
 initial_state() ->
     #state{}.
 
