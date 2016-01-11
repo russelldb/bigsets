@@ -80,7 +80,7 @@ create_replica_pre(#state{replicas=Replicas}) ->
 %% @doc create_replica_command - Command generator
 create_replica_args(_S) ->
     %% Don't waste time shrinking the replicas ID number
-    [noshrink(nat())].
+    [noshrink(binary(8))].
 
 %% @doc create_replica_pre - don't create a replica that already
 %% exists
@@ -325,6 +325,7 @@ prop_merge() ->
 
                 {MergedBigset, MergedSwot, BigsetLength} = lists:foldl(fun(#replica{bigset=Bigset, delta_set=ORSWOT}, {MBS, MOS, BSLen}) ->
                                                                                BigsetCompacted = bigset_model:compact(Bigset),
+                                                                               dump_bigset_clock_to_file(BigsetCompacted),
                                                                                ReadBigset = bigset_model:read(Bigset),
                                                                                {bigset_model:read_merge(ReadBigset, MBS),
                                                                                 ?SWOT:merge(ORSWOT, MOS),
@@ -361,6 +362,15 @@ prop_merge() ->
                                                                                                                         ])))))))))))
 
             end).
+
+dump_bigset_clock_to_file(Bigset) ->
+    %% Temp, to get some realistic looking bigset clocks for paul
+    Clock = bigset_model:clock(Bigset),
+    file:write_file("pauls_clocks", clock_bytes(Clock), [append]).
+
+clock_bytes(Clock) ->
+    Bin = term_to_binary(Clock),
+    io_lib:format("~w : ~w~n", [Clock, Bin]).
 
 lmax([]) ->
     0;

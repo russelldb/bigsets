@@ -381,3 +381,6 @@ merge(#bigset{clock=C1, keys=Set1}, #bigset{clock=C2, keys=Set2}) ->
                           Set2Unique),
 
     #bigset{clock=Clock, keys=InSet}.
+
+clock(#bigset{clock=Clock}) ->
+    Clock.
