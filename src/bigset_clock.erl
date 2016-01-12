@@ -162,6 +162,51 @@ orddict_to_proplist(Dots) ->
                  [],
                  Dots).
 
+%% @doc intersection is all the dots in A that are also in B. A is an
+%% orddict of {actor, [dot()]} as returned by `complement/2'
+intersection(DotCloud, Clock) ->
+    Intersection = orddict:fold(fun(Actor, Dots, Acc) ->
+                         Dots2 = lists:filter(fun(X) ->
+                                                      bigset_clock:seen(Clock, {Actor, X}) end,
+                                              Dots),
+                         case Dots2 of
+                             [] ->
+                                 Acc;
+                             _ ->
+                                 [{Actor, Dots2} | Acc]
+                         end
+                 end,
+                 [],
+                                DotCloud),
+    compress_seen([], Intersection).
+
+%% @doc complement like in sets, only here we're talking sets of
+%% events. Generates a dict that represents all the events in A that
+%% are not in B. We actually assume that B is a subset of A, so we're
+%% talking about B's complement in A.
+complement({AVV, ADC}=A, {BVV, BDC}) ->
+    %% This is horrendously ineffecient, we need to use math/bit
+    %% twiddling to find a better way.
+    AActors = all_nodes(A),
+    lists:foldl(fun(Actor, Acc) ->
+                        ABase = riak_dt_vclock:get_counter(Actor, AVV),
+                        ADots = fetch_dot_list(Actor, ADC),
+                        BBase = riak_dt_vclock:get_counter(Actor, BVV),
+                        BDots = fetch_dot_list(Actor, BDC),
+                        %% @TODO(rdb) this is a mess!
+                        DelDots = ordsets:subtract(ordsets:from_list(ADots), ordsets:from_list(BDots)),
+                        %% all the dots in A between BBase and ABase
+                        ABaseDots = lists:seq(BBase+1, ABase),
+                        %% all the dots in B between BBase and ABase
+                        BDotsInABase = lists:takewhile(fun(X) -> X =< ABase end, BDots),
+                        %% The dots not in B that are in A between BBase and ABase
+                        BaseDeleted = ordsets:subtract(ordsets:from_list(ABaseDots), ordsets:from_list(BDotsInABase)),
+                        Deleted = ordsets:union(DelDots, BaseDeleted),
+                        [{Actor, ordsets:to_list(Deleted)} | Acc]
+                end,
+                [],
+                AActors).
+
 -ifdef(TEST).
 
 %% @TODO EQC of bigset_clock properties (at least

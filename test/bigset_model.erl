@@ -388,15 +388,42 @@ merge(#bigset{clock=C1, keys=Set1}, #bigset{clock=C2, keys=Set2}) ->
 handoff(From, To) ->
     #bigset{keys=FromKeys, clock=FromClock} = From,
     #bigset{clock=ToClock, keys=ToKeys} = To,
-    {ToClock2, ToKeys2} = orddict:fold(fun({_E, A, C, _}=K, V, {Clock, Keys}) ->
-                                               case bigset_clock:seen(Clock, {A, C}) of
-                                                   true ->{Clock, Keys};
-                                                   false ->
-                                                       {bigset_clock:strip_dots({A, C}, Clock),
-                                                        orddict:store(K, V, Keys)}
-                                               end
-                                       end,
-                                       {ToClock, ToKeys},
-                                       FromKeys),
-    To#bigset{clock=bigset_clock:merge(ToClock2, FromClock), keys=ToKeys2}.
-%%    merge(From, To).
+    TrackingClock = bigset_clock:fresh(),
+
+    %% This code takes care of the keys in From, either add them as
+    %% unseen, or drop them as seen
+    {ToClock2, ToKeys2, TrackingClock2} = orddict:fold(fun({_E, A, C, _}=K, V, {Clock, Keys, TC}) ->
+                                                               TC2 = bigset_clock:strip_dots({A, C}, TC),
+                                                               case bigset_clock:seen(Clock, {A, C}) of
+                                                                   true ->{Clock, Keys, TC2};
+                                                                   false ->
+                                                                       {bigset_clock:strip_dots({A, C}, Clock),
+                                                                        orddict:store(K, V, Keys),
+                                                                        TC2}
+                                                               end
+                                                       end,
+                                                       {ToClock, ToKeys, TrackingClock},
+                                                       FromKeys),
+    %% This section takes care of those keys that To has seen, but
+    %% From has removed. i.e. keys that are not handed off, but their
+    %% absence means something, and we don't want to read the whole
+    %% bigset at To to find that out.
+
+    %% The events in FromClock, not in TrackingClock2, that is all the
+    %% dots that we were not handed by From, and therefore FromClock
+    %% saw but has since removed
+    DeletedDots = bigset_clock:complement(FromClock, TrackingClock2),
+
+    %% All the dots that we had seen before hand off, but which the
+    %% handing off node has deleted
+    ToRemove = bigset_clock:intersection(DeletedDots, ToClock),
+
+    ToKeys3 = orddict:filter(fun({_E, A, C, _}, _V) ->
+                                     not bigset_clock:seen(ToRemove, {A, C}) end,
+                             ToKeys2),
+
+    %% This takes care of the keys that From as seen and removed but
+    %% To has not (yet?!) seen. Merging the clocks ensures that keys
+    %% that To has not seen, but From has removed never get added to
+    %% To.
+    To#bigset{clock=bigset_clock:merge(ToClock2, FromClock), keys=ToKeys3}.
