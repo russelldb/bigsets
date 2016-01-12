@@ -370,7 +370,7 @@ weight(_S, replicate) ->
 weight(_S, compaction) ->
     4;
 weight(S, handoff) when length(S#state.replicas) > 5 ->
-    2;
+    4;
 weight(S, handoff) when length(S#state.replicas) < 5 ->
     1;
 weight(_S, _) ->

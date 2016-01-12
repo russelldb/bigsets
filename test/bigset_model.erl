@@ -20,6 +20,9 @@
 
 -record(bigset, {
           clock=?CLOCK:fresh(),
+          %% This is a terrible name, no idea what to call this
+          %% yet. See handoff/2 below.
+          hoff_filter=bigset_clock:fresh(),
           keys=orddict:new() %% Simulate the back end with a K->V map
          }).
 
@@ -139,21 +142,26 @@ size(Bigset) ->
 
 -spec compact(bigset()) -> bigset().
 compact(Bigset) ->
-     %% fold_bigset(Bigset, fun compaction_flush_acc/2).
-    #bigset{clock=Clock, keys=Keys} = Bigset,
+    %% @TODO work in the HOFF_FILTER trimming!  Add Hof_filter to
+    %% accumulator and subtract dots as it filters
+
+    %% fold_bigset(Bigset, fun compaction_flush_acc/2).
+    #bigset{clock=Clock, keys=Keys, hoff_filter=HoffFilter} = Bigset,
     AccFinal = orddict:fold(fun({E, _, _, _}=K, V, Acc=#compaction_acc{current_element=E}) ->
                                                       %% same element
-                                                      accumulate_key(K, V, Acc);
+                                                      accumulate_key(K, V, HoffFilter, Acc);
                                                  (K, V, Acc) ->
                                                       %% New element, consider the current
                                                       %% element, and start over
                                                       Acc2 = flush_acc(Acc, Clock),
-                                                      accumulate_key(K, V, Acc2)
+                                                      accumulate_key(K, V, HoffFilter, Acc2)
                                               end,
                                               #compaction_acc{},
                                               Keys),
     #compaction_acc{acc=Keys2} = flush_acc(AccFinal, Clock),
-    #bigset{clock=Clock, keys=orddict:from_list(Keys2)}.
+    #bigset{clock=Clock, keys=orddict:from_list(Keys2),
+            %% @TODO(rdb) update this
+            hoff_filter=HoffFilter}.
 
 flush_acc(Acc, Clock) ->
     #compaction_acc{adds=Adds, removes=Rems, current_ctx=Ctx, acc=Keys} = Acc,
@@ -202,43 +210,71 @@ rem_survives(SurvivingDots, Payload, Clock) ->
         %% Tombstone still needed (some add it removes is deferred)
         (bigset_clock:subtract_seen(Clock, SurvivingDots) /= SurvivingDots).
 
-accumulate_key({E, _, _, ?ADD}=K, V, A) ->
-    #compaction_acc{adds=Adds, current_ctx=Ctx} = A,
-    Adds2 = [{K, V} | Adds],
-    Ctx2 = bigset_clock:merge(Ctx, V),
-    A#compaction_acc{adds=Adds2, current_ctx=Ctx2, current_element=E};
-accumulate_key({E, _, _, ?REMOVE}=K, V, A) ->
-    #compaction_acc{removes=Rems, current_ctx=Ctx} = A,
-    Ctx2 = bigset_clock:merge(Ctx, V),
-    Rems2 = [{K, V} | Rems],
-    A#compaction_acc{removes=Rems2, current_ctx=Ctx2, current_element=E}.
+accumulate_key({E, Actor, C, ?ADD}=K, V, HoffFilter, A) ->
+    case bigset_clock:seen(HoffFilter, {Actor, C}) of
+        false ->
+            #compaction_acc{adds=Adds, current_ctx=Ctx} = A,
+            Adds2 = [{K, V} | Adds],
+            Ctx2 = bigset_clock:merge(Ctx, V),
+            A#compaction_acc{adds=Adds2, current_ctx=Ctx2, current_element=E};
+        true ->
+            A
+    end;
+accumulate_key({E, Actor, C, ?REMOVE}=K, V, HoffFilter, A) ->
+    case bigset_clock:seen(HoffFilter, {Actor, C}) of
+        false ->
+            #compaction_acc{removes=Rems, current_ctx=Ctx} = A,
+            Ctx2 = bigset_clock:merge(Ctx, V),
+            Rems2 = [{K, V} | Rems],
+            A#compaction_acc{removes=Rems2, current_ctx=Ctx2, current_element=E};
+        true ->
+            A
+    end.
 
--spec fold_bigset(bigset(), function()) -> bigset().
-fold_bigset(#bigset{clock=Clock, keys=Keys}, FlushFun) ->
-    Keys2 = orddict:fold(fun({E, A, C, ?ADD}, Ctx, [{E, Dots, CtxAcc} | Acc]) ->
+-spec fold_bigset(bigset()) -> bigset().
+fold_bigset(#bigset{clock=Clock, keys=Keys, hoff_filter=HoffFilter}) ->
+    Keys2 = orddict:fold(fun({E, A, C, ?ADD}, Ctx, [{E, Dots, CtxAcc} | Acc]=Acc0) ->
                                  %% Still same element, accumulate keys and Ctx
-                                 [{E,
-                                   [{A, C} | Dots], %% accumulate dot
-                                   bigset_clock:merge(Ctx, CtxAcc) %% merge in ctx
-                                  } | Acc];
-                           ({E, _A, _C, ?REMOVE}, Ctx, [{E, Dots, CtxAcc} | Acc]) ->
-                                 %% Tombstone, we drop all tombstone
-                                 %% keys except a per-element key, just merge Ctx
-                                 [{E,
-                                   Dots,
-                                   bigset_clock:merge(Ctx, CtxAcc)
-                                  } | Acc];
+                                 case bigset_clock:seen(HoffFilter, {A, C}) of
+                                     false ->
+                                         [{E,
+                                           [{A, C} | Dots], %% accumulate dot
+                                           bigset_clock:merge(Ctx, CtxAcc) %% merge in ctx
+                                          } | Acc];
+                                     true ->
+                                         Acc0
+                                 end;
+                           ({E, A, C, ?REMOVE}, Ctx, [{E, Dots, CtxAcc} | Acc]=Acc0) ->
+                                 case bigset_clock:seen(HoffFilter, {A, C}) of
+                                     false ->
+                                         %% Tombstone, we drop all tombstone
+                                         %% keys except a per-element key, just merge Ctx
+                                         [{E,
+                                           Dots,
+                                           bigset_clock:merge(Ctx, CtxAcc)
+                                          } | Acc];
+                                     true ->
+                                         Acc0
+                                 end;
                             (Key, Ctx, Acc) ->
-                                 Acc2 = FlushFun(Acc, Clock),
-                                 Hd = new_acc(Key, Ctx),
+                                 Acc2 = accumulate_flush_acc(Acc),
+                                 Hd = new_acc(Key, HoffFilter, Ctx),
                                  [Hd | Acc2]
                          end,
                          [],
                         Keys),
-    Keys3 = orddict:from_list(FlushFun(Keys2, Clock)),
+    Keys3 = orddict:from_list(accumulate_flush_acc(Keys2)),
     #bigset{clock=Clock, keys= Keys3}.
 
 %% start over the per-element portition of the accumulator
+new_acc({E, A, C, _}=Key, HoffFilter, Ctx) ->
+    case bigset_clock:seen(HoffFilter, {A, C}) of
+        true ->
+            {E, [], bigset_clock:fresh()};
+        false ->
+            new_acc(Key, Ctx)
+    end.
+
 -spec new_acc(key(), context()) ->
                      fold_acc_head().
 new_acc({E, A, C, ?ADD}, Ctx) ->
@@ -249,9 +285,11 @@ new_acc(K, Ctx) ->
 %% @private the vnode fold operation. Similar to compact but returns
 %% an ordered list of Element->Dots mappings only, no tombstones or
 %% clock.
+%% @TODO(rdb|refactor) This is purely the read accumulate now so
+%% rename it
 -spec accumulate(bigset()) -> [orswot_elem()].
 accumulate(BS) ->
-    #bigset{keys=Keys} = fold_bigset(BS, fun accumulate_flush_acc/2),
+    #bigset{keys=Keys} = fold_bigset(BS),
     Keys.
 
 %% Used to flush the per element accumulator to the accumulated set of
@@ -259,10 +297,10 @@ accumulate(BS) ->
 %% accumulated, one entry per element, with a value that is the
 %% surviving dots set. This creates a structure like a traditional
 %% orswot.
--spec accumulate_flush_acc(read_acc(), context()) -> read_acc().
-accumulate_flush_acc([], _Clock) ->
+-spec accumulate_flush_acc(read_acc()) -> read_acc().
+accumulate_flush_acc([]) ->
     [];
-accumulate_flush_acc([{Element, Dots, Ctx} | Acc], _Clock) ->
+accumulate_flush_acc([{Element, Dots, Ctx} | Acc]) ->
     %% The read/fold acc just needs a set of E->Dot mappings for
     %% elements that are _in_ at this replica
     Remaining = bigset_clock:subtract_seen(Ctx, Dots),
@@ -387,7 +425,7 @@ merge(#bigset{clock=C1, keys=Set1}, #bigset{clock=C2, keys=Set2}) ->
 -spec handoff(From :: bigset(), To :: bigset()) -> NewTo :: bigset().
 handoff(From, To) ->
     #bigset{keys=FromKeys, clock=FromClock} = From,
-    #bigset{clock=ToClock, keys=ToKeys} = To,
+    #bigset{clock=ToClock, keys=ToKeys, hoff_filter=ToF} = To,
     TrackingClock = bigset_clock:fresh(),
 
     %% This code takes care of the keys in From, either add them as
@@ -418,12 +456,13 @@ handoff(From, To) ->
     %% handing off node has deleted
     ToRemove = bigset_clock:intersection(DeletedDots, ToClock),
 
-    ToKeys3 = orddict:filter(fun({_E, A, C, _}, _V) ->
-                                     not bigset_clock:seen(ToRemove, {A, C}) end,
-                             ToKeys2),
+    %% ToKeys3 = orddict:filter(fun({_E, A, C, _}, _V) ->
+    %%                                  not bigset_clock:seen(ToRemove, {A, C}) end,
+    %%                          ToKeys2),
 
     %% This takes care of the keys that From as seen and removed but
     %% To has not (yet?!) seen. Merging the clocks ensures that keys
     %% that To has not seen, but From has removed never get added to
     %% To.
-    To#bigset{clock=bigset_clock:merge(ToClock2, FromClock), keys=ToKeys3}.
+    To#bigset{clock=bigset_clock:merge(ToClock2, FromClock), keys=ToKeys2,
+              hoff_filter=bigset_clock:merge(ToRemove, ToF)}.
