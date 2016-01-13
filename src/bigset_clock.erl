@@ -231,7 +231,6 @@ complement({AVV, ADC}=A, {BVV, BDC}) ->
                         ADots = fetch_dot_list(Actor, ADC),
                         BBase = riak_dt_vclock:get_counter(Actor, BVV),
                         BDots = fetch_dot_list(Actor, BDC),
-                        %% @TODO(rdb) this is a mess!
                         DelDots = ordsets:subtract(ordsets:from_list(ADots), ordsets:from_list(BDots)),
                         %% all the dots in A between BBase and ABase
                         ABaseDots = lists:seq(BBase+1, ABase),
