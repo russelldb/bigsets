@@ -77,7 +77,7 @@ add(Element, ID, Bigset, Ctx) ->
     %% any 'X' seen at this node will be removed by an add of an 'X'
     Val = Ctx,
     Keys2 = orddict:store(Key, Val, Keys),
-    {{Key, Val}, #bigset{clock=Clock2, keys=Keys2}}.
+    {{Key, Val}, Bigset#bigset{clock=Clock2, keys=Keys2}}.
 
 -spec remove(term(), term(), bigset()) ->
                     {delta(), bigset()}.
@@ -93,7 +93,7 @@ remove(Element, ID, Bigset, Ctx) ->
     Key = {Element, ID, Cnt, ?REMOVE},
     Val = Ctx,
     Keys2 = orddict:store(Key, Val, Keys),
-    {{Key, Val}, #bigset{clock=Clock2, keys=Keys2}}.
+    {{Key, Val}, Bigset#bigset{clock=Clock2, keys=Keys2}}.
 
 -spec delta_join(delta(), bigset()) -> bigset().
 delta_join(Delta, Bigset) ->
@@ -424,20 +424,25 @@ merge(#bigset{clock=C1, keys=Set1}, #bigset{clock=C2, keys=Set2}) ->
 %% after receiving handoff.
 -spec handoff(From :: bigset(), To :: bigset()) -> NewTo :: bigset().
 handoff(From, To) ->
-    #bigset{keys=FromKeys, clock=FromClock} = From,
+    #bigset{keys=FromKeys, clock=FromClock, hoff_filter=FrHoff} = From,
     #bigset{clock=ToClock, keys=ToKeys, hoff_filter=ToF} = To,
     TrackingClock = bigset_clock:fresh(),
 
     %% This code takes care of the keys in From, either add them as
     %% unseen, or drop them as seen
-    {ToClock2, ToKeys2, TrackingClock2} = orddict:fold(fun({_E, A, C, _}=K, V, {Clock, Keys, TC}) ->
-                                                               TC2 = bigset_clock:strip_dots({A, C}, TC),
-                                                               case bigset_clock:seen(Clock, {A, C}) of
-                                                                   true ->{Clock, Keys, TC2};
+    {ToClock2, ToKeys2, TrackingClock2} = orddict:fold(fun({_E, A, C, _}=K, V, {Clock, Keys, TC}=Acc) ->
+                                                               case bigset_clock:seen(FrHoff, {A, C}) of
                                                                    false ->
-                                                                       {bigset_clock:strip_dots({A, C}, Clock),
-                                                                        orddict:store(K, V, Keys),
-                                                                        TC2}
+                                                                       TC2 = bigset_clock:strip_dots({A, C}, TC),
+                                                                       case bigset_clock:seen(Clock, {A, C}) of
+                                                                           true ->{Clock, Keys, TC2};
+                                                                           false ->
+                                                                               {bigset_clock:strip_dots({A, C}, Clock),
+                                                                                orddict:store(K, V, Keys),
+                                                                                TC2}
+                                                                       end;
+                                                                   true ->
+                                                                       Acc
                                                                end
                                                        end,
                                                        {ToClock, ToKeys, TrackingClock},
