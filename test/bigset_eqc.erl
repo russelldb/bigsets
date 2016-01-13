@@ -33,6 +33,7 @@
 -define(SET, set).
 
 -record(state, {replicas=[], %% Actor Ids for replicas in the system
+                dead_replicas=[], %% Actor Ids for replicas that have been removed
                 adds=[],      %% Elements that have been added to the set
                 deltas=[], %% delta result of add/remove goes here for later replication/delivery
                 delivered=[], %% track which deltas actually get delivered (for stats/funsies)
@@ -70,6 +71,11 @@ run(Count) ->
 check() ->
     eqc:check(prop_merge()).
 
+check(File) ->
+    {ok, Bytes} = file:read_file(File),
+    CE = binary_to_term(Bytes),
+    eqc:check(prop_merge(), CE).
+
 initial_state() ->
     #state{}.
 
@@ -86,8 +92,8 @@ create_replica_args(_S) ->
 %% exists
 -spec create_replica_pre(S :: eqc_statem:symbolic_state(),
                          Args :: [term()]) -> boolean().
-create_replica_pre(#state{replicas=Replicas}, [Id]) ->
-    not lists:member(Id, Replicas).
+create_replica_pre(#state{replicas=Replicas, dead_replicas=DeadReps}, [Id]) ->
+    not lists:member(Id, Replicas) andalso not lists:member(Id, DeadReps).
 
 %% @doc create a new replica
 create_replica(Id) ->
@@ -291,6 +297,61 @@ compact_post(_S, [_Replica], {_Diff, Before, After}) ->
             {post_compaction_not_eq, {before, replica_value(Before), Before}, '/=', {aft, replica_value(After), After}}
     end.
 
+%% --- Operation: handoff ---
+%% @doc handoff_pre/1 - Precondition for generation
+-spec handoff_pre(S :: eqc_statem:symbolic_state()) -> boolean().
+handoff_pre(#state{replicas=Replicas}) ->
+    length(Replicas) > 1.
+
+%% @doc handoff_args - Argument generator
+-spec handoff_args(S :: eqc_statem:symbolic_state()) -> eqc_gen:gen([term()]).
+handoff_args(#state{replicas=Replicas}) ->
+    [elements(Replicas), %% Handing Off
+     elements(Replicas)]. %% Handed off to
+
+%% @doc handoff_pre/2 - Precondition for handoff
+-spec handoff_pre(S, Args) -> boolean()
+    when S    :: eqc_statem:symbolic_state(),
+         Args :: [term()].
+handoff_pre(#state{replicas=Replicas}, [From, To]) ->
+    lists:member(From, Replicas)
+        andalso lists:member(To, Replicas)
+    %% When handoff is complete we delete the replica, so don't hand
+    %% off to yourself, ever
+        andalso From /= To.
+
+%% @doc handoff - The actual operation For now hand off everything and
+%% delete yourself that is that, @TODO(rdb) handoff some, then stop,
+%% then start again from the beginning, etc, like real riak
+handoff(From, To) ->
+    [#replica{id=From, delta_set=FromSet,
+              bigset=FromBS}] = ets:lookup(?MODULE, From),
+    [#replica{id=To, delta_set=ToSet,
+              bigset=ToBS}=ToRep] = ets:lookup(?MODULE, To),
+
+    ToBS2 = bigset_model:handoff(FromBS, ToBS),
+    ToSet2 = ?SWOT:merge(FromSet, ToSet),
+    ets:insert(?MODULE, ToRep#replica{bigset=ToBS2,
+                                      delta_set=ToSet2}),
+    ets:delete(?MODULE, From),
+    From.
+
+%% @doc handoff_next - Next state function
+-spec handoff_next(S, Var, Args) -> NewS
+    when S    :: eqc_statem:symbolic_state() | eqc_state:dynamic_state(),
+         Var  :: eqc_statem:var() | term(),
+         Args :: [term()],
+         NewS :: eqc_statem:symbolic_state() | eqc_state:dynamic_state().
+handoff_next(S=#state{replicas=Replicas, dead_replicas=DeadReplicas}, _ID, [From, _To]) ->
+    S#state{replicas=lists:delete(From, Replicas), dead_replicas=[From | DeadReplicas]}.
+
+%% @doc handoff_post - Postcondition for handoff
+-spec handoff_post(S, Args, Res) -> true | term()
+    when S    :: eqc_state:dynamic_state(),
+         Args :: [term()],
+         Res  :: term().
+handoff_post(_S, [_From, _To], _Res) ->
+    true.
 
 %% @doc weights for commands. Don't create too many replicas, but
 %% prejudice in favour of creating more than 1. Try and balance
@@ -308,6 +369,10 @@ weight(_S, replicate) ->
     7;
 weight(_S, compaction) ->
     4;
+weight(S, handoff) when length(S#state.replicas) > 5 ->
+    4;
+weight(S, handoff) when length(S#state.replicas) < 5 ->
+    1;
 weight(_S, _) ->
     1.
 
