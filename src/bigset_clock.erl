@@ -91,12 +91,50 @@ fetch_dot_list(Actor, Seen) ->
             L
     end.
 
+%% Remove dots seen by `Clock' from `Dots'. Return a list of `dot()'
+%% unseen by `Clock'. Return `[]' if all dots seens.
 subtract_seen(Clock, Dots) ->
     %% @TODO(rdb|optimise) this is maybe a tad inefficient.
     lists:filter(fun(Dot) ->
                          not seen(Clock, Dot)
                  end,
                  Dots).
+
+%% Remove `Dots' from `Clock'. Any `dot()' in `Dots' that has been
+%% seen by `Clock' is removed from `Clock', making the `Clock' un-see
+%% the event.
+subtract(Clock, Dots) ->
+    lists:foldl(fun(Dot, Acc) ->
+                        subtract_dot(Acc, Dot) end,
+                Clock,
+                Dots).
+
+%% Remove an event `dot()' `Dot' from the clock() `Clock', effectively
+%% un-see `Dot'.
+subtract_dot(Clock, Dot) ->
+    {VV, DC} = Clock,
+    {Actor, Cnt} = Dot,
+    DL = fetch_dot_list(Actor, DC),
+    case lists:member(Cnt, DL) of
+        %% Dot in the dot cloud, remove it
+        true ->
+            {VV, orddict:store(Actor, lists:delete(Cnt, DL), DC)};
+        false ->
+            %% Check the clock
+            case riak_dt_vclock:get_counter(Actor, VV) of
+                N when N >= Cnt ->
+                    %% Dot in the contiguous counter Remove it by
+                    %% adding > cnt to the Dot Cloud, and leaving
+                    %% less than cnt in the base
+                    NewBase = Cnt-1,
+                    NewDots = lists:seq(Cnt+1, N),
+                    {riak_dt_vclock:set_counter(Actor, NewBase, VV),
+                     orddict:store(Actor, lists:umerge(NewDots, DL), DC)};
+                _ ->
+                    %% NoOp
+                    Clock
+            end
+    end.
 
 %% @doc get the counter for `Actor' where `counter' is the maximum
 %% _contiguous_ event sent by this clock (i.e. not including

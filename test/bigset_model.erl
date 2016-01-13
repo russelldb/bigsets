@@ -138,7 +138,8 @@ size(Bigset) ->
                          adds=[],
                          removes=[],
                          current_ctx=bigset_clock:fresh(),
-                         acc=[]}).
+                         acc=[],
+                         filter_rems=[]}).
 
 -spec compact(bigset()) -> bigset().
 compact(Bigset) ->
@@ -158,13 +159,14 @@ compact(Bigset) ->
                                               end,
                                               #compaction_acc{},
                                               Keys),
-    #compaction_acc{acc=Keys2} = flush_acc(AccFinal, Clock),
+    #compaction_acc{acc=Keys2, filter_rems=FR} = flush_acc(AccFinal, Clock),
+    HoffFilter2 = bigset_clock:subtract(HoffFilter, FR),
     #bigset{clock=Clock, keys=orddict:from_list(Keys2),
             %% @TODO(rdb) update this
-            hoff_filter=HoffFilter}.
+            hoff_filter=HoffFilter2}.
 
 flush_acc(Acc, Clock) ->
-    #compaction_acc{adds=Adds, removes=Rems, current_ctx=Ctx, acc=Keys} = Acc,
+    #compaction_acc{adds=Adds, removes=Rems, current_ctx=Ctx, acc=Keys, filter_rems=FR} = Acc,
     {SurvivingAdds, SurvivingDots} = lists:foldl(fun({{_, A, C, _}=K, V}, {SA, SD}) ->
                                                          case add_survives({A, C}, V, Ctx, Clock) of
                                                              true ->
@@ -187,7 +189,8 @@ flush_acc(Acc, Clock) ->
                                 end,
                                 [],
                                 Rems),
-    #compaction_acc{acc= Keys ++ SurvivingAdds ++ SurvivingRems}.
+    #compaction_acc{acc= Keys ++ SurvivingAdds ++ SurvivingRems,
+                    filter_rems=FR}.
 
 %% if an Add's dot is covered by the aggregate element context &&
 %% its payload ctx is descended by the clock, it can be removed,
@@ -218,7 +221,7 @@ accumulate_key({E, Actor, C, ?ADD}=K, V, HoffFilter, A) ->
             Ctx2 = bigset_clock:merge(Ctx, V),
             A#compaction_acc{adds=Adds2, current_ctx=Ctx2, current_element=E};
         true ->
-            A
+            update_remove_filter(A, {Actor, C})
     end;
 accumulate_key({E, Actor, C, ?REMOVE}=K, V, HoffFilter, A) ->
     case bigset_clock:seen(HoffFilter, {Actor, C}) of
@@ -228,8 +231,14 @@ accumulate_key({E, Actor, C, ?REMOVE}=K, V, HoffFilter, A) ->
             Rems2 = [{K, V} | Rems],
             A#compaction_acc{removes=Rems2, current_ctx=Ctx2, current_element=E};
         true ->
-            A
+            update_remove_filter(A, {Actor, C})
     end.
+
+%% Add the dot for a key that has been dropped by compaction to
+%% accumulator to be used to trim the hoff filter.
+update_remove_filter(Acc, Dot) ->
+    #compaction_acc{filter_rems=Rems} = Acc,
+    Acc#compaction_acc{filter_rems=[Dot | Rems]}.
 
 -spec fold_bigset(bigset()) -> bigset().
 fold_bigset(#bigset{clock=Clock, keys=Keys, hoff_filter=HoffFilter}) ->
@@ -460,10 +469,6 @@ handoff(From, To) ->
     %% All the dots that we had seen before hand off, but which the
     %% handing off node has deleted
     ToRemove = bigset_clock:intersection(DeletedDots, ToClock),
-
-    %% ToKeys3 = orddict:filter(fun({_E, A, C, _}, _V) ->
-    %%                                  not bigset_clock:seen(ToRemove, {A, C}) end,
-    %%                          ToKeys2),
 
     %% This takes care of the keys that From as seen and removed but
     %% To has not (yet?!) seen. Merging the clocks ensures that keys
