@@ -33,7 +33,7 @@
 -record(state, {partition :: pos_integer(),
                 batch_size :: pos_integer()}).
 
--define(FOLD_OPTS, [{iterator_refresh, true}, {fold_method, streaming}]).
+-define(RFOLD_OPTS, [{iterator_refresh, true}, {fold_method, streaming}]).
 
 %% ===================================================================
 %% Public API
@@ -56,7 +56,7 @@ handle_work({get, Id, DB, Set}, Sender, State) ->
     FirstKey = bigset:clock_key(Set, Id),
     EndKey = bigset:end_key(Set),
     Buffer = bigset_fold_acc:new(Set, Sender, BatchSize, Partition, Id),
-    FoldOpts = [{start_key, FirstKey}, {last_key, EndKey} | ?FOLD_OPTS],
+    FoldOpts = [{start_key, FirstKey}, {last_key, EndKey} | ?RFOLD_OPTS],
 
     try
         AccFinal =

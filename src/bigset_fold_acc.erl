@@ -36,6 +36,7 @@
           current_elem :: binary(),
           current_dots = ?EMPTY :: [bigset_clock:dot()],
           current_ctx = bigset_clock:fresh() :: bigset_clock:clock(),
+          hoff_filter = bigset_clock:fresh() :: bigset_clock:clock(),
           elements = ?EMPTY
         }).
 
@@ -74,15 +75,30 @@ fold({Key, Value}, Acc=#fold_acc{not_found=true}) ->
     end;
 fold({Key, Val}, Acc=#fold_acc{not_found=false}) ->
     %% an element key? We've sent the clock (not_found=false)
-    #fold_acc{set=Set, key_prefix=Pref, prefix_len=PrefLen} = Acc,
+    #fold_acc{set=Set, key_prefix=Pref, prefix_len=PrefLen, actor=Me} = Acc,
     case Key of
         <<Pref:PrefLen/binary, $c, _Rest/binary>> ->
             %% a clock for another actor, skip it
             Acc;
+        <<Pref:PrefLen/binary, $d, Me/binary>> ->
+            %% My hoff filter!
+            Acc#fold_acc{hoff_filter=bigset:from_bin(Val)};
+        <<Pref:PrefLen/binary, $d, _NotMe/binary>> ->
+            %% Some other actors hoff_filter
+            Acc;
         <<Pref:PrefLen/binary, $e, Rest/binary>> ->
             {element, Set, Element, Actor, Cnt, TSB} = bigset:decode_element(Rest, Set),
             Ctx = bigset:from_bin(Val),
-            add(Element, Actor, Cnt, TSB, Ctx, Acc);
+            #fold_acc{hoff_filter=HoffFilter} = Acc,
+            case bigset_clock:seen(HoffFilter, {Acc, Cnt}) of
+                false ->
+                    add(Element, Actor, Cnt, TSB, Ctx, Acc);
+                true ->
+                    %% a handing off vnode deleted this key, so it is
+                    %% as though we don't have it, just skip it, it
+                    %% will be compacted out next round
+                    Acc
+            end;
         _ ->
             %% The end key
             throw({break, Acc})

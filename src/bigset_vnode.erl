@@ -43,17 +43,14 @@
 -record(state, {partition,
                 vnodeid=undefined, %% actor
                 data_dir=undefined, %% eleveldb data directory
-                db %% eleveldb handle
+                db, %% eleveldb handle
+                hoff_state %% handoff state
                }).
 
 -type state() :: #state{}.
 -type status() :: orddict:orddict().
 -type level_put() :: {put, Key :: binary(), Value :: binary()}.
--type db() :: eleveldb:db_ref().
 
--define(READ_OPTS, [{fill_cache, true}]).
--define(WRITE_OPTS, [{sync, false}]).
--define(FOLD_OPTS, [{iterator_refresh, true}]).
 
 %% API
 start_vnode(I) ->
@@ -112,7 +109,14 @@ init([Partition]) ->
     %% @TODO(rdb|question) Maybe this pool should be BIIIIG for many gets
     PoolSize = app_helper:get_env(bigset, worker_pool_size, ?DEFAULT_WORKER_POOL),
     BatchSize  = app_helper:get_env(bigset, batch_size, ?DEFAULT_BATCH_SIZE),
-    {ok, #state {data_dir=DataDir, vnodeid=VnodeId,  partition=Partition, db=DB},
+    %% @TODO(rdb) is it really OK to pass that DB ref to another
+    %% module? I don't think so. Get the abstraction level right.
+    HoffState = bigset_handoff_receiver:new(VnodeId, DB),
+    {ok, #state {data_dir=DataDir,
+                 vnodeid=VnodeId,
+                 partition=Partition,
+                 db=DB,
+                 hoff_state=HoffState},
      [{pool, bigset_vnode_worker, PoolSize, [{batch_size, BatchSize}]}]}.
 
 %% COMMANDS(denosneold!)
@@ -138,7 +142,7 @@ handle_command(?OP{set=Set, inserts=Inserts, removes=Removes, ctx=Ctx}, Sender, 
     %% Store elements in the set.
     #state{db=DB, partition=Partition, vnodeid=Id} = State,
     ClockKey = bigset:clock_key(Set, Id),
-    Clock = get_clock(ClockKey, DB),
+    Clock = bigset:get_clock(ClockKey, DB),
     InsertCtx = insert_ctx(Clock, Ctx),
     {Clock2, InsertWrites, InsertReplicate} = gen_inserts(Set, Inserts, Id, Clock, InsertCtx),
 
@@ -170,7 +174,7 @@ handle_command(?REPLICATE_REQ{set=Set,
     riak_core_vnode:reply(Sender, {w, Partition}),
     %% Read local clock
     ClockKey = bigset:clock_key(Set, Id),
-    Clock0 = get_clock(ClockKey, DB),
+    Clock0 = bigset:get_clock(ClockKey, DB),
     {Clock, Inserts} = replica_inserts(Clock0, Ins),
     {Clock1, Deletes} = replica_inserts(Clock, Rems),
     BinClock = bigset:to_bin(Clock1),
@@ -205,11 +209,22 @@ handle_command(?CONTAINS_REQ{set=Set, members=Members}, Sender, State) ->
 -spec handle_handoff_command(term(), term(), state()) ->
                                     {noreply, state()}.
 handle_handoff_command(?FOLD_REQ{foldfun=FoldFun, acc0=Acc0}, Sender, State) ->
-    #state{db=DB} = State,
+    #state{db=DB, vnodeid=ID} = State,
+    %% Tell the receiver who we are, encode_handoff_item doesn't get
+    %% state, so we have to do this here.
+    IDLen = byte_size(ID),
     FoldFunWrapped = fun({Key, Val}, AccIn) ->
-                             FoldFun(Key, Val, AccIn)
+                             NewKey = <<IDLen:32/little-unsigned-integer,
+                                        ID:IDLen/binary,
+                                        Key/binary>>,
+                             FoldFun(NewKey, Val, AccIn)
                      end,
     {async, {handoff, DB, FoldFunWrapped, Acc0}, Sender, State}.
+
+encode_handoff_item(Key, Val) ->
+    %% Just bosh together the binary key and value.
+    KeyLen = byte_size(Key),
+    <<KeyLen:32/integer, Key:KeyLen/binary, Val/binary>>.
 
 handoff_starting(_TargetNode, State) ->
     {true, State}.
@@ -221,52 +236,22 @@ handoff_finished(_TargetNode, State) ->
     {ok, State}.
 
 handle_handoff_data(<<KeyLen:32/integer, Rest/binary>>, State) ->
-    #state{db=DB, vnodeid=ID} = State,
-    %% @TODO(rbd|optimise) some way to buffer incoming set? Inmemory,
-    %% assuming if you crash handoff starts over anyway, right?
-    %% @TODO(rdb|assumption) verify that crashing (and therefore
-    %% losing inmemory handoff receive buffer) leads to handoff
-    %% restarting from the beginning in riak could at least cache the
-    %% set clock since we know they're stored in order at the other
-    %% vnode handing off
-    <<Key:KeyLen/binary, Val/binary>> = Rest,
-    case bigset:decode_key(Key) of
-        {clock, _Set, ID} ->
-            %% My clock key, ignore it (@TODO(rdb|robustness) or merge
-            %% it/check it exists?)
-            ok;
-        {clock, Set, _Actor} ->
-            %% Some other actors key, just store it
-            %% @TODO(rdb|robustness) can we do something to check
-            %% integrity here? Do we want to store forever some key
-            %% for an old replica?
-            EndKey = bigset:end_key(Set),
-            ok = eleveldb:write(DB, [{put, Key, Val}, {put, EndKey, <<>>}], ?WRITE_OPTS);
-        {element, Set, _Elem, Actor, Counter, _TSB} ->
-            %% only store if unseen
-            ClockKey = bigset:clock_key(Set, ID),
-            Clock = get_clock(ClockKey, DB),
-            Dot = {Actor, Counter},
-            case bigset_clock:seen(Clock, Dot) of
-                true ->
-                    %% no op
-                    ok;
-                false ->
-                    EndKey = bigset:end_key(Set),
-                    C2 = bigset_clock:strip_dots(Dot, Clock),
-                    ok = eleveldb:write(DB, [{put, ClockKey, bigset:to_bin(C2)},
-                                             {put, Key, Val},
-                                             {put, EndKey, <<>>}], ?WRITE_OPTS)
-            end;
-        {end_key, _Set} ->
-            ok
-    end,
-    {reply, ok, State}.
+    #state{db=DB, hoff_state=HoffState} = State,
 
-encode_handoff_item(Key, Val) ->
-    %% Just bosh together the binary key and value.
-    KeyLen = byte_size(Key),
-    <<KeyLen:32/integer, Key:KeyLen/binary, Val/binary>>.
+    <<Key0:KeyLen/binary, Value/binary>> = Rest,
+    <<IDLen:32/little-unsigned-integer, Key1/binary>> = Key0,
+    <<Sender:IDLen/binary, Key/binary>> = Key1,
+
+    DecodedKey = bigset:decode_key(Key),
+
+    {Writes, HoffState2} = bigset_handoff_receiver:update(Sender,
+                                                          DecodedKey,
+                                                          Value,
+                                                          HoffState),
+
+    ok = eleveldb:write(DB, Writes, ?WRITE_OPTS),
+
+    {reply, ok, State#state{hoff_state=HoffState2}}.
 
 is_empty(State) ->
     #state{db=DB} = State,
@@ -315,18 +300,6 @@ terminate(_Reason, State) ->
 
 
 %%%%% priv
--spec get_clock(ClockKey::binary(), db()) -> bigset_clock:clock().
-get_clock(ClockKey, DB) ->
-    clock(eleveldb:get(DB, ClockKey, ?READ_OPTS)).
-
--spec clock(not_found | {ok, binary()}) -> bigset_clock:clock().
-clock(not_found) ->
-    %% @TODO(rdb|correct) -> is this _really_ OK, what if we _know_
-    %% (how?) the set exists, a missing clock is bad. At least have
-    %% actor epochs, eh?
-    bigset_clock:fresh();
-clock({ok, ClockBin}) ->
-    bigset:from_bin(ClockBin).
 
 %%% So much cut and paste, maybe vnode_status_mgr (or vnode
 %%% manage???) should do the ID management

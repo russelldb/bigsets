@@ -2,7 +2,7 @@
 %%% @author Russell Brown <russelldb@basho.com>
 %%% @copyright (C) 2015, Russell Brown
 %%% @doc
-%%%
+%%% Quick/dirty by-eye testing of comparator
 %%% @end
 %%% Created : 15 Oct 2015 by Russell Brown <russelldb@basho.com>
 %%%-------------------------------------------------------------------
@@ -59,9 +59,9 @@ test() ->
     io:format("dumping BS~n"),
     dump_db(BSRef),
 
-    [stop(Ref) || Ref <- [BSRef, RegRef]].
-    %% [eleveldb:destroy(DataDir, []) || DataDir <- [?BS_DATA_DIR,
-    %%                                               ?DEF_DATA_DIR]].
+    [stop(Ref) || Ref <- [BSRef, RegRef]],
+    [eleveldb:destroy(DataDir, []) || DataDir <- [?BS_DATA_DIR,
+                                                  ?DEF_DATA_DIR]].
 
 
 key_vals() ->
@@ -89,5 +89,10 @@ key_vals() ->
      {bigset:insert_member_key(S1, E1, A0, 22), <<" S1, E1, A0, 22 Add">>},
      {bigset:insert_member_key(S1, E0, A2, 9), <<" S1, E0, A2, 9 Add">>},
      {bigset:insert_member_key(S2, E0, A2, 9), <<" S2, E0, A2, 9 Add">>},
-     {bigset:remove_member_key(S1, E0, A2, 8), <<" S1, E0, A2, 8 Rem">>}].
+     {bigset:remove_member_key(S1, E0, A2, 8), <<" S1, E0, A2, 8 Rem">>},
+     {bigset:hoff_key(S2, A1), <<"hoff key set 2 actor 1">>},
+     {bigset:hoff_key(S1, A0), <<"hoff key set 1 actor 0">>},
+     {bigset:hoff_key(S1, A2), <<"hoff key set 1 actor 2">>},
+     {bigset:clock_key(S1, A0), <<"clock key set1 actor 0">>}
+    ].
 

@@ -149,6 +149,28 @@ clock_key(Set, Actor) ->
       $c, %% means clock
       Actor/binary>>.
 
+%%% codec See docs on key scheme, use Actor name in handoff filter key
+%%% so %% AAE/replication of filter is safe. Like a decomposed VV, an
+%%% actor may only update it's own handoff filter
+hoff_key(Set, Actor) ->
+    Pref = key_prefix(Set),
+    <<Pref/binary,
+      $d, %% means hoff filter (d 'cos > than c and < e)
+      Actor/binary>>.
+
+-spec get_clock(ClockKey::binary(), db()) -> bigset_clock:clock().
+get_clock(ClockKey, DB) ->
+    clock(eleveldb:get(DB, ClockKey, ?READ_OPTS)).
+
+-spec clock(not_found | {ok, binary()}) -> bigset_clock:clock().
+clock(not_found) ->
+    %% @TODO(rdb|correct) -> is this _really_ OK, what if we _know_
+    %% (how?) the set exists, a missing clock is bad. At least have
+    %% actor epochs, eh?
+    bigset_clock:fresh();
+clock({ok, ClockBin}) ->
+    bigset:from_bin(ClockBin).
+
 end_key(Set) ->
     %% an explicit end key that always sorts lowest
     %% written _every write_??
@@ -156,6 +178,21 @@ end_key(Set) ->
     <<Pref/binary,
       $z %% means end key
     >>.
+
+%% @doc is this key a clock key?
+-spec is_clock_key(tuple()) -> boolean().
+is_clock_key({clock, _, _}) ->
+    true;
+is_clock_key(_) ->
+    false.
+
+%% @doc get the set name from either an encoded or decoded key
+-spec get_set(binary() | tuple()) -> binary().
+get_set(<<SetLen:32/little-unsigned-integer, Rest/binary>>) ->
+    <<Set:SetLen/binary, _/binary>> = Rest,
+    Set;
+get_set(DecodedKey) when is_tuple(DecodedKey) ->
+    element(2, DecodedKey).
 
 %% @doc
 -spec decode_key(Key :: binary()) -> {clock, set(), actor()} |
@@ -168,6 +205,8 @@ decode_key(<<SetLen:32/little-unsigned-integer, Bin/binary>>) ->
 
 decode_key(<<$c, Actor/binary>>, Set) ->
     {clock, Set, Actor};
+decode_key(<<$d, Actor/binary>>, Set) ->
+    {hoff, Set, Actor};
 decode_key(<<$e, Elem/binary>>, Set) ->
     decode_element(Elem, Set);
 decode_key(<<$z>>, Set) ->

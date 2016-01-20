@@ -10,6 +10,7 @@
 -type ctx() :: binary().
 -type remove() :: {member(), ctx()}.
 -type removes() :: [remove()].
+-type db() :: eleveldb:db_ref().
 
 -type delta_element() :: {ElementKey :: binary(),
                           ElementVal :: binary(),
@@ -59,7 +60,6 @@
 -define(DEFAULT_BATCH_SIZE, 1000).
 -define(DEFAULT_WORKER_POOL, 100).
 
-
-
-
-
+-define(READ_OPTS, [{fill_cache, true}]).
+-define(WRITE_OPTS, [{sync, false}]).
+-define(FOLD_OPTS, [{iterator_refresh, true}]).
