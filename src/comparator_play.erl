@@ -90,9 +90,9 @@ key_vals() ->
      {bigset:insert_member_key(S1, E0, A2, 9), <<" S1, E0, A2, 9 Add">>},
      {bigset:insert_member_key(S2, E0, A2, 9), <<" S2, E0, A2, 9 Add">>},
      {bigset:remove_member_key(S1, E0, A2, 8), <<" S1, E0, A2, 8 Rem">>},
-     {bigset:hoff_key(S2, A1), <<"hoff key set 2 actor 1">>},
-     {bigset:hoff_key(S1, A0), <<"hoff key set 1 actor 0">>},
-     {bigset:hoff_key(S1, A2), <<"hoff key set 1 actor 2">>},
+     {bigset:set_tombstone_key(S2, A1), <<"set tombstone key set 2 actor 1">>},
+     {bigset:set_tombstone_key(S1, A0), <<"set tombstone key set 1 actor 0">>},
+     {bigset:set_tombstone_key(S1, A2), <<"set tombstone key set 1 actor 2">>},
      {bigset:clock_key(S1, A0), <<"clock key set1 actor 0">>}
     ].
 

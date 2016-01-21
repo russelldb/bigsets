@@ -36,7 +36,7 @@
           current_elem :: binary(),
           current_dots = ?EMPTY :: [bigset_clock:dot()],
           current_ctx = bigset_clock:fresh() :: bigset_clock:clock(),
-          hoff_filter = bigset_clock:fresh() :: bigset_clock:clock(),
+          set_tombstone = bigset_clock:fresh() :: bigset_clock:clock(),
           elements = ?EMPTY
         }).
 
@@ -81,16 +81,16 @@ fold({Key, Val}, Acc=#fold_acc{not_found=false}) ->
             %% a clock for another actor, skip it
             Acc;
         <<Pref:PrefLen/binary, $d, Me/binary>> ->
-            %% My hoff filter!
-            Acc#fold_acc{hoff_filter=bigset:from_bin(Val)};
+            %% My set tombstone, I need this!
+            Acc#fold_acc{set_tombstone=bigset:from_bin(Val)};
         <<Pref:PrefLen/binary, $d, _NotMe/binary>> ->
-            %% Some other actors hoff_filter
+            %% Some other actors set_tombstone
             Acc;
         <<Pref:PrefLen/binary, $e, Rest/binary>> ->
             {element, Set, Element, Actor, Cnt, TSB} = bigset:decode_element(Rest, Set),
             Ctx = bigset:from_bin(Val),
-            #fold_acc{hoff_filter=HoffFilter} = Acc,
-            case bigset_clock:seen(HoffFilter, {Acc, Cnt}) of
+            #fold_acc{set_tombstone=SetTombstone} = Acc,
+            case bigset_clock:seen(SetTombstone, {Acc, Cnt}) of
                 false ->
                     add(Element, Actor, Cnt, TSB, Ctx, Acc);
                 true ->

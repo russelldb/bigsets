@@ -34,8 +34,8 @@ new(Id, DB) ->
 update(_Sender, {clock, _Set, Actor}, _Value, State=#state{id=Actor}) ->
     %% My clock passed back to me, No Op
     {[], State};
-update(_Sender, {hoff, _Set, Actor}, _Value, State=#state{id=Actor}) ->
-    %% My hoff filter passed back to me, No Op
+update(_Sender, {set_tombstone, _Set, Actor}, _Value, State=#state{id=Actor}) ->
+    %% My set tombstone passed back to me, No Op
     {[], State};
 update(Sender, {clock, Set, Sender}=Key, Value, State) ->
     %% Sender's clock, need this in handoff state, also store it
@@ -48,11 +48,11 @@ update(Sender, {clock, Set, Sender}=Key, Value, State) ->
 update(_Sender, {clock, _Set, _Actor}=Key, Value, State) ->
     {[{put, Key, Value}],
      State};
-update(_Sender, {hoff, _Set, _Actor}=Key, Value, State) ->
+update(_Sender, {set_tombstone, _Set, _Actor}=Key, Value, State) ->
     {[{put, Key, Value}],
      State};
 update(Sender, {end_key, Set}, _V, State) ->
-    %% end of the set, generate the hoff filter to write, and clear
+    %% end of the set, generate the set tombstone to write, and clear
     %% the state
     #state{id=Id, db=DB} = State,
     #sender_state{clock=SenderClock, tracker=Tracker, set=Set} = get_sender_state(Sender, State),
@@ -72,13 +72,13 @@ update(Sender, {end_key, Set}, _V, State) ->
     %% the handing off node has deleted
     ToRemove = bigset_clock:intersection(DelDots, LocalClock),
 
-    HoffKey = bigset:hoff_key(Set, Id),
-    HoffFilter = bigset:get_clock(HoffKey, DB),
-    HoffFilter2 = bigset_clock:merge(ToRemove, HoffFilter),
+    SetTSKey= bigset:set_tombstone_key(Set, Id),
+    SetTombstone0 = bigset:get_clock(SetTSKey, DB),
+    SetTombstone = bigset_clock:merge(ToRemove, SetTombstone0),
     LocalClock2 = bigset_clock:merge(LocalClock, SenderClock),
     State2 = remove_sender(Sender, State),
     {[{put, ClockKey, LocalClock2},
-      {put, HoffKey, HoffFilter2}],
+      {put, SetTSKey, SetTombstone}],
      State2};
 update(Sender, Key, Value, State) ->
     %% Can only be an element key

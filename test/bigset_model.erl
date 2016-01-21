@@ -22,7 +22,7 @@
           clock=?CLOCK:fresh(),
           %% This is a terrible name, no idea what to call this
           %% yet. See handoff/2 below.
-          hoff_filter=bigset_clock:fresh(),
+          set_tombstone=bigset_clock:fresh(),
           keys=orddict:new() %% Simulate the back end with a K->V map
          }).
 
@@ -142,27 +142,22 @@ size(Bigset) ->
 
 -spec compact(bigset()) -> bigset().
 compact(Bigset) ->
-    %% @TODO work in the HOFF_FILTER trimming!  Add Hof_filter to
-    %% accumulator and subtract dots as it filters
-
-    %% fold_bigset(Bigset, fun compaction_flush_acc/2).
-    #bigset{clock=Clock, keys=Keys, hoff_filter=HoffFilter} = Bigset,
+    #bigset{clock=Clock, keys=Keys, set_tombstone=SetTombstone} = Bigset,
     AccFinal = orddict:fold(fun({E, _, _, _}=K, V, Acc=#compaction_acc{current_element=E}) ->
-                                                      %% same element
-                                                      accumulate_key(K, V, HoffFilter, Acc);
-                                                 (K, V, Acc) ->
-                                                      %% New element, consider the current
-                                                      %% element, and start over
-                                                      Acc2 = flush_acc(Acc, Clock),
-                                                      accumulate_key(K, V, HoffFilter, Acc2)
-                                              end,
-                                              #compaction_acc{},
-                                              Keys),
+                                    %% same element
+                                    accumulate_key(K, V, SetTombstone, Acc);
+                               (K, V, Acc) ->
+                                    %% New element, consider the current
+                                    %% element, and start over
+                                    Acc2 = flush_acc(Acc, Clock),
+                                    accumulate_key(K, V, SetTombstone, Acc2)
+                            end,
+                            #compaction_acc{},
+                            Keys),
     #compaction_acc{acc=Keys2} = flush_acc(AccFinal, Clock),
 
     #bigset{clock=Clock, keys=orddict:from_list(Keys2),
-            %% @TODO(rdb) update this
-            hoff_filter=bigset_clock:fresh()}.
+            set_tombstone=bigset_clock:fresh()}.
 
 flush_acc(Acc, Clock) ->
     #compaction_acc{adds=Adds, removes=Rems, current_ctx=Ctx, acc=Keys} = Acc,
@@ -211,8 +206,8 @@ rem_survives(SurvivingDots, Payload, Clock) ->
         %% Tombstone still needed (some add it removes is deferred)
         (bigset_clock:subtract_seen(Clock, SurvivingDots) /= SurvivingDots).
 
-accumulate_key({E, Actor, C, ?ADD}=K, V, HoffFilter, A) ->
-    case bigset_clock:seen(HoffFilter, {Actor, C}) of
+accumulate_key({E, Actor, C, ?ADD}=K, V, SetTombstone, A) ->
+    case bigset_clock:seen(SetTombstone, {Actor, C}) of
         false ->
             #compaction_acc{adds=Adds, current_ctx=Ctx} = A,
             Adds2 = [{K, V} | Adds],
@@ -221,8 +216,8 @@ accumulate_key({E, Actor, C, ?ADD}=K, V, HoffFilter, A) ->
         true ->
             A
     end;
-accumulate_key({E, Actor, C, ?REMOVE}=K, V, HoffFilter, A) ->
-    case bigset_clock:seen(HoffFilter, {Actor, C}) of
+accumulate_key({E, Actor, C, ?REMOVE}=K, V, SetTombstone, A) ->
+    case bigset_clock:seen(SetTombstone, {Actor, C}) of
         false ->
             #compaction_acc{removes=Rems, current_ctx=Ctx} = A,
             Ctx2 = bigset_clock:merge(Ctx, V),
@@ -233,10 +228,10 @@ accumulate_key({E, Actor, C, ?REMOVE}=K, V, HoffFilter, A) ->
     end.
 
 -spec fold_bigset(bigset()) -> bigset().
-fold_bigset(#bigset{clock=Clock, keys=Keys, hoff_filter=HoffFilter}) ->
+fold_bigset(#bigset{clock=Clock, keys=Keys, set_tombstone=SetTombstone}) ->
     Keys2 = orddict:fold(fun({E, A, C, ?ADD}, Ctx, [{E, Dots, CtxAcc} | Acc]=Acc0) ->
                                  %% Still same element, accumulate keys and Ctx
-                                 case bigset_clock:seen(HoffFilter, {A, C}) of
+                                 case bigset_clock:seen(SetTombstone, {A, C}) of
                                      false ->
                                          [{E,
                                            [{A, C} | Dots], %% accumulate dot
@@ -246,7 +241,7 @@ fold_bigset(#bigset{clock=Clock, keys=Keys, hoff_filter=HoffFilter}) ->
                                          Acc0
                                  end;
                            ({E, A, C, ?REMOVE}, Ctx, [{E, Dots, CtxAcc} | Acc]=Acc0) ->
-                                 case bigset_clock:seen(HoffFilter, {A, C}) of
+                                 case bigset_clock:seen(SetTombstone, {A, C}) of
                                      false ->
                                          %% Tombstone, we drop all tombstone
                                          %% keys except a per-element key, just merge Ctx
@@ -259,7 +254,7 @@ fold_bigset(#bigset{clock=Clock, keys=Keys, hoff_filter=HoffFilter}) ->
                                  end;
                             (Key, Ctx, Acc) ->
                                  Acc2 = accumulate_flush_acc(Acc),
-                                 Hd = new_acc(Key, HoffFilter, Ctx),
+                                 Hd = new_acc(Key, SetTombstone, Ctx),
                                  [Hd | Acc2]
                          end,
                          [],
@@ -268,8 +263,8 @@ fold_bigset(#bigset{clock=Clock, keys=Keys, hoff_filter=HoffFilter}) ->
     #bigset{clock=Clock, keys= Keys3}.
 
 %% start over the per-element portition of the accumulator
-new_acc({E, A, C, _}=Key, HoffFilter, Ctx) ->
-    case bigset_clock:seen(HoffFilter, {A, C}) of
+new_acc({E, A, C, _}=Key, SetTombstone, Ctx) ->
+    case bigset_clock:seen(SetTombstone, {A, C}) of
         true ->
             {E, [], bigset_clock:fresh()};
         false ->
@@ -425,14 +420,14 @@ merge(#bigset{clock=C1, keys=Set1}, #bigset{clock=C2, keys=Set2}) ->
 %% after receiving handoff.
 -spec handoff(From :: bigset(), To :: bigset()) -> NewTo :: bigset().
 handoff(From, To) ->
-    #bigset{keys=FromKeys, clock=FromClock, hoff_filter=FrHoff} = From,
-    #bigset{clock=ToClock, keys=ToKeys, hoff_filter=ToF} = To,
+    #bigset{keys=FromKeys, clock=FromClock, set_tombstone=FrTS} = From,
+    #bigset{clock=ToClock, keys=ToKeys, set_tombstone=ToTS} = To,
     TrackingClock = bigset_clock:fresh(),
 
     %% This code takes care of the keys in From, either add them as
     %% unseen, or drop them as seen
     {ToClock2, ToKeys2, TrackingClock2} = orddict:fold(fun({_E, A, C, _}=K, V, {Clock, Keys, TC}=Acc) ->
-                                                               case bigset_clock:seen(FrHoff, {A, C}) of
+                                                               case bigset_clock:seen(FrTS, {A, C}) of
                                                                    false ->
                                                                        TC2 = bigset_clock:strip_dots({A, C}, TC),
                                                                        case bigset_clock:seen(Clock, {A, C}) of
@@ -467,4 +462,4 @@ handoff(From, To) ->
     %% that To has not seen, but From has removed never get added to
     %% To.
     To#bigset{clock=bigset_clock:merge(ToClock2, FromClock), keys=ToKeys2,
-              hoff_filter=bigset_clock:merge(ToRemove, ToF)}.
+              set_tombstone=bigset_clock:merge(ToRemove, ToTS)}.

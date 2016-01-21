@@ -152,10 +152,10 @@ clock_key(Set, Actor) ->
 %%% codec See docs on key scheme, use Actor name in handoff filter key
 %%% so %% AAE/replication of filter is safe. Like a decomposed VV, an
 %%% actor may only update it's own handoff filter
-hoff_key(Set, Actor) ->
+set_tombstone_key(Set, Actor) ->
     Pref = key_prefix(Set),
     <<Pref/binary,
-      $d, %% means hoff filter (d 'cos > than c and < e)
+      $d, %% means set tombstone (d 'cos > than c and < e)
       Actor/binary>>.
 
 -spec get_clock(ClockKey::binary(), db()) -> bigset_clock:clock().
@@ -206,7 +206,7 @@ decode_key(<<SetLen:32/little-unsigned-integer, Bin/binary>>) ->
 decode_key(<<$c, Actor/binary>>, Set) ->
     {clock, Set, Actor};
 decode_key(<<$d, Actor/binary>>, Set) ->
-    {hoff, Set, Actor};
+    {set_tombstone, Set, Actor};
 decode_key(<<$e, Elem/binary>>, Set) ->
     decode_element(Elem, Set);
 decode_key(<<$z>>, Set) ->
