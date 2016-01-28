@@ -9,6 +9,11 @@
 
 -compile(export_all).
 
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-endif.
+
 -record(state, {id :: binary(),
                 db,
                 senders = orddict:new()
@@ -126,3 +131,10 @@ get_sender_state(ID, Senders) ->
 
 get_receiver(#state{id=ID}) ->
     ID.
+
+
+-ifdef(TEST).
+
+
+
+-endif.
