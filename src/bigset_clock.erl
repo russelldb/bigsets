@@ -353,4 +353,20 @@ merge_test() ->
                  merge(merge(Clock, Clock5), Clock3)).
 
 
+subtract_seen_test() ->
+    %% None seen!
+    Clock = fresh(),
+    DotList = [{a, 2}, {b, 7}],
+    ?assertEqual(DotList, subtract_seen(Clock, DotList)),
+    %% All seen
+    Clock2 = {[{a, 2}, {b, 9}, {z, 4}], [{a, [7]}, {c, [99]}]},
+    ?assertEqual([], subtract_seen(Clock2, DotList)),
+    %% Some seen, actor present
+    DotList2 = [{a, 2}, {b, 7}, {z, 5}],
+    ?assertEqual([{z, 5}], subtract_seen(Clock2, DotList2)),
+    %% Some seen, actor absent, seen from cloud, not base
+    DotList3  = [{c, 99}, {q, 1}],
+    ?assertEqual([{q, 1}], subtract_seen(Clock2, DotList3)).
+
+
 -endif.
