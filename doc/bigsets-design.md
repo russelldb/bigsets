@@ -263,15 +263,16 @@ made up of the set name, the special key designation character `c`
 
 #### 6.3.2 Set Tombstone
 
-How or why this key exists is covered in [Hand Off](#handoff)
-below. Its purpose is to store a `bigset_clock` that describes all the
-events a vnode may have on disk, that it should remove. It has a part
-to play in [compaction](#compaction) and also in [reads](#read). It
-maybe a way to do efficient whole set deletes. It is very much like
-the clock key. Each actor has their own, and only uses their own, and
-only reads and writes their own. It is a binary that is made up of the
-set name, the special key designation character `d` (for `c` < `d` <
-`e`) and the actor name.
+How or why this key exists is covered in [Hand Off](#handoff) and
+[Compaction](#compaction) below. Its purpose is to store a
+`bigset_clock` that describes all the events a vnode may have on disk,
+that it should remove. It has a part to play in
+[compaction](#compaction) and also in [reads](#read). It is a way to
+do whole set deletes. It is very much like the clock key. Each actor
+has their own, and only uses their own, and only reads and writes
+their own. It is a binary that is made up of the set name, the special
+key designation character `d` (for `c` < `d` < `e`) and the actor
+name.
 
     <<SetNameLength:32/little-unsigned-integer,
       SetName:SetNameLength/binary,
@@ -731,18 +732,11 @@ is no coordination required for garbage collection/tombstone
 removal. Each vnode has the causal information it needs to remove
 superseded writes and tombstones unilaterally.
 
-My initial hope was to implement this logic in the leveldb compaction
-code, but I think I confused the logical structure of level with the
-actual structure, and this compaction algorithm runs on the logically
-ordered set of keys for a set. In the worst case we can use reads (see
-above) to detect when a set is at a certain garbage-to-key ratio (yet
-to be determined) and submit it to be compacted. In that case
-compaction consists of a fold/read that identifies keys to be removed.
-This feature is essential but also the most contentious and difficult,
-if we can't find a way to do this efficiently bigsets may be dead in
-the water for the current design. We may have to consider going back
-to read-before-write for each element added. This would make batch
-writes pretty bad, I imagine.
+My current hope is to implement the actual dropping/removal of keys
+inside leveldb's compaction code. Deletes are writes in level, so
+avoiding writing 1000s of "delete" keys is a bonus. At the moment we
+use reads to generate the compaction set-tombstone and write it into
+level.
 
 This algorithm has been implemented in the eqc test `bigset_eqc` and
 statistics are displayed after the run.
@@ -753,22 +747,28 @@ I'll reproduce in total here. Again we consider each element.
 0. Every key whose `dot` is seen by the set-tombstone can be removed
 1. For each element merge all the contexts
 2. Every add key that is seen by the merged context, _AND_ whose context value is descended by the bigset_clock for the replica can be removed
-3. Every remove key whose context value is descended by the bigset_clock for the replica _AND_ no `add` keys it removes have survived the compaction (see step 2) can be removed.
-
-This ensures that we don't remove a tombstone before it has done it's
+3. Every remove key whose context value is descended by the bigset_clock for the replica _AND_ no `add` keys it removes have survived the compaction (see step 2) can be removed. This ensures that we don't remove a tombstone before it has done it's
 job. Since you need to have very few gaps in the bigset clock for
 compaction to work and storage size to be optimal, we will need
 effective anti-entropy mechanisms.
+5. Add all dots for keys that can be removed to the set-tombstone
 
 This compaction design is only one of a few I've tried, this one is
 chosen as it allows compaction as a process outside level, needing
-only a fold, and resulting in a set of deletes to be submitted to
+only a fold, and resulting in a set-tombstone to be submitted to
 `eleveldb:write`.
 
-After each set is compacted `eleveldb:write` is given a list of
-deletes. The set-tombstone used for compaction is also subtracted from
-the set-tombstone on disk for the set (in case the on disk tombstone
-has been updated by a hand off (see below.))
+When level considers any bigset key for dropping/promoting to the next
+level during a compaction run, it will consult the set-tombstone. If
+the key's dot is covered by the tombstone, level will discard it, if
+not, level will keep it.
+
+The unanswered questions here are:
+
+1. How do we write a nice compact tombstone if it is a bigset_clock (I assume bitmask + compression)?
+2. How do we _update_ the tombstone after it has done it's job. Technically every key level drops can have its dot subtracted from the tombstone. Ultimately, in an "eventually consistent" sense, the tombstone should be empty. Imagine the case where you want to remove the whole set. To do so, simply PR=3 the clock, and write it as a tombstone. But after level has removed _all_ keys, the tombstone should be empty.
+
+Unsurprisingly this feature is the big unknown.
 
 ### 6.8 <a id="bigset-clock"></a>Bigset Clock
 
