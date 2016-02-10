@@ -243,8 +243,6 @@ fold_bigset(#bigset{clock=Clock, keys=Keys, set_tombstone=SetTombstone}) ->
                            ({E, A, C, ?REMOVE}, Ctx, [{E, Dots, CtxAcc} | Acc]=Acc0) ->
                                  case bigset_clock:seen(SetTombstone, {A, C}) of
                                      false ->
-                                         %% Tombstone, we drop all tombstone
-                                         %% keys except a per-element key, just merge Ctx
                                          [{E,
                                            Dots,
                                            bigset_clock:merge(Ctx, CtxAcc)
