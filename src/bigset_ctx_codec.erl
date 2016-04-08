@@ -29,6 +29,8 @@
 
 -compile([export_all]).
 
+-export_type([encoder/0, decoder/0]).
+
 %% Simple dictionary coding for per element context
 -define(DICT, orddict).
 
@@ -36,6 +38,9 @@
           dictionary=?DICT:new(),
           cntr=0
          }).
+
+-type encoder() :: #state{}.
+-type decoder() :: #state{}.
 
 new_encoder() ->
     #state{}.
@@ -128,7 +133,7 @@ dict_from_clock_test() ->
     Clock = bigset_clock:fresh(),
     {_, Clock2} = bigset_clock:increment(<<"a">>, Clock),
     Dot = {<<"c">>, 99},
-    Clock3 = bigset_clock:strip_dots(Dot, Clock2),
+    Clock3 = bigset_clock:add_dot(Dot, Clock2),
     {_, Clock4} = bigset_clock:increment(<<"d">>, Clock3),
     Dict = dictionary_from_clock(Clock4),
     ?assertEqual([{<<"a">>, 1}, {<<"c">>, 2}, {<<"d">>, 3}], Dict#state.dictionary).

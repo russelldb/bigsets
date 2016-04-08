@@ -8,21 +8,23 @@
 -type tsb() :: <<_:1>>.
 -type member_key() :: {s, set(), member(), actor(), counter(), tsb()}.
 -type ctx() :: binary().
--type remove() :: {member(), ctx()}.
+-type add() :: {member(), ctx()} | member().
+-type adds() :: {member(), ctx()}.
+-type remove() :: {member(), ctx()} | member().
 -type removes() :: [remove()].
 -type db() :: eleveldb:db_ref().
 
 -type delta_element() :: {ElementKey :: binary(),
-                          ElementVal :: binary(),
-                          Dot :: riak_dt_vclock:dot()}.
+                          ctx()}.
 
 -record(bigset_read_fsm_v1, {req_id,
                              from,
                              set,
+                             member,
                              options}).
 
 -record(bigset_op_req_v1, {set :: binary(), %% The name of the set
-                           inserts:: [binary()], %% to be stored
+                           inserts:: adds(), %% to be stored
                            %% to be removed, require a per element ctx at present
                            removes :: removes(),
                            %% dictionary of actor->index mappings for
@@ -35,15 +37,15 @@
                            %% with this dictionary.
                            ctx :: binary()
                           }).
--record(bigset_replicate_req_v1, {set :: binary(),
+-record(bigset_replicate_req_v1, {set :: set(),
                                   inserts :: [delta_element()],
                                   removes :: removes()
                                  }).
 
 -record(bigset_read_req_v1, {set}).
 
--record(bigset_contains_req_v1, {set :: binary(), %% The set
-                                 members :: [binary()] %%  elements to check membership
+-record(bigset_contains_req_v1, {set :: set(), %% The set
+                                 member :: member() %%  element to check membership
                                 }).
 
 %% Tombstone byte meaning

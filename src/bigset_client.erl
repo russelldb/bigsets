@@ -9,7 +9,6 @@
 -module(bigset_client).
 -include("bigset.hrl").
 -include("bigset_trace.hrl").
--include_lib("riak_core/include/riak_core_vnode.hrl").
 
 -export([
          new/0,
@@ -20,7 +19,9 @@
          read/2,
          read/3,
          stream_read/2,
-         stream_read/3
+         stream_read/3,
+         is_member/2,
+         is_member/4
         ]).
 
 -define(DEFAULT_TIMEOUT, 60000).
@@ -40,29 +41,60 @@ new() ->
 new(Node) ->
     {?MODULE, Node}.
 
--spec update(set(), Adds :: [member()]) ->
+
+-spec is_member(set(), member()) ->
+                       {true, ctx()} |
+                       {false, <<>>} |
+                       {error, Reason :: term()}.
+is_member(Set, Member) ->
+    is_member(Set, Member, [], new()).
+
+-spec is_member(set(), member(), Options::proplists:proplist(), client()) ->
+                       {true, ctx()} |
+                       {false, <<>>} |
+                       {error, Reason :: term()}.
+is_member(Set, Member, Options, {?MODULE, Node}) ->
+    Me = self(),
+    ReqId = mk_reqid(),
+    Request = ?READ_FSM_ARGS{req_id=ReqId,
+                             from=Me,
+                             set=Set,
+                             member=Member,
+                             options=Options},
+
+    case node() of
+        Node ->
+            bigset_read_fsm:start_link(Request);
+        _ ->
+            proc_lib:spawn_link(Node, bigset_read_fsm, start_link,
+                                [Request])
+    end,
+    Timeout = recv_timeout(Options),
+    Res = wait_for_read(ReqId, Timeout),
+    Res.
+
+-spec update(set(), adds()) ->
                     ok | {error, Reason :: term()}.
 update(Set, Adds) ->
     update(Set, Adds, [], [], new()).
 
 
--spec update(set(), Adds :: [member()], client()) ->
+-spec update(set(), adds(), client()) ->
                     ok | {error, Reason :: term()}.
 update(Set, Adds, {?MODULE, _Node}=This) ->
     update(Set, Adds, [], [], This).
 
 %% @doc update a Set
 -spec update(set(),
-             Adds :: [member()],
-             Removes :: [remove()],
+             adds(),
+             removes(),
              Options :: proplists:proplist(),
              client()) ->
                     ok | {error, Reason :: term()}.
 update(Set, Adds, Removes, Options, {?MODULE, Node}) ->
     Me = self(),
     ReqId = mk_reqid(),
-    %% if there are removes, there must a Ctx
-    Ctx = validate_ctx(Removes, proplists:get_value(ctx, Options)),
+    Ctx = proplists:get_value(ctx, Options),
     Op = ?OP{set=Set, inserts=Adds, removes=Removes, ctx=Ctx},
     case node() of
         Node ->
@@ -72,15 +104,6 @@ update(Set, Adds, Removes, Options, {?MODULE, Node}) ->
     end,
     Timeout = recv_timeout(Options),
     wait_for_reqid(ReqId, Timeout).
-
-%% @private right now removes _MUST_ have a binary-context. Throw if
-%% they do not!
-validate_ctx([], Ctx) ->
-    Ctx;
-validate_ctx(_Removes, Ctx) when not is_binary(Ctx) ->
-    throw({error, removes_require_ctx});
-validate_ctx(_Removes, Ctx) ->
-    Ctx.
 
 -spec read(set(),
            Options :: proplists:proplist()) ->

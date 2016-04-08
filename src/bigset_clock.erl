@@ -68,8 +68,8 @@ from_vv(Clock) ->
 %% exception (see DVV, or CVE papers) it will be added to the set of
 %% gapped dots. If adding this dot closes some gaps, the seen set is
 %% compressed onto the clock.
--spec strip_dots(riak_dt_vclock:dot(), clock()) -> clock().
-strip_dots({Actor, Cnt}, {Clock, Seen}) ->
+-spec add_dot(riak_dt_vclock:dot(), clock()) -> clock().
+add_dot({Actor, Cnt}, {Clock, Seen}) ->
     Seen2 = ?DICT:update(Actor,
                          fun(Dots) ->
                                  lists:umerge([Cnt], Dots)
@@ -288,36 +288,36 @@ all_nodes_test() ->
     ?assertEqual([a, c, z], all_nodes(Clock)).
 
 
-strip_dots_test() ->
+add_dot_test() ->
     Clock = fresh(),
     Dot = {a, 1},
-    ?assertEqual({[{a,1}], []}, strip_dots(Dot, Clock)),
+    ?assertEqual({[{a,1}], []}, add_dot(Dot, Clock)),
     Clock1 = fresh(),
     Dot1 = {a, 34},
-    ?assertEqual({[], [{a, [34]}]}, strip_dots(Dot1, Clock1)),
+    ?assertEqual({[], [{a, [34]}]}, add_dot(Dot1, Clock1)),
     Clock2 = {[{a, 3}, {b, 1}], []},
     Dot2 = {c, 2},
-    Clock3 = strip_dots(Dot2, Clock2),
+    Clock3 = add_dot(Dot2, Clock2),
     ?assertEqual({[{a, 3}, {b, 1}], [{c, [2]}]}, Clock3),
     Dot3 = {a, 5},
-    Clock4 = strip_dots(Dot3, Clock3),
+    Clock4 = add_dot(Dot3, Clock3),
     ?assertEqual({[{a, 3}, {b, 1}], [{a, [5]}, {c, [2]}]}, Clock4),
     Dot4 = {a, 4},
-    Clock5 = strip_dots(Dot4, Clock4),
+    Clock5 = add_dot(Dot4, Clock4),
     ?assertEqual({[{a, 5}, {b, 1}], [{c, [2]}]}, Clock5),
     Dot5 = {c, 1},
-    Clock6 = strip_dots(Dot5, Clock5),
+    Clock6 = add_dot(Dot5, Clock5),
     ?assertEqual({[{a, 5}, {b, 1},{c, 2}], []}, Clock6),
     Clock7 = {[{a, 1}], [{a, [3, 4, 9]}]},
     Dot6 = {a, 2},
-    Clock8 = strip_dots(Dot6, Clock7),
+    Clock8 = add_dot(Dot6, Clock7),
     ?assertEqual({[{a, 4}], [{a, [9]}]}, Clock8).
 
 %% in the case where seen dots are lower than the actual actors in the
 %% VV (Say after a merge)
-strip_dots_low_dot_test() ->
+add_dot_low_dot_test() ->
     Clock = {[{a, 4}, {b, 9}], [{a, [1]}, {b, [7]}]},
-    Clock2 = strip_dots({a, 3}, Clock),
+    Clock2 = add_dot({a, 3}, Clock),
     ?assertEqual({[{a, 4}, {b, 9}], []}, Clock2).
 
 seen_test() ->

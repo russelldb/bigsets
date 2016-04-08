@@ -50,7 +50,7 @@
 -type state() :: #state{}.
 -type status() :: orddict:orddict().
 -type level_put() :: {put, Key :: binary(), Value :: binary()}.
-
+-type writes() :: [level_put()].
 
 %% API
 start_vnode(I) ->
@@ -89,8 +89,7 @@ read(PrefList, Req=?READ_REQ{}) ->
                                    {fsm, undefined, self()},
                                    bigset_vnode_master).
 
-%% @doc read a subset of defined keys to detrmine membership (does set
-%% contain [x.y,z]
+%% @doc does Set contain Element
 contains(PrefList, Req=?CONTAINS_REQ{}) ->
     riak_core_vnode_master:command(PrefList,
                                    Req,
@@ -138,51 +137,22 @@ handle_command(dump_db, _Sender, State) ->
 %%% Coordinate write
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-handle_command(?OP{set=Set, inserts=Inserts, removes=Removes, ctx=Ctx}, Sender, State) ->
-    %% Store elements in the set.
-    #state{db=DB, partition=Partition, vnodeid=Id} = State,
-    ClockKey = bigset:clock_key(Set, Id),
-    Clock = bigset:get_clock(ClockKey, DB),
-    InsertCtx = insert_ctx(Clock, Ctx),
-    {Clock2, InsertWrites, InsertReplicate} = gen_inserts(Set, Inserts, Id, Clock, InsertCtx),
-
-    %% Use the insert ctx from above
-    {Clock3, DeleteWrites, DeleteReplicate} = gen_removes(Set, Removes, Id, Clock2, InsertCtx),
-
-    BinClock = bigset:to_bin(Clock3),
-    %% @TODO(rdb) only need the end_key if this is the first write to the set (i.e. clock not found)
-    EndKey = bigset:end_key(Set),
-    Writes = lists:append([[{put, ClockKey, BinClock}, {put, EndKey, <<>>}],  InsertWrites, DeleteWrites]),
-    ok = eleveldb:write(DB, Writes, ?WRITE_OPTS),
-
-    %% Why the replication payload as is? We send the dot un-binaried
-    %% for quick clock comparison/adding.
-    riak_core_vnode:reply(Sender, {dw, Partition, InsertReplicate, DeleteReplicate}),
+handle_command(?OP{}=Op, Sender, State) ->
+    Reply = handle_coord_write(Op, State),
+    ok = riak_core_vnode:reply(Sender, Reply),
     {noreply, State};
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%% Replication Write
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-handle_command(?REPLICATE_REQ{set=Set,
-                              inserts=Ins,
-                              removes=Rems},
+handle_command(?REPLICATE_REQ{}=Op,
                Sender, State) ->
-    #state{db=DB, vnodeid=Id, partition=Partition} = State,
+    #state{partition=Partition} = State,
     %% fire and forget? It's fair? Should DW to be fair in a
     %% benchmark, eh?
     riak_core_vnode:reply(Sender, {w, Partition}),
-    %% Read local clock
-    ClockKey = bigset:clock_key(Set, Id),
-    Clock0 = bigset:get_clock(ClockKey, DB),
-    {Clock, Inserts} = replica_inserts(Clock0, Ins),
-    {Clock1, Deletes} = replica_inserts(Clock, Rems),
-    BinClock = bigset:to_bin(Clock1),
-    %% @TODO(rdb) only need the end_key if this is the first write to
-    %% the set (i.e. clock not found)
-    EndKey = bigset:end_key(Set),
-    Writes = lists:append([[{put, ClockKey, BinClock}, {put, EndKey, <<>>}], Inserts, Deletes]),
-    ok = eleveldb:write(DB, Writes, ?WRITE_OPTS),
+    _Reply = handle_replication(Op, State),
     riak_core_vnode:reply(Sender, {dw, Partition}),
     {noreply, State};
 
@@ -200,11 +170,11 @@ handle_command(?READ_REQ{set=Set}, Sender, State) ->
 %%% Contains Query
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-handle_command(?CONTAINS_REQ{set=Set, members=Members}, Sender, State) ->
+handle_command(?CONTAINS_REQ{set=Set, member=Member}, Sender, State) ->
     %% contains is a special kind of read, and an async fold operation
     %% @see bigset_vnode_worker for that code.
     #state{db=DB} = State,
-    {async, {subset_get, DB, Set, Members}, Sender, State}.
+    {async, {is_member, DB, Set, Member}, Sender, State}.
 
 -spec handle_handoff_command(term(), term(), state()) ->
                                     {noreply, state()}.
@@ -388,61 +358,89 @@ clear_vnode_id(Partition) ->
 %% replicaton payload since they are similar, but not the same, and
 %% there is no point traversing one to transform it into the other.
 -spec gen_inserts(Set :: binary(),
-                  Inserts :: [binary()],
+                  Inserts :: [add()],
                   Actor :: binary(),
-                  Clock :: bigset_clock:clock(),
-                  Ctx :: binary()) ->
-                         {NewClock :: bigset_clock:clock(),
+                  Clock :: bigset_causal:causal(),
+                  CtxDecoder :: bigset_ctx_codec:decoder()) ->
+                         {NewClock :: bigset_causal:causal(),
                           Writes :: [level_put()],
                           ReplicationDeltas :: [delta_element()]}.
-
-gen_inserts(Set, Inserts, Id, Clock, Ctx) ->
-    lists:foldl(fun(Element, {C, W, R}) ->
+gen_inserts(Set, Inserts, Id, Clock, CtxDecoder) ->
+    lists:foldl(fun(Insert, {C, W, R}) ->
+                        %% Get the element and any tombstoning dots
+                        %% @TODO(rdb|arch) Honestly I don't like
+                        %% decoding here, we encode at the
+                        %% fsm/coordinator level. But to decode on the
+                        %% way in adds another loop over the inserts.
+                        {Element, InsertCtx} = element_ctx(Insert, CtxDecoder),
                         %% Generate a dot per insert
-                        {{Id, Cnt}=Dot, C2} = bigset_clock:increment(Id, C),
+                        {{Id, Cnt}=_Dot, C2} = bigset_causal:increment(Id, C),
                         ElemKey = bigset:insert_member_key(Set, Element, Id, Cnt),
-                        Val = Ctx,
+                        C3 = bigset_causal:tombstone_dots(InsertCtx, C2),
                         {
-                          C2, %% New Clock
-                          [{put, ElemKey, Val} | W], %% To write
-                          [{ElemKey, Val, Dot} | R] %% To replicate
+                          C3, %% New Clock
+                          [{put, ElemKey, <<>>} | W], %% To write
+                          [{ElemKey, InsertCtx} | R] %% To replicate
                         }
                 end,
                 {Clock, [], []},
                 Inserts).
 
-%% @private gen_removes: generate the writes needed for a
-%% delete. Requires a context. Updates Clock with causal information
-%% from removes.  Generate the tombstone write set, there is no way to
-%% tell if we wrote a tombstone before (only that we didn't!), and it
-%% is safe to re-write one as compaction will remove it
-%% already. Imagine we wrote some element at {a,1}, we have seen {a,1}
-%% and it is in the clock. The tombstone for {a,1} has the same causal
-%% information, we cannot distinguish a tombstone write from a write,
-%% so at the risk of wastefullness, re-do the tombstone write. If {a,
-%% 1} was already tombstoned, and the tombstone compacted, the next
-%% compaction will take it out again. Returns {clock, writes}
+%% @priv return the {element, context} pair. Possible context values
+%% are: `undefined' which means "no context' making removes a no-op
+%% and adds concurrent; `<<>>' which is as `undefined'; `binary()'
+%% which is a t2b encoded ctx; `binary()' with a `CtxDecoder', which
+%% is a compressed context.
+%%
+%%  Ideally every client calls `is_member(E)->{true | false, ctx}'
+%% before add/remove for each element, but batches, speed, etc mean we
+%% have this. Batch adding 1000 elements with no ctx seems fair, for
+%% example.  I did not add way to use the local context for an element
+%% set at the moment.
+element_ctx({Element, undefined}, _CtxDecoder) ->
+    %% No Ctx provided, nor wanted for this element
+    {Element, []};
+element_ctx({Element, <<>>}, _CtxDecoder) ->
+    %% Empty Ctx provided (unseen put)
+    {Element, []};
+element_ctx({Element, Ctx}, undefined) when is_binary(Ctx)  ->
+    %% A Put ctx? Must be <<cntr, actor>>
+    %% @TODO(rdb) the dot encoding needs addressing
+    {Element, binary_to_term(Ctx)};
+element_ctx({Element, Ctx}, CtxDecoder) when is_binary(Ctx)  ->
+    %% A Put ctx? And a secret decoder ring!
+    {Element, bigset_ctx_codec:decode_dots(Ctx, CtxDecoder)};
+element_ctx({Element, DotList}, undefined) ->
+    {Element, DotList};
+element_ctx(Element, undefined) ->
+    %% i.e. no ctx at all (such a remove is a no-op, such an add is
+    %% concurrent with all other adds of Element
+    {Element, []}.
+
+%% @private gen_removes: We just update the set tombstone on
+%% removes. @TODO(rdb) In fact, why even have the client send the
+%% element?? Just the dots will do, and they can be sent without a
+%% coordinator too!
 -spec gen_removes(Set :: binary(),
                   Removes :: removes(),
-                  Actor :: binary(),
-                  Clock :: bigset_clock:clock(),
-                  Ctx :: binary()) ->
-                         [level_put()].
-gen_removes(_Set, []=_Removes, _Id, Clock, _Ctx) ->
-    {Clock, [], []};
-gen_removes(Set, Removes, Id, Clock, Ctx) ->
-    lists:foldl(fun(Element, {C, W, R}) ->
-                        %% Generate a dot per remove
-                        {{Id, Cnt}=Dot, C2} = bigset_clock:increment(Id, C),
-                        ElemKey = bigset:remove_member_key(Set, Element, Id, Cnt),
-                        Val = Ctx,
-                        {
-                          C2, %% New Clock
-                          [{put, ElemKey, Val} | W], %% To write
-                          [{ElemKey, Val, Dot} | R] %% To replicate
-                        }
+                  Clock :: bigset_causal:causal(),
+                  CtxDecoder :: bigset_ctx_codec:decoder()) ->
+                         {NewClock :: bigset_causal:causal(),
+                          RemoveReplicate :: bigset_clock:clock()}.
+gen_removes(_Set, []=_Removes, Clock, _CtxDecoder) ->
+    {Clock, []};
+gen_removes(_Set, Removes, Clock, CtxDecoder) ->
+    lists:foldl(fun(Remove, {C, R}) ->
+                        %% get any tombstoning dots @TODO(rdb|arch)
+                        %% Honestly I don't like decoding here, we
+                        %% encode at the fsm/coordinator level. But to
+                        %% decode on the way in adds another loop over
+                        %% the removes.
+                        {_Element, RemCtx} = element_ctx(Remove, CtxDecoder),
+                        {bigset_causal:tombstone_dots(RemCtx, C),
+                         lists:append(RemCtx, R)}
                 end,
-                {Clock, [], []},
+                {Clock, []},
                 Removes).
 
 %% @private generate the write set, don't write stuff you wrote
@@ -451,29 +449,41 @@ gen_removes(Set, Removes, Id, Clock, Ctx) ->
 %% removed. Re-writing {a,1} will cause the element to re-surface. We
 %% check the dot on the write, if we already saw it, we already wrote
 %% it, do not write again! Returns {clock, writes}
--spec replica_inserts(not_found | {ok, binary()},
+-spec replica_inserts(bigset_causal:causal(),
                      [delta_element()]) ->
                             [level_put()].
 replica_inserts(Clock0, Elements) ->
-    F = fun({Key, Val, Dot}, {Clock, Writes}) ->
-                case bigset_clock:seen(Clock, Dot) of
+    F = fun({Key, Ctx}, {Clock, Writes}) ->
+                Dot = bigset:dot_from_key(Key),
+                Clock2 = bigset_causal:tombstone_dots(Ctx, Clock),
+                case bigset_causal:seen(Dot, Clock2) of
                     true ->
                         %% No op, skip it/discard
-                        {Clock, Writes};
+                        {Clock2, Writes};
                     false ->
-                        %% Strip the dot
-                        C2 = bigset_clock:strip_dots(Dot, Clock),
-                        {C2, [{put, Key, Val} | Writes]}
+                        %% Add the dot to the clock
+                        Clock3 = bigset_causal:add_dot(Dot, Clock2),
+                        {Clock3, [{put, Key, <<>>} | Writes]}
                 end
         end,
     lists:foldl(F, {Clock0, []}, Elements).
 
-insert_ctx(Clock, undefined) ->
-    bigset:to_bin(Clock);
-insert_ctx(_Clock, Ctx) when is_binary(Ctx) ->
-    Ctx;
-insert_ctx(_Clock, Ctx) ->
-    bigset:to_bin(Ctx).
+%% @private add the dots from `Rems' to the causal information. return
+%% the updated causal information.
+-spec replica_removes(bigset_causal:causal(), [bigset_causal:dot()]) ->
+                             bigset_causal:causal().
+replica_removes(Clock, Rems) ->
+    bigset_causal:tombstone_dots(Rems, Clock).
+
+
+%% @private get a context decoder. We may not need one.  With
+%% per-element-ctx, if the user reads many items it makes sense to
+%% only send each actor name once. So we use the full clock to create
+%% a simple compression dictionary. @see bigset_ctx_codec for more.
+ctx_decoder(undefined) ->
+    undefined;
+ctx_decoder(Bin) when is_binary(Bin)  ->
+    bigset_ctx_codec:new_decoder(Bin).
 
 open_db(DataDir, Opts) ->
     open_db(DataDir, Opts, 30, undefined).
@@ -501,3 +511,64 @@ open_db(DataDir, Opts, RetriesLeft, _) ->
         {error, Reason} ->
             {error, Reason}
     end.
+
+%% @priv add the end key only if this is the first write to the set
+-spec add_end_key(boolean(), set(), writes()) -> writes().
+add_end_key(false, _Set, Writes) ->
+    Writes;
+add_end_key(true, Set, Writes) ->
+    EndKey = bigset:end_key(Set),
+    [{put, EndKey, <<>>} | Writes].
+
+%%%===================================================================
+%%% Command handlers
+%%%===================================================================
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%% Coordinate write
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+handle_coord_write(Op, State) ->
+    ?OP{set=Set,
+        inserts=Inserts,
+        removes=Removes,
+        ctx=Ctx} = Op,
+    %% Store elements in the set.
+    #state{db=DB, partition=Partition, vnodeid=Id} = State,
+    ClockKey = bigset:clock_key(Set, Id),
+    {FirstWrite, Clock} = bigset:get_clock(ClockKey, DB),
+
+    CtxDecoder = ctx_decoder(Ctx),
+
+    {Clock2, InsertWrites, InsertReplicate} = gen_inserts(Set, Inserts, Id, Clock, CtxDecoder),
+
+    {Clock3, RemoveReplicate} = gen_removes(Set, Removes, Clock2, CtxDecoder),
+
+    BinClock = bigset:to_bin(Clock3),
+    Writes = lists:append([[{put, ClockKey, BinClock}], InsertWrites]),
+    Writes2 = add_end_key(FirstWrite, Set, Writes),
+
+    ok = eleveldb:write(DB, Writes2, ?WRITE_OPTS),
+
+    {dw, Partition, InsertReplicate, RemoveReplicate}.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%% Replication Write
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+handle_replication(Op, State) ->
+    ?REPLICATE_REQ{set=Set,
+                   inserts=Ins,
+                   removes=Rems} = Op,
+    #state{db=DB, vnodeid=Id, partition=Partition} = State,
+
+    %% Read local clock
+    ClockKey = bigset:clock_key(Set, Id),
+    {FirstWrite, Clock0} = bigset:get_clock(ClockKey, DB),
+    {Clock, Inserts} = replica_inserts(Clock0, Ins),
+    Clock1 = replica_removes(Clock, Rems),
+    BinClock = bigset:to_bin(Clock1),
+    %% @TODO(rdb) only need the end_key if this is the first write to
+    %% the set (i.e. clock not found)
+    Writes = [{put, ClockKey, BinClock} | Inserts],
+    Writes2 = add_end_key(FirstWrite, Set, Writes),
+    ok = eleveldb:write(DB, Writes2, ?WRITE_OPTS),
+    {dw, Partition}.

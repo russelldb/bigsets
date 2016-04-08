@@ -25,7 +25,7 @@
 -record(state, {req_id :: reqid(),
                 from :: pid(),
                 set :: binary(), %% Set name, think bucket for riak
-                members :: [member()], %% for a contains query
+                member :: member(), %% for a is_member query
                 preflist :: riak_core_apl:preflist(),
                 %% default to r=2 for demo/proto, defaults to
                 %% notfound_ok=true, too
@@ -68,8 +68,9 @@ state_from_read_fsm_args(?READ_FSM_ARGS{}=Args) ->
     ?READ_FSM_ARGS{req_id=ReqId,
                    from=From,
                    set=Set,
+                   member=Member,
                    options=Options} = Args,
-    #state{req_id=ReqId, from=From, set=Set, options=Options}.
+    #state{req_id=ReqId, from=From, set=Set, member=Member, options=Options}.
 
 -spec prepare(timeout, state()) -> {next_state, validate, state(), 0}.
 prepare(timeout, State) ->
@@ -96,16 +97,15 @@ validate(timeout, State) ->
 -spec read(timeout, state()) -> {next_state, await_clocks, state()}.
 read(request_timeout, State) ->
     {next_state, reply, State#state{reply={error, timeout}}, 0};
-read(timeout, State=#state{members=undefined}) ->
+read(timeout, State=#state{member=undefined}) ->
     %% A read request
     #state{preflist=PL, set=Set} = State,
     Req = ?READ_REQ{set=Set},
     bigset_vnode:read(PL, Req),
     {next_state, await_clocks, State};
 read(timeout, State) ->
-    #state{preflist=PL, set=Set, members=Members} = State,
-    %% @TODO(rdb) implement me, please
-    Req = ?CONTAINS_REQ{set=Set, members=Members},
+    #state{preflist=PL, set=Set, member=Member} = State,
+    Req = ?CONTAINS_REQ{set=Set, member=Member},
     bigset_vnode:contains(PL, Req),
     {next_state, await_clocks, State}.
 
@@ -121,9 +121,7 @@ await_clocks({{clock, Clock}, Partition, From}, State) ->
 
     case bigset_read_core:r_clocks(Core2) of
         true ->
-            {CtxClock, Core3} = bigset_read_core:get_clock(Core2),
-            CtxBin = bigset:to_bin(CtxClock),
-            send_reply({ok, {ctx, CtxBin}}, State),
+            Core3 = send_clock(Core2, State),
             {next_state, await_elements, State#state{logic=Core3}};
         false ->
             {next_state, await_clocks, State#state{logic=Core2}}
@@ -151,11 +149,15 @@ await_clocks({not_found, Partition, _From}, State) ->
         {false, false} ->
             {next_state, await_clocks, State#state{logic=Core2}};
         {false, true} ->
-            {CtxClock, Core3} = bigset_read_core:get_clock(Core2),
-            CtxBin = bigset:to_bin(CtxClock),
-            send_reply({ok, {ctx, CtxBin}}, State),
+            Core3 = send_clock(Core2, State),
             {next_state, await_elements, State#state{logic=Core3}}
     end.
+
+send_clock(Core, State) ->
+    {_CtxClock, Core3} = bigset_read_core:get_clock(Core),
+    %%    CtxBin = bigset:to_bin(CtxClock),
+    send_reply({ok, {ctx, <<>>}}, State),
+    Core3.
 
 -spec await_elements(result(), state()) ->
                         {next_state, reply, state(), 0} |
@@ -195,8 +197,8 @@ maybe_send_results(undefined, _State) ->
 maybe_send_results([], _State) ->
     ok;
 maybe_send_results(Results0, State) ->
-    Results = orddict:fetch_keys(Results0),
-    send_reply({ok, {elems, Results}}, State).
+    %%Results = orddict:fetch_keys(Results0),
+    send_reply({ok, {elems, Results0}}, State).
 
 send_reply(Reply, State) ->
     #state{from=From, req_id=ReqId} = State,

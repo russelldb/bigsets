@@ -98,8 +98,8 @@ update(Sender, Key, Value, State) ->
             %% no op
             {[], State};
         false ->
-            Clock2 = bigset_clock:strip_dots(Dot, LocalClock),
-            Tracker2 = bigset_clock:strip_dots(Dot, Tracker),
+            Clock2 = bigset_clock:add_dot(Dot, LocalClock),
+            Tracker2 = bigset_clock:add_dot(Dot, Tracker),
             State2 = update_tracker(Tracker2, Sender, State),
             {[{put, ClockKey, bigset:to_bin(Clock2)},
               {put, Key, Value}],

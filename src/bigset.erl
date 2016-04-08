@@ -167,9 +167,9 @@ clock(not_found) ->
     %% @TODO(rdb|correct) -> is this _really_ OK, what if we _know_
     %% (how?) the set exists, a missing clock is bad. At least have
     %% actor epochs, eh?
-    bigset_clock:fresh();
+    {true, bigset_causal:fresh()};
 clock({ok, ClockBin}) ->
-    bigset:from_bin(ClockBin).
+    {false, bigset:from_bin(ClockBin)}.
 
 end_key(Set) ->
     %% an explicit end key that always sorts lowest
@@ -217,9 +217,15 @@ decode_element(<<ElemLen:32/little-unsigned-integer, Rest/binary>>, Set) ->
               ActorLen:32/little-unsigned-integer,
               ActorEtc/binary>> = Rest,
             <<Actor:ActorLen/binary,
-              Cnt:64/little-unsigned-integer,
-              TSB>> = ActorEtc,
-    {element, Set, Elem, Actor, Cnt, TSB}.
+              Cnt:64/little-unsigned-integer>> = ActorEtc,
+    {element, Set, Elem, Actor, Cnt}.
+
+%% @doc dot_from_key extract a dot from key `K'. Returns a
+%% bisget_causal:dot().
+-spec dot_from_key(Key :: binary()) -> bigset_causal:dot().
+dot_from_key(K) ->
+    {element, _S, _E, Actor, Cnt} = decode_key(K),
+    {Actor, Cnt}.
 
 %% @private encodes the element key so it is in order, on disk, with
 %% the other elements. Use the actor ID and counter (dot) too. This
@@ -236,25 +242,7 @@ insert_member_key(Set, Elem, Actor, Cnt) ->
       Elem:ElemLen/binary,
       ActorLen:32/little-unsigned-integer,
       Actor:ActorLen/binary,
-      Cnt:64/little-unsigned-integer,
-      $a %% means an add
-    >>.
-
-%% @private see note above on insert_member_key/4. This is a
-%% tombstone.
--spec remove_member_key(set(), member(), actor(), counter()) -> key().
-remove_member_key(Set, Elem, Actor, Cnt) ->
-    Pref = key_prefix(Set),
-    ActorLen = byte_size(Actor),
-    ElemLen = byte_size(Elem),
-    <<Pref/binary,
-      $e, %% means element
-      ElemLen:32/little-unsigned-integer,
-      Elem:ElemLen/binary,
-      ActorLen:32/little-unsigned-integer,
-      Actor:ActorLen/binary,
-      Cnt:64/little-unsigned-integer,
-      $r %% means a remove
+      Cnt:64/little-unsigned-integer
     >>.
 
 from_bin(B) ->

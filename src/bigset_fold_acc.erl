@@ -35,7 +35,6 @@
           me = self() :: pid(),
           current_elem :: binary(),
           current_dots = ?EMPTY :: [bigset_clock:dot()],
-          current_ctx = bigset_clock:fresh() :: bigset_clock:clock(),
           set_tombstone = bigset_clock:fresh() :: bigset_clock:clock(),
           elements = ?EMPTY
         }).
@@ -67,42 +66,40 @@ fold({Key, Value}, Acc=#fold_acc{not_found=true}) ->
     case bigset:decode_key(Key) of
         {clock, Set, Actor} ->
             %% Set clock, send at once
-            Clock = bigset:from_bin(Value),
+            Causal = bigset:from_bin(Value),
+            Clock = bigset_causal:clock(Causal),
+            Tombstone = bigset_causal:tombstone(Causal),
             send({clock, Clock}, Acc),
-            Acc#fold_acc{not_found=false};
+            Acc#fold_acc{not_found=false, set_tombstone=Tombstone};
         _ ->
             throw({break, Acc})
     end;
-fold({Key, Val}, Acc=#fold_acc{not_found=false}) ->
+fold({Key, _Val}, Acc=#fold_acc{not_found=false}) ->
     %% an element key? We've sent the clock (not_found=false)
-    #fold_acc{set=Set, key_prefix=Pref, prefix_len=PrefLen, actor=Me} = Acc,
+    #fold_acc{set=Set, key_prefix=Pref, prefix_len=PrefLen} = Acc,
     case Key of
         <<Pref:PrefLen/binary, $c, _Rest/binary>> ->
             %% a clock for another actor, skip it
             Acc;
-        <<Pref:PrefLen/binary, $d, Me/binary>> ->
-            %% My set tombstone, I need this!
-            Acc#fold_acc{set_tombstone=bigset:from_bin(Val)};
-        <<Pref:PrefLen/binary, $d, _NotMe/binary>> ->
-            %% Some other actors set_tombstone
-            Acc;
         <<Pref:PrefLen/binary, $e, Rest/binary>> ->
-            {element, Set, Element, Actor, Cnt, TSB} = bigset:decode_element(Rest, Set),
-            Ctx = bigset:from_bin(Val),
+            {element, Set, Element, Actor, Cnt} = bigset:decode_element(Rest, Set),
             #fold_acc{set_tombstone=SetTombstone} = Acc,
-            case bigset_clock:seen(SetTombstone, {Acc, Cnt}) of
+            case bigset_clock:seen(SetTombstone, {Actor, Cnt}) of
                 false ->
-                    add(Element, Actor, Cnt, TSB, Ctx, Acc);
+                    add(Element, Actor, Cnt, Acc);
                 true ->
-                    %% a handing off vnode deleted this key, so it is
-                    %% as though we don't have it, just skip it, it
-                    %% will be compacted out next round
+                    %% a vnode deleted this key, so it is as though we
+                    %% don't have it, just skip it, it will be
+                    %% compacted out next round
                     Acc
             end;
         _ ->
             %% The end key
             throw({break, Acc})
     end.
+
+%% @TODO(rdb|docs) below comment is incorrect/out-of-date for this
+%% design
 
 %% @private For each element we most fold over all entries for that
 %% element. Entries for an element can be an add, or a remove (and if
@@ -118,25 +115,17 @@ fold({Key, Val}, Acc=#fold_acc{not_found=false}) ->
 
 %% @TODO(rdb|refactor) abstract the accumulation logic for different
 %% behaviours (CC vs EC)
-add(Element, Actor, Cnt, TSB, Ctx, Acc=#fold_acc{current_elem=Element}) ->
+add(Element, Actor, Cnt, Acc=#fold_acc{current_elem=Element}) ->
     %% Same element, keep accumulating info
-    #fold_acc{current_ctx=CC, current_dots=Dots} = Acc,
-    AggCtx = bigset_clock:merge(Ctx, CC),
-    AggDots = maybe_add_dots({Actor, Cnt}, Dots, TSB),
-    Acc#fold_acc{current_ctx=AggCtx, current_dots=AggDots};
-add(Element, Actor, Cnt, TSB, Ctx, Acc=#fold_acc{current_elem=_}) ->
+    #fold_acc{current_dots=Dots} = Acc,
+    %% @TODO(rdb) consider binary <<Cnt, Actor>> as it needs no encoding
+    Acc#fold_acc{current_dots=[{Actor, Cnt} | Dots]};
+add(Element, Actor, Cnt, Acc=#fold_acc{current_elem=_}) ->
     %% New element, maybe store the old one
     Acc2 = store_element(Acc),
     Acc3 = maybe_flush(Acc2),
     Acc3#fold_acc{current_elem=Element,
-                  current_dots=maybe_add_dots({Actor, Cnt}, [], TSB),
-                  current_ctx=Ctx}.
-
-%% Only the ?ADD dots get added to the element's list of dots
-maybe_add_dots(_Dot, Dots, ?REM) ->
-    Dots;
-maybe_add_dots(Dot, Dots, ?ADD) ->
-    [Dot | Dots].
+                  current_dots=[{Actor, Cnt}]}.
 
 %% @private add an element to the accumulator.
 store_element(Acc=#fold_acc{current_elem=undefined}) ->
@@ -144,19 +133,12 @@ store_element(Acc=#fold_acc{current_elem=undefined}) ->
 store_element(Acc) ->
     #fold_acc{current_elem=Elem,
               current_dots=Dots,
-              current_ctx=Ctx,
               elements=Elements,
               size=Size} = Acc,
 
-    %% create a regular orswot from the bigset on disk
-    Remaining = bigset_clock:subtract_seen(Ctx, Dots),
-    case Remaining of
-        [] ->
-            Acc;
-        _ ->
-            Acc#fold_acc{elements=[{Elem, Remaining} | Elements],
-                         size=Size+1}
-    end.
+    Acc#fold_acc{elements=[{Elem, Dots} | Elements],
+                 size=Size+1}.
+
 
 %% @private if the buffer is full, flush!
 maybe_flush(Acc=#fold_acc{size=Size, buffer_size=Size}) ->

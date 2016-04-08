@@ -28,7 +28,8 @@
                 set :: binary(),
                 preflist :: riak_core_apl:preflist(),
                 results :: [result()],
-                replicate :: {Inserts :: [delta_element()], Removes :: []},
+                replicate :: {Inserts :: [delta_element()],
+                              Removes :: [bigset_causal:dot()]},
                 options=[] :: list(),
                 timer=undefined :: reference() | undefined,
                 reply = ok
@@ -100,7 +101,7 @@ await_coord({dw, Partition, Ins, Dels}, State) ->
     {next_state,
      replicate,
      %% @TODO(rdb) doesn't it make more sense just to pass on the
-     %% original removes from ?OP ? Maybe not, if processing thme
+     %% original removes from ?OP ? Maybe not, if processing them
      %% costs time.
      State#state{replicate={Ins, Dels},
                  results=[{dw, Partition}]},

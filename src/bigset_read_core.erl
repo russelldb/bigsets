@@ -35,6 +35,8 @@
           clock %% Merged clock
         }).
 
+-type elements() :: [{binary(), binary()}].
+
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
@@ -100,7 +102,7 @@ is_done(_S) ->
 
 %% @private see if we have enough results to merge a subset and send
 %% it to the client @TODO(rdb|refactor) ugly
--spec maybe_merge_and_flush(#state{}) -> {[#actor{}], #state{}}.
+-spec maybe_merge_and_flush(#state{}) -> {[elements()], #state{}}.
 maybe_merge_and_flush(Core=#state{not_founds=NF, clocks=C, r=R}) when NF+C < R ->
     {undefined, Core};
 maybe_merge_and_flush(Core) ->
