@@ -87,13 +87,13 @@ replica the following occurs:
         * run `riak_dt_orswot:merge/2` on the two values
     * finally serialize the result, and store on disk
 
-There may be many things we can do to optimize this: have a single
+There may be many things we can do to optimise this: have a single
 format for in-memory and on disk/wire that does not require
-serialization seems the first step, but there is still the cost of
+serialisation seems the first step, but there is still the cost of
 reading a potentially large object off disk simply to add a single
 element. We replicate that whole object (see [Deltas](#deltas) below
 if you're screaming "Deltas! Deltas!" right now.) However, even if we
-optimize the current implementation, there is still that `riak_object`
+optimise the current implementation, there is still that `riak_object`
 size limit of ~1MB.
 
 ![Sets in Riak: Inserts, not O(1)](dt-add.png "Sets in Riak: Inserts, not O(1)")
@@ -121,7 +121,7 @@ Reading a CRDT Set is just like reading a regular
 divergence, `riak_object:reconcile/1` is called which causes each
 sibling to be de-serialized, merged, and the final result to be
 serialized again. A bit of a waste as the API boundary simply takes
-care of deserialising the result, and calling
+care of de-serialising the result, and calling
 `riak_dt_orswot:value/1`. There is some protocol buffers/json
 encoding, too. I can't imagine a way that reading a set of size `n`
 was not an O(n) operation, can you?
@@ -161,7 +161,7 @@ above. However merely replacing the `riak_dt_orswot` in riak with a
 `riak_dt_delta_orswot` is not enough. In fact, we tried, and it was
 worse.
 
-#### 3.1. Accidental Optimization
+#### 3.1. Accidental Optimisation
 
 Recall the steps at the replica above for Set writes:
 
@@ -174,12 +174,12 @@ operation the action at the replica must always be:
 
 * run `riak_object:merge/2` which in turn calls `riak_kv_crdt:merge/2` which will
     * De-serialize the local value
-    * deserialise the incoming value
+    * de-serialise the incoming value
     * run `riak_dt_orswot:merge/2` on the two values
 * finally serialize the result, and store on disk
 
 Even when there is no concurrency the price must be paid of
-deserialisation, merge, and reserialise. The only time an incoming
+de-serialisation, merge, and re-serialise. The only time an incoming
 delta can ever replace what is on disk at a replica is when it is the
 first received update. In the best case, the savings are only in the
 size of the data sent over the network. The full read and update at
@@ -214,6 +214,77 @@ would be the next steps, but I've been wrong before.
 In a (misleading) sentence bigsets is an append only log of deltas
 that trades space for time, it favours writes over reads.
 
+## 6.0 Concepts
+
+Some things that are going to be mentioned below and I couldn't think
+of a better way to include them. Then I noticed I already covered this
+much lower down in 6.9. heh
+
+### 6.0.1 Action-At-A-Distance
+
+In all the distributed systems literature in general, and CRDT lit in
+particular, the system model is a set of processes, each with a unique
+ID, acting serially on some single CRDT in memory. That does not sound
+a lot like Riak. Riak is a database. It stores _many_ CRDTs, durably
+on disk, and the actors in Riak (the Vnodes) act as proxies for
+potentially many, many clients. Sam Lenary, super-intern, described
+this as "action-at-a-distance".
+
+A Riak client gives some causal context and new value to Riak, and a
+vnode acts for the client, incrementing the logical clock, and storing
+the new value. CRDT Sets are even more removed as the client is
+_never_ have a full copy of the set, and only sends operations to
+Riak. These operations are performed for the client, but the
+coordinating vnode, on it's local replica of the data. That's
+action-at-a-distance. AAAD for short. Or should we call it A3D, that
+sounds rad?
+
+### 6.0.2 Contexts
+
+The client is not a replica. The client is not a replica. The client
+is not a replica. The semantic of sets in Riak is
+"Observed-Remove". We only ever remove element ``X`` from the set if
+client A has _seen_ element `X`, and we only remove the `X`s seen by
+the client.
+
+If the client reads a set from vnode A and asks vnode B to remove `X`,
+vnode B should only remove the `X` seen by the client. If B has added
+an `X` in between the clients read and subsequent update, it would be
+_BAD_ to remove that `X`. To this end, the client must provide some
+context for the operation. The context is some causal information that
+says "I've seen this `X`" or maybe better put "I've seen `X` at time
+`T`."
+
+### 6.0.2 Adds Are Removes
+
+And war is peace, what is this 1984? In Riak today the implementation
+of the set `riak_dt_orswot` treats the add of element `X` to a set
+containing element `X` as a remove of all existing dots for `X` and
+the generation of new, single dot that supersedes them. This makes
+sense in the "all actors are a replica" model of the CRDT
+literature. After all, if a replica adds `X` to it's copy of a set, of
+course it has seen all dots for `X` so the new add is not concurrent
+with the existing dots for `X`, instead it super-cedes them. With A3D
+(or AAAD, I haven't decided yet) we have the same context problem as
+above. If client Z reads `X` from vnode A and sends an add to vnode B
+it may remove some dots for `X` it has never seen. Does it matter?
+Yes! It's non-deterministic (that should be enough persuasion) but it
+can lead to data loss too. Client adds `X` to some node that has many
+dots for `X`, then removes `X`. The client has removed `X`s
+unseen. This is why Adds Are Removes + Action-At-A-Distance lead me to
+thinking _all_ operation should have a context.
+
+### 6.0.3 Per-Element-Context
+
+In previous design iterations the set clock was the context for any
+operation. This has some advantages (which we can discuss) but
+ultimately, since each element has dots, it makes sense to use those
+dots as the context for any element add or remove. The clock describes
+a set of events extrinsic to any one element, but a
+Per-Elememt-Context is explicit. It simplifies the design, as those
+who read prior versions of this document will understand. See 6.9 for
+more.
+
 ### 6.1. The backend
 
 Bigsets requires a sorted backend, it uses leveldb, maybe other
@@ -242,8 +313,8 @@ clocks work? Maybe.
 
 The bulk of how bigset works is down to the way keys are named and
 stored. Based on the observation that we can't store more than 1MB max
-in a riak object, and that reading, deserialising, inserting,
-reserialising, and writing is wasteful if all we want to do is add an
+in a riak object, and that reading, de-serialising, inserting,
+re-serialising, and writing is wasteful if all we want to do is add an
 integer to a set of 1million integers, the key scheme attempts to read
 as little information as possible before insert/remove.
 
@@ -263,41 +334,39 @@ made up of the set name, the special key designation character `c`
 
 #### 6.3.2 Set Tombstone
 
-How or why this key exists is covered in [Hand Off](#handoff)
-below. Its purpose is to store a `bigset_clock` that describes all the
+In leveldb deletes are writes. Engel's idea was that rather than
+issuing a delete for a key we could write our own tombstone for that
+key and have level compact it out. With the way we do Hand Off (see
+[Hand Off](#handoff) below) a general tombstone for dots in the whole
+set was needed. This `set-tombstone` has many uses. It contains some
+compact causal information in a `bigset_clock` that describes all the
 events a vnode may have on disk, that it should remove. It has a part
-to play in [compaction](#compaction) and also in [reads](#read). It
-maybe a way to do efficient whole set deletes. It is very much like
-the clock key. Each actor has their own, and only uses their own, and
-only reads and writes their own. It is a binary that is made up of the
-set name, the special key designation character `d` (for `c` < `d` <
-`e`) and the actor name.
+to play in [compaction](#compaction), [writes](#writes), and also in
+[reads](#read). It maybe a way to do efficient whole set deletes. It
+is very much like the clock key. Each actor has their own, and only
+uses their own, and only reads and writes their own. The key is a
+binary that is made up of the set name, the special key designation
+character `d` (for `c` < `d` < `e`) and the actor name.
 
     <<SetNameLength:32/little-unsigned-integer,
       SetName:SetNameLength/binary,
       $d:1/binary,
       ActorName/binary>>
 
-Eventually (in the "eventual consistency" sense of the word) this key
-is empty/does not exist. After a compaction "consumes" this tombstone
-it is discarded (unless a new one, from a hand off, is created in the
-mean time. You see "eventually".)
-
 #### 6.3.2. Element Keys
 
 An element or member of the set is a client provided opaque
-binary. When an element is added to the set or removed from the set, a
-key is written. This means there maybe more keys in the set than
-elements. This also means that there are temporary tombstones in the
-set, we'll look at this more later.
+binary. When an element is added to the set a key is written. When an
+element is removed from the set some dots are added to the
+`set-tombstone`. This means there maybe more keys in on disk than
+elements in the set. This also means that there are temporarily keys
+to ignore in the set, we'll look at this more later in [reads](#read).
 
 An element key is a binary made up of the Set name, a special key
 designation character `e` that means `element key`, the element, the
-actor that coordinated the insert/remove, the actor's event counter
-for the insert/remove event which together make a _dot_ for the
-insert, (and yes, we increment the clock for removes), and a special
-tombstone designation character `a` or `r` that denotes if the
-operation is an add or a remove.
+actor that coordinated the insert/remove, and the actor's event
+counter for the insert event which together make a _dot_ for the
+insert.
 
     <<SetNameLength:32/little-unsigned-integer,
       SetName:SetNameLength/binary,
@@ -306,13 +375,10 @@ operation is an add or a remove.
       Element:ElementLen/binary,
       ActorLen:32/little-unsigned-integer,
       Actor:ActorLen/binary,
-      Counter:64/little-unsigned-integer,
-      $a | $r:1/binary>>
+      Counter:64/little-unsigned-integer>>
 
 The comparator sorts so that keys for the same element are together
-and sorted by actor, then event, and finally adds `a` before removes
-`r`. That last is a carry over from before the clock was incremented
-for removes.
+and sorted by actor, then event.
 
 #### 6.3.3. End Key
 
@@ -342,33 +408,26 @@ Vector, and a set of non-contiguous dots. Any actor `A` will always
 have only contiguous events for it's own clock. There's a section on
 the clock [below](#bigset-clock).
 
+#### 6.4.2 Set-Tombstone value
+
+Another `term_to_binary` `bigset_clock`. However, eventually (in the
+"eventual consistency" sense of the word) this value is empty. After a
+compaction "consumes" this tombstone it is discarded (unless a new
+one, from a hand off, is created in the mean time. You see
+"eventually".)
+
 #### 6.4.2. Element Value
 
-Each element key has a payload of a full `bigset_clock` as a context
-of the operation the key expresses. Yes, that seems "kinda large", I'm
-not sure what to do about it right now. However, it's no different to
-a `riak_object` having it's own version vector. It's a consequence of
-Riak's "action-at-a-distance" model. It doesn't matter about the order
-of operations as the vnodes see it, what matters is how the clients
-see events. I'll cover all the "why" later, for now, just sigh and
-accept it. Hopefully we can find an efficient way to encode the
-context-clock-as-value. See also [compaction](#compaction).
+There is no value, just the empty binary `<<>>`.
 
-It is possible that instead of the full context we could return a
-per-element context at read time, and only store that. We should
-benchmark the difference. With a per-element-context you probably send
-more information per read but store less per-key. It needs
-investigating, though it would not be API compatible with current
-clients.
-
-### 6.5. Write operations - Insert and Remove
+### 6.5. Write operations - Insert and Remove <a id="writes"></a>
 
 As with Riak sets, the client sends an operation to the server, saying
-`"add X to set Y"`. We don't have a client API yet, and I'm
-hoping/aiming for API compatibility with riak data types. For now we
-use an internal client interface, much like Riak's local client. The
-module is `bigset_client` and you can use that and the helper module
-`bigset` for playing with bigsets when you attach to a node.
+`"add X to set Y (at time T)"`. We don't have a client API yet. For
+now we use an internal client interface, much like Riak's local
+client. The module is `bigset_client` and you can use that and the
+helper module `bigset` for playing with bigsets when you attach to a
+node.
 
 When a client wants to add or remove elements to a set it sends a
 request via the client.
@@ -386,51 +445,73 @@ parameters will need be variable and set via the client.
 
 #### 6.5.2. Coorindating Vnode
 
-Just as in Riak we need a coordinating vnode. The vnode acts as a
-proxy for the client. This keeps version vector size down and
+Just as in Riak we need a coordinating vnode for adds. The vnode acts
+as a proxy for the client. This keeps version vector size down and
 simplifies life for client/application developers. Continuing with the
-example started above, when a client issues an `insert` and/or
-`remove` operation, the coordinating vnode performs the following:
+example started above, when a client issues an `insert` operation, the
+coordinating vnode performs the following:
 
-1. Read it's `bigset_clock` for the Set (see `bigset:clock_key/2`)
-2. For each element being inserted OR removed
+1. Read it's `bigset_clock` and `set-tombstone` for the Set (see `bigset:clock_key/2`)
+2. For each element being inserted
     1. Increment the clock (which generates a dot)
     2. Create an "element key" for the element
-    3. assign a `context` value to the key (see [contexts](#contexts) below)
-    4. add `{put, Key, Value}` to a list of writes for leveldb
-    5. add `{Key, Value, Dot}` to a list for replicating
-3. add `{put, ClockKey, Clock}` to the `write list`
+    3. For each `dot` in the `per-element-ctx`
+        1. if the dot is in the clock add it to the tombstone (ensures [compaction](#compaction) of key)
+        2. else add it to the clock (ensures superseded key is never written)
+    4. add `{put, Key, <<>>}` to a list of writes for leveldb
+    5. add `{Key, Dot, Ctx}` to the `delta-list` for replicating
+3. add `{put, ClockKey, Clock}` and `{put, TombstoneKey, TS}` to the `write list`
 4. Write the `write list` to leveldb
-5. Return the `replicate list` to the write FSM
+5. Return the `delta list` to the write FSM
    (note, _not_ the updated bigset clock, just the list)
+
+For a remove the operation is simpler. In fact, for an operation that
+is _just_ a remove (we allow compound and bulk operations
+(e.g. `{add_all, [a,b,c,d}` and `{update, [{add, x}, {remove, y}]}`
+etc) we can skip coordination and just broadcast the
+`per-element-ctx`s for removes to all N vnodes.
+
+On remove:
+
+1. Read the clock and tombstone
+2. for each dot in the context(s)
+    1. if the dot is in the clock add it to the tombstone (ensures [compaction](#compaction) of key)
+    2. else add it to the clock (ensures superseded key is never written)
+3. Write the updated clock and tombstone
+
 
 #### 6.5.3. Replicating Vnode
 
-When the `N-1` replica vnodes receive the `replica list` they store
+When the `N-1` replica vnodes receive the `delta list` they store
 unseen updates as follow:
 
 0. return `w` to the write fsm
-1. Read own `bigset_clock` from the set
-2. For each element in the [replicate list](#rep-list)
+1. Read own `bigset_clock` and `set-tombstone` for the set
+2. For each element in the [delta-list](#rep-list)
     1. If the `dot` for the element has been seen, do nothing
     2. If the `dot` is not seen
         1. add `dot` to `bigset_clock`
-        2. add `{put, Key, Value}` to `write list`
-3. Add `{put, ClockKey, Clock}` to `write list`
+        2. add `{put, Key, <<>>}` to `write list`
+    3. for each dot in the `Ctx`
+    1. if the dot is in the clock add it to the tombstone (ensures [compaction](#compaction) of key)
+    2. else add it to the clock (ensures superseded key is never written)
+3. Add `{put, ClockKey, Clock}` and `{put, TSKey, TS}` to `write list`
 4. Write the `write list` to leveldb
 5. return `dw` to the write fsm
 
-#### 6.5.4. The <a id="rep-list"></a> replicate list
+For removes see above. Basically tombstone seen dots, add unseen to
+clock.
 
-What is the `replicate list`? It's deltas. Not strictly speaking the
-deltas of [the paper](http://arxiv.org/abs/1410.2803), but they are
-not full state either, so what are they exactly?
+#### 6.5.4. The <a id="rep-list"></a> Delta List
 
-Each item in the `replicate list` is a binary encoded key (see
-[Key Scheme](#key-scheme)) a binary encoded `context` (that is a
-`bigset_clock`) and an unencoded `dot` (an `{actor, counter}`
-pair). The `dot` saves the replica actor the effort of decoding the
-key, that's all it is there for.
+What is the `delta-list`? It's deltas. Almost exactly the deltas of
+[the paper](http://arxiv.org/abs/1410.2803). What are they exactly?
+
+Each item in the `delta-list` is a binary encoded key (see
+[Key Scheme](#key-scheme)) a binary encoded `context` (that is some
+dots) and an unencoded `dot` (an `{actor, counter}` pair). The `dot`
+saves the replica actor the effort of decoding the key, that's all it
+is there for.
 
 In the Delta paper, the delta consists of the new dot, and a context
 made up of the dots removed by the new dot. Imagine an orswot with the
@@ -438,28 +519,12 @@ element `paul` with dots `[{a, 1}, {b, 6}, {c, 9}]`.  Adding `paul` by
 actor `a` at event `3` would generate a delta that contained the new
 dot `{a, 3}` but also a context of `[{a, 1}, {b, 6}, {c, 9}]`. The add
 at `a` says "I've seen all these `paul`s at `a` so this new add
-replaces them!" With bigset we can't do that for two reasons.
-
-1. We don't want to read all the `paul`s at vnode `a` in order to write `paul`
-2. It doesn't matter what vnode `a` has seen, what matters is what the client has seen
-
-The second point is why we prefer a client to read `paul` from the set
-before adding him: it provides a `context` that ensures this insert of
-`paul` supersedes all others. The first point is why we store a whole
-`bigset_clock` as a `context` against each key. Rather than read all
-`paul`s we use a clock to say "all the `paul`s whose `dot` is covered
-by this `context` have been seen". There will be more on this later
-under "Consistency" and Contexts", but a summary is that an add of an
-element when the element already exists is equivalent to removing the
-element at the time of the add and re-adding it with a new dot.
-
-If we had a per-element-context then the context value would be
-smaller. Using a whole bigset clock works because we only apply it to
-`paul` keys, meaning the set of events described in the context is
-extrinsic to the set of events applying to `paul` keys. With a
-per-element-context the put from the client exactly matches a delta
-from the paper, but this still leaves an issue if the client chooses
-not to read-before-write, covered [below](#contexts).
+replaces them!" With bigset we can't do that because It doesn't matter
+what vnode `a` has seen, what matters is what the client has seen,
+which is why we insist a client reads `paul` from the set before
+adding him: it provides a `context` that ensures this insert of `paul`
+supersedes only seen `paul`s. There is more on this in
+[contexts](#contexts) below.
 
 ### 6.6. <a id="read"></a>Read
 
@@ -472,9 +537,7 @@ Reading a bigset is maybe dumb. If you have a set that is actually "big" why do 
 
 etc.
 
-However, the aim, of providing API compatibility with the existing
-sets data type means a full read is the simplest and first query we
-will deliver.
+However, read is the simplest and first query we will deliver.
 
 By default we _stream_ results to the client in order. We require the
 vnodes to send data to the read fsm in order for the CRDT merge logic
@@ -511,14 +574,14 @@ merge `r` local sets into a set we send the client.
 #### 6.6.2. Fold/Accumulate per vnode
 
 A read is an async vnode worker task and does not block the vnode like
-it does in riak. The main reason is that we expect our sets to be,
-well, big. Since a bigset read looks most like a 2i query read at the
-vnode level, we use an async task. This needs looking at/bikshedding
-for production as we need to ensure that correct size pool for async
+it does in riak. The main reason is that we expect our sets to be
+big. Since a bigset read looks most like a 2i query read at the vnode
+level, we use an async task. This needs looking at/bikshedding for
+production as we need to ensure that correct size pool for async
 workers, or do we just spawn a new process, or what should we do? For
 now we use worker pools, with a default size of `100` per vnode.
 
-When a read request hits a vnode is immediately hands over to a
+When a read request hits a vnode it immediately hands over to a
 worker. I'm hoping mixed workload benchmarking will show this to be
 win.
 
@@ -526,7 +589,7 @@ win.
 
 A bigset read is an eleveldb fold operation. It iterates over a
 portion of the keyspace to build a portion of regular looking
-optimized orset (something like `riak_dt_orswot`). The vnode worker
+optimised or-set (something like `riak_dt_orswot`). The vnode worker
 sets up the fold by creating a new `bigset_fold_acc` buffer record,
 creating a `start_key` and `end_key` for the `streaming_fold`
 operation, and calling `eleveldb:fold/4` with the accumulator, fold
@@ -536,9 +599,8 @@ any last messages, and is returned to the pool.
 
 ##### 6.6.2.2. Fold/Accumulate
 
-We're in the process of moving this logic to c++ in eleveldb, but
-until then it is relevant, and the logic itself will be mostly
-unchanged.
+We moved the fold logic to c++ in eleveldb, but I changed it for this
+design, so that work will need doing again.
 
 The main trick of the bigset design is to "just get it on disk" for
 writes, and defer all the resolution logic until read time. That logic
@@ -570,8 +632,7 @@ accumulator state.
 
 Eleveldb will then call `fold/2` for every element key it
 encounters. The key is decoded into its constituent parts (`element`,
-`actor`, `counter`, `add` or `remove` designation) and considered for
-inclusion in the local orswot.
+`actor`, `counter`) and considered for inclusion in the local orswot.
 
 ##### 6.6.2.3. Two accumulators
 
@@ -587,74 +648,6 @@ logic.
 
 If an element key's `dot` is seen/covered by the set-tombstone clock,
 then it is discarded/ignored/passed over, _not_ in the set.
-
-##### 6.6.2.4. Per element accumulator
-
-It's probably best to illustrate the fold logic with an example. Why
-might there may be multiple keys for a single element? Imagine `paul`
-was added 3 times to the Set `friends`, and subsequently removed. We
-might have keys as follows for the element `paul` (NOTE: using erlang
-tuple syntax like `{SetName, Element, Actor, Counter, Add | Remove} ->
-Context`)
-
-    %% paul added as the first event by a
-    {friends, paul, vnode_a, 1, add} -> []
-
-    %% paul added as the first event by b
-    %% NOTE the context means this is concurrent
-    %% with the add on a
-    {friends, paul, vnode_b, 1, add} -> []
-
-    %% paul added by `c` after seeing only the add by `a`
-    {friends, paul, vnode_c, 1, add} -> [{a, 1}]
-
-    %% paul removed after a r=2 read of a & c
-    {friends, paul, vnode_d, 1, remove} -> [{a, 1}, {c, 1}]
-
-We have 4 keys for the element `paul`.
-
-The per-element accumulator is made up of an aggregated context, and a
-set of dots. For each key for element `paul` the value (the context of
-the write) is merged into the aggregate context, which starts off as a
-`bigset_clock:fresh()`.
-
-The dots of only the `add` keys are added to the set of dots. For the
-example above the dots `{vnode_a, 1}`, `{vnode_b, 1}`, and `{vnode_c,
-1}` would be in the accumulated dot set. When the last element key for
-`paul` has been folded over we determine if `paul` should be added to
-the set accumulator, and thus the local orswot.
-
-`paul` is in the set if subtracting the accumulated set of add dots:
-
-     [{vnode_a, 1}, {vnode_b, 1}, {vnode_c, 1}]
-
-from the accumulated context:
-
-    [{a, 1}, {c, 1}]
-
-Does not lead to the empty set. Subtracting dots from the accumulated
-set of dots means removing those dots _seen_ by the accumulated
-context.
-
-The result in the above example is
-
-    [{b, 1}]
-
-`paul` is added to the set accumulator with the dots `[{b, 1}]` since
-that is an add of `paul` that has not been removed or superseded by a
-another add.
-
-It's perfectly possible for there to be keys for an element that is
-absent from the local set. For example:
-
-    %% paul added as the first event by a
-    {friends, paul, vnode_a, 1, add} -> []
-
-    %% paul removed by a
-    {friends, paul, vnode_a, 2, remove} -> [{a, 1}]
-
-Here `[{a,1}] - {a, 1} == []`. No dots left, no `paul` in the set,
-despite there being 2 keys on disk.
 
 ##### 6.6.2.5. Set Accumulator
 
@@ -708,67 +701,49 @@ The subsets of each of `r` that are `> least-last` are retained and
 added to as messages come into the read fsm, until such a time as they
 can be merged using the algorithm above.
 
-The client receives the `bigset_clock` as an opaque `context` as soon
-as `r` clocks are received by the read fsm. This means the client can
-start to add/remove elements as soon as it receives them as results.
+At the moment the client receives a list of dots per element as the
+`per-element-ctx` but this seems wasteful. A query that returns a
+single element is fine, but if thousands of elements each with
+multiple dots are returned we are repeatedly sending 24-byte actor
+IDs. I did a version that used very simple dictionary encoding,
+sending a dictionary of `actor->integer` mappings to the client, and
+then encoding each dot as a pair of integers. This is an area that
+will need work to be efficient.
 
 ### 6.7 <a id="compaction"></a>Compaction
 
 If we always only write, for inserts and removes, sets really would be
 bigsets. The design is a kind of decomposed log of deltas to an
 orswot, and orswot stands for Observed Remove Set _WITHOUT_
-Tombstones. And we write tombstones. What gives?
+Tombstones. And we write a tombstone. What gives?
 
 From [section 3](#section-3) on Deltas above we learned the biggest
-cost with sets today is reading and deserialising in order to
+cost with sets today is reading and de-serialising in order to
 add/remove an element. This leads to the approach to always write, and
 handle resolution at read time. Eventually we will have to remove
-superseded writes and tombstones, or the disk could be full for a set
-with only two active elements! Compaction is the method. Unlike early
-tombstoning CRDTs as described in the
+superseded writes and shrink the tombstone, or the disk could be full
+for a set with only two active elements! Compaction is the
+method. Unlike early tomb-stoning CRDTs as described in the
 [comprehensive paper](https://hal.inria.fr/inria-00555588/en/) there
 is no coordination required for garbage collection/tombstone
-removal. Each vnode has the causal information it needs to remove
-superseded writes and tombstones unilaterally.
+shrinking. Each vnode has the causal information it needs to remove
+superseded writes and shrink tombstones unilaterally.
 
 My initial hope was to implement this logic in the leveldb compaction
-code, but I think I confused the logical structure of level with the
-actual structure, and this compaction algorithm runs on the logically
-ordered set of keys for a set. In the worst case we can use reads (see
-above) to detect when a set is at a certain garbage-to-key ratio (yet
-to be determined) and submit it to be compacted. In that case
-compaction consists of a fold/read that identifies keys to be removed.
-This feature is essential but also the most contentious and difficult,
-if we can't find a way to do this efficiently bigsets may be dead in
-the water for the current design. We may have to consider going back
-to read-before-write for each element added. This would make batch
-writes pretty bad, I imagine.
+code.
 
 This algorithm has been implemented in the eqc test `bigset_eqc` and
 statistics are displayed after the run.
 
-The compaction algo is almost the same as the read fold logic, but
-I'll reproduce in total here. Again we consider each element.
-
 0. Every key whose `dot` is seen by the set-tombstone can be removed
-1. For each element merge all the contexts
-2. Every add key that is seen by the merged context, _AND_ whose context value is descended by the bigset_clock for the replica can be removed
-3. Every remove key whose context value is descended by the bigset_clock for the replica _AND_ no `add` keys it removes have survived the compaction (see step 2) can be removed.
 
-This ensures that we don't remove a tombstone before it has done it's
-job. Since you need to have very few gaps in the bigset clock for
-compaction to work and storage size to be optimal, we will need
-effective anti-entropy mechanisms.
+That's it. When leveldb compaction considers a key, it reads the
+set-tombstone and the key is dropped if the tombstone covers it.
 
-This compaction design is only one of a few I've tried, this one is
-chosen as it allows compaction as a process outside level, needing
-only a fold, and resulting in a set of deletes to be submitted to
-`eleveldb:write`.
-
-After each set is compacted `eleveldb:write` is given a list of
-deletes. The set-tombstone used for compaction is also subtracted from
-the set-tombstone on disk for the set (in case the on disk tombstone
-has been updated by a hand off (see below.))
+Any dropped dot is accumulated in a set. This set of removed events
+can then be subtracted from the set-tombstone on disk. I suggest that
+leveldb somehow asks the vnode to perform this read-subtract-write of
+the tombstone (so it is serialised.)
 
 ### 6.8 <a id="bigset-clock"></a>Bigset Clock
 
@@ -785,10 +760,9 @@ bitmaps+compression is enough?
 
 ### 6.9 <a id="contexts"></a>Contexts and Consistency
 
-Current Riak KV sets are odd about contexts, requiring a context for
-remove, but not ever using one for insert. Bigset can operate with or
-without contexts and we need to bike shed what the "default" should
-be.
+Current Riak KV sets are broken, requiring a context for remove, but
+not ever using one for insert. Bigset can "operate" with or without
+contexts and we need to bike shed what the "default" should be.
 
 #### 6.9.1 Why Contexts?
 
@@ -872,6 +846,9 @@ on Add, though.
     unseen by writer. May not remove any 'X's (if for example an empty
     fallback coordinates)
 
+However, this involves a local read at the coordinator. I have not
+implemented this.
+
 #### 6.9.6 No Context :: Use Empty Context
 
 NOTE: deterministic, but adding 'X' N times leads to N keys for 'X'.
@@ -881,6 +858,16 @@ options.
 - Add 'X' is concurrent with all other adds of 'X'
 - remove 'X' has no effect since an empty ctx dominates no added dots
 
+This is what I have implemented as default, no ctx provided by the
+client means empty ctx.
+
+#### 6.9.7 Batches
+
+All of this seems kind of simple, pick the "per-elem-ctx" option,
+until you consider operating on multiple elements. What if I want to
+add 10k elements at once? Or want to remove 10k elements? Just using
+the whole set clock as a context makes sense there. But it adds some
+much space and complexity.
 
 ### 6.10 Anti-Entropy
 
@@ -895,13 +882,17 @@ sort of is an anti-entropy mechanism.
 #### 6.10.1 Read Repair
 
 No idea yet, imagine the need will be detected by the read fsm, and
-the action will be requesting keys straight from the vnode(s).
+the action will be requesting keys straight from the vnode(s). I
+think, since the keys are `{Set, Element, Actor, Cnt}` and the orswot
+elements are `{Element, [dot()]}` the later can be exploded into the
+former and read repair will consist of sending batches during the
+read-core-merge phase.
 
 #### 6.10.2 AAE
 
 As above, no idea, though I _hope_ regular riak AAE will do. It is the
 removing of keys through compaction that will be hard to communicate
-to the AAE trees. Needs work.
+to the AAE trees. Needs work. See Zeeshan.
 
 #### 6.10.3 <a id="handoff"></a> Hand Off
 
@@ -918,9 +909,9 @@ operation means these are interleaved, not concurrent operations.)
 
 Since the sender folds in order over its contents and sends them, we
 can assume that the receiver receives an ordered set of messages,
-starting with keys for set `A`, then set-tombstone, then elements, and
-finally an end key, followed by the same for set `B` etc. If handoff
-encounters an error, it starts from the beginning.
+starting with clock for set `A`, then set-tombstone, then elements,
+and finally an end key, followed by the same for set `B` etc. If
+handoff encounters an error, it starts from the beginning.
 
 Why can't the hand-off receiver just behave as it does when it
 receives a replicated write? For each element key it is handed it can
@@ -942,12 +933,14 @@ Handling keys that are not sent (i.e. removed by the sender) requires
 some state at the receiver, and some extra information from the
 sender.
 
-In the Pic code the sender prepends its vnode ID to each message it
+In the PoC code the sender prepends its vnode ID to each message it
 sends so that the receiver can associate the handoff data item with a
 particular sender. The receiver creates a little in memory state for
 each vnode that is handing off to it. The state consists of the
 sender's clock for the current set being sent, a tracker clock for the
-current set, and the current set name.
+current set, and the current set name. Ideally this
+"knowing-who-sent-me-this" would be more efficiently baked into
+riak-core handoff.
 
 Per set received the receiver does the following: when it receives a
 clock key it sets the in memory `tracker` to a fresh clock. When it
@@ -962,7 +955,7 @@ of events that the sender has removed can be deduced. We then take
 that set of "Removed events" and find the intersection with the
 receiver's clock. These are the keys that the receiver has seen but
 must remove (NOTE: the receiver may have already removed them.) This
-intersection of events is used to create the set-tombstone.
+intersection of events is added to the set-tombstone.
 
 The set-tombstone is a clock that contains the set of events that is
 the intersection of events the sender has removed, and the receiver
