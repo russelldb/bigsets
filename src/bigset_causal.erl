@@ -86,6 +86,21 @@ clock(#bigset_causal{clock=C}) ->
 tombstone(#bigset_causal{tombstone=TS}) ->
     TS.
 
+%% @doc is_tombstoned returns `true' if `Dot' is covered by the
+%% `Casual' tombstone, `false' otherwise.
+-spec is_tombstoned(dot(), causal()) -> boolean().
+is_tombstoned(Dot, C) ->
+    #bigset_causal{tombstone=TS} = C,
+    bigset_clock:seen(TS, Dot).
+
+%% @doc shrink_tombstone removes `Dot' from the tombstone in `Causal',
+%% returns update `Causal'.
+-spec shrink_tombstone(dot(), causal()) -> causal().
+shrink_tombstone(Dot, C) ->
+    #bigset_causal{tombstone=TS} = C,
+    TS2 = bigset_clock:subtract_dot(TS, Dot),
+    C#bigset_causal{tombstone=TS2}.
+
 %% @doc add the given `Dot::dot()' to the clock portion of the given
 %% `C::causal()'
 -spec add_dot(dot(), causal()) -> causal().
@@ -93,4 +108,25 @@ add_dot({_Actor, _Cnt}=Dot, C=#bigset_causal{clock=Clock}) ->
     C#bigset_causal{clock=bigset_clock:add_dot(Dot, Clock)}.
 
 
+%% @doc merge two causals `C1' and `C2' return `causal()' that is the
+%% LUB of the two.
+-spec merge(causal(), causal()) -> causal().
+merge(C1, C2) ->
+    #bigset_causal{clock=bigset_clock:merge(clock(C1), clock(C2)),
+                   tombstone=bigset_clock:merge(tombstone(C1), tombstone(C2))}.
 
+%% @doc merge clock of `C1' with clock of `C2` and return `C1' with
+%% result as clock
+-spec merge_clocks(causal(), causal()) -> causal().
+merge_clocks(C1, C2) ->
+    #bigset_causal{clock=bigset_clock:merge(clock(C1), clock(C2)),
+                   tombstone=tombstone(C1)}.
+
+%% @doc add all events in the `bigset_clock:clock()' `Tombstone' to
+%% the `causal()' `C's tombstone. Essentially a tombstone
+%% merge. returns `C' with updated tombstone. NOTE: expects that all
+%% events in `Tombstone' are already in `C.clock' DOES NOT verify that
+%% or merge the events in `Tombstone' into `C.clock'!
+-spec tombstone_all(bigset_clock:clock(), causal()) -> causal().
+tombstone_all(TSClock, C) ->
+    C#bigset_causal{tombstone=bigset_clock:merge(TSClock, tombstone(C))}.
