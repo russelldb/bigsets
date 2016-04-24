@@ -16,7 +16,7 @@
 
 -record(bigset, {
           causal=bigset_causal:fresh(),
-          keys=ordset:new() %% Simulate the back end with a set of keys
+          keys=ordsets:new() %% Simulate the back end with a set of keys
          }).
 
 -type element() :: term().
@@ -44,7 +44,7 @@ new() ->
 
 -spec new_mbs() -> merged_bigset().
 new_mbs() ->
-    {bigset_clock:fresh(), ordset:new()}.
+    {bigset_clock:fresh(), orddict:new()}.
 
 -spec add(term(), term(), bigset()) ->
                  {delta(), bigset()}.
@@ -57,12 +57,12 @@ add(Element, ID, Bigset) ->
     %% any 'X' seen at this node will be removed by an add of an 'X'
     Ctx = current_dots(Element, Keys),
     C3 = bigset_causal:tombstone_dots(Ctx, C2),
-    Keys2 = ordset:add_element(Key, Keys),
+    Keys2 = ordsets:add_element(Key, Keys),
     {{add, {Key, Ctx}}, Bigset#bigset{causal=C3, keys=Keys2}}.
 
--spec remove(element(), bigset()) ->
+-spec remove(element(), actor(), bigset()) ->
                     {delta(), bigset()}.
-remove(Element, Bigset) ->
+remove(Element, _ID,  Bigset) ->
     #bigset{causal=Clock, keys=Keys} = Bigset,
     %% In the absence of a client context and AAAD, use the dots at
     %% the coordinating replica as the context of the remove
@@ -76,13 +76,13 @@ remove(Element, Bigset) ->
 delta_join({add, Delta}, Bigset) ->
     #bigset{causal=Clock, keys=Keys} = Bigset,
     {{_E, A, C}=Key, Ctx} = Delta,
-    case bigset_clock:seen(Clock, {A, C}) of
+    case bigset_causal:seen({A, C}, Clock) of
         true ->
             Bigset;
         false ->
             C2 = bigset_causal:add_dot({A, C}, Clock),
             C3 = bigset_causal:tombstone_dots(Ctx, C2),
-            Bigset#bigset{causal=C3, keys=ordset:add_element(Key, Keys)}
+            Bigset#bigset{causal=C3, keys=ordsets:add_element(Key, Keys)}
     end;
 delta_join({remove, Ctx}, Bigset) ->
     #bigset{causal=Clock} = Bigset,
@@ -91,13 +91,13 @@ delta_join({remove, Ctx}, Bigset) ->
 
 -spec value(merged_bigset() | bigset()) -> [term()].
 value(#bigset{}=Bigset) ->
-    orddict:fetch_keys(accumulate(Bigset));
+    value(read(Bigset));
 value({_C, Keys}) ->
     orddict:fetch_keys(Keys).
 
 -spec size(bigset()) -> non_neg_integer().
 size(Bigset) ->
-    ordset:size(Bigset#bigset.keys).
+    ordsets:size(Bigset#bigset.keys).
 
 %% this is the algo that level will run. Any key seen by the
 %% set-tombstone is discarded.
@@ -120,7 +120,7 @@ compact(Bigset) ->
 read(BS) ->
     #bigset{causal=Causal, keys=Keys} = BS,
     Clock = bigset_causal:clock(Causal),
-    Keys2 = ordset:fold(fun({E, A, C}, Acc0) ->
+    Keys2 = ordsets:fold(fun({E, A, C}, Acc0) ->
                                 Dot = {A, C},
                                 case bigset_causal:is_tombstoned({A, C}, Causal) of
                                     false ->
@@ -145,11 +145,11 @@ read_merge(MBS1, MBS2) ->
     {Clock1, Keys1} = MBS1,
     {Clock2, Keys2} = MBS2,
 
-    {Set2Unique, Keep} = ordset:fold(fun(Elem, LDots, {RHSU, Acc}) ->
-                                              case ordset:find(Elem, Keys2) of
+    {Set2Unique, Keep} = orddict:fold(fun(Elem, LDots, {RHSU, Acc}) ->
+                                              case orddict:find(Elem, Keys2) of
                                                   {ok, RDots} ->
                                                       %% In both, keep maybe
-                                                      RHSU2 = ordset:erase(Elem, RHSU),
+                                                      RHSU2 = orddict:erase(Elem, RHSU),
                                                       Both = ordsets:intersection([ordsets:from_list(RDots), ordsets:from_list(LDots)]),
                                                       RHDots = bigset_clock:subtract_seen(Clock1, RDots),
                                                       LHDots = bigset_clock:subtract_seen(Clock2, LDots),
@@ -159,7 +159,7 @@ read_merge(MBS1, MBS2) ->
                                                               %% it's gone!
                                                               {RHSU2, Acc};
                                                           Dots ->
-                                                              {RHSU2, ordset:add_element(Elem, Dots, Acc)}
+                                                              {RHSU2, orddict:store(Elem, Dots, Acc)}
                                                       end;
                                                   error ->
                                                       %% Set 1 only, did set 2 remove it?
@@ -169,14 +169,14 @@ read_merge(MBS1, MBS2) ->
                                                               {RHSU, Acc};
                                                           Dots ->
                                                               %% unseen by set 2
-                                                              {RHSU, ordset:add_element(Elem, Dots, Acc)}
+                                                              {RHSU, orddict:store(Elem, Dots, Acc)}
                                                       end
                                               end
                                       end,
-                                      {Keys2, ordset:new()},
+                                      {Keys2, orddict:new()},
                                       Keys1),
     %% Do it again on set 2
-    MergedKeys = ordset:fold(fun(Elem, RDots, Acc) ->
+    MergedKeys = orddict:fold(fun(Elem, RDots, Acc) ->
                                       %% Set 2 only, did set 1 remove it?
                                       case bigset_clock:subtract_seen(Clock1, RDots) of
                                           [] ->
@@ -184,7 +184,7 @@ read_merge(MBS1, MBS2) ->
                                               Acc;
                                           Dots ->
                                               %% unseen by set 1
-                                              ordset:add_element(Elem, Dots, Acc)
+                                              orddict:store(Elem, Dots, Acc)
                                       end
                               end,
                               Keep,
@@ -205,7 +205,7 @@ handoff(From, To) ->
 
     %% This code takes care of the keys in From, either add them as
     %% unseen, or drop them as seen
-    {ToCausal2, ToKeys2, TrackingClock2} = ordset:fold(fun({_E, A, C}=K, {Causal, Keys, TC}=Acc) ->
+    {ToCausal2, ToKeys2, TrackingClock2} = ordsets:fold(fun({_E, A, C}=K, {Causal, Keys, TC}=Acc) ->
                                                                Dot = {A, C},
                                                                case bigset_causal:is_tombstoned(Dot, FromCausal) of
                                                                    %% Not tombstoned so "send" it in handoff
@@ -217,7 +217,7 @@ handoff(From, To) ->
                                                                            false ->
                                                                                %% Not seen at receiver, store it
                                                                                {bigset_causal:add_dot(Dot, Causal),
-                                                                                ordset:add_element(K, Keys),
+                                                                                ordsets:add_element(K, Keys),
                                                                                 TC2}
                                                                        end;
                                                                    true ->
@@ -247,7 +247,8 @@ handoff(From, To) ->
     %% that To has not seen, but From has removed never get added to
     %% To.
     Causal0 = bigset_causal:merge_clocks(ToCausal2, FromCausal),
-    bigset_causal:tombstone_all(ToRemove, Causal0).
+    To#bigset{causal=bigset_causal:tombstone_all(ToRemove, Causal0),
+              keys=ToKeys2}.
     %% To#bigset{clock=bigset_clock:merge(ToClock2, FromClock), keys=ToKeys2,
     %%           set_tombstone=bigset_clock:merge(ToRemove, ToTS)}.
 
