@@ -122,6 +122,13 @@ merge_clocks(C1, C2) ->
     #bigset_causal{clock=bigset_clock:merge(clock(C1), clock(C2)),
                    tombstone=tombstone(C1)}.
 
+%% @doc merge clock `Clock' with clock of causal() `Causal'. Return
+%% `Causal' updated.
+-spec merge_clock(bigset_clock:clock(), causal()) ->
+                         causal().
+merge_clock(Clock, C=#bigset_causal{clock=Clock2}) ->
+    C#bigset_causal{clock=bigset_clock:merge(Clock, Clock2)}.
+
 %% @doc add all events in the `bigset_clock:clock()' `Tombstone' to
 %% the `causal()' `C's tombstone. Essentially a tombstone
 %% merge. returns `C' with updated tombstone. NOTE: expects that all

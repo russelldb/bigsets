@@ -46,7 +46,7 @@ update(Sender, {clock, Set, Sender}=Key, Value, State) ->
     %% Sender's clock, need this in handoff state, also store it
     SenderState = get_sender_state(Sender, State),
     SenderClock = bigset:from_bin(Value),
-    SenderState2 = SenderState#sender_state{clock=SenderClock, set=Set},
+    SenderState2 = SenderState#sender_state{clock=bigset_causal:clock(SenderClock), set=Set},
     State2 = update_sender_state(SenderState2, State),
     {[{put, Key, Value}],
      State2};
@@ -62,7 +62,9 @@ update(Sender, {end_key, Set}, _V, State) ->
     #state{id=Id, db=DB} = State,
     #sender_state{clock=SenderClock, tracker=Tracker, set=Set} = get_sender_state(Sender, State),
     ClockKey = bigset:clock_key(Set, Id),
-    LocalClock = bigset:get_clock(ClockKey, DB),
+    LocalCausal = bigset:get_clock(ClockKey, DB),
+    LocalClock = bigset_causal:clock(LocalCausal),
+
     %% This section takes care of those keys that Receiver has seen,
     %% but Sender has removed. i.e. keys that are not handed off, but
     %% their absence means something, and we don't want to read the
@@ -70,35 +72,34 @@ update(Sender, {end_key, Set}, _V, State) ->
 
     %% The events in the Sender's clock, not in Tracking Clock, that
     %% is all the dots that were not handed off by Sender, and
-    %% therefore Sender saw but has since removed
+    %% therefore Sender saw but has removed
     DelDots = bigset_clock:complement(SenderClock, Tracker),
 
     %% All the dots that Receiver had seen before hand off, but which
     %% the handing off node has deleted
     ToRemove = bigset_clock:intersection(DelDots, LocalClock),
 
-    SetTSKey= bigset:set_tombstone_key(Set, Id),
-    SetTombstone0 = bigset:get_clock(SetTSKey, DB),
-    SetTombstone = bigset_clock:merge(ToRemove, SetTombstone0),
-    LocalClock2 = bigset_clock:merge(LocalClock, SenderClock),
+    LocalCausal2 = bigset_causal:tombstone_all(ToRemove, LocalCausal),
+    LocalCausal3 = bigset_clock:merge_clock(SenderClock, LocalCausal2),
+    BinCausal = bigset:to_bin(LocalCausal3),
     State2 = remove_sender(Sender, State),
-    {[{put, ClockKey, LocalClock2},
-      {put, SetTSKey, SetTombstone}],
+
+    {[{put, ClockKey, BinCausal}],
      State2};
 update(Sender, Key, Value, State) ->
     %% Can only be an element key
     #sender_state{set=Set, tracker=Tracker} =  get_sender_state(Sender, State),
     #state{id=Id, db=DB} = State,
-    {element, Set, _E, Actor, Cntr, _TSB} = Key,
+    {element, Set, _E, Actor, Cntr} = Key,
     ClockKey = bigset:clock_key(Set, Id),
     LocalClock = bigset:get_clock(ClockKey, DB),
     Dot = {Actor, Cntr},
-    case bigset_clock:seen(LocalClock, Dot) of
+    case bigset_causal:seen(LocalClock, Dot) of
         true ->
             %% no op
             {[], State};
         false ->
-            Clock2 = bigset_clock:add_dot(Dot, LocalClock),
+            Clock2 = bigset_causal:add_dot(LocalClock, Dot),
             Tracker2 = bigset_clock:add_dot(Dot, Tracker),
             State2 = update_tracker(Tracker2, Sender, State),
             {[{put, ClockKey, bigset:to_bin(Clock2)},
