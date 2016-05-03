@@ -3,7 +3,10 @@
 -type actor() :: binary().
 -type counter() :: pos_integer().
 -type key() :: binary().
--type clock_key() :: {s, set(), clock}.
+-type decoded_key() :: clock_key() | element_key() | end_key().
+-type clock_key() :: {clock, set(), actor()}.
+-type end_key() :: {end_key, set()}.
+-type element_key() :: {element, set(), member(), actor(), non_neg_integer()}.
 %% TombStoneBit, 0 for added, 1 for removed.
 -type tsb() :: <<_:1>>.
 -type member_key() :: {s, set(), member(), actor(), counter(), tsb()}.

@@ -44,8 +44,8 @@ get_dot(Actor, {Clock, _Dots}) ->
 
 all_nodes({Clock, Dots}) ->
     %% NOTE the riak_dt_vclock:all_nodes/1 returns a sorted list
-    lists:umerge(riak_dt_vclock:all_nodes(Clock),
-                 ?DICT:fetch_keys(Dots)).
+    lists:usort(lists:merge(riak_dt_vclock:all_nodes(Clock),
+                 ?DICT:fetch_keys(Dots))).
 
 -spec merge(clock(), clock()) -> clock().
 merge({VV1, Seen1}, {VV2, Seen2}) ->

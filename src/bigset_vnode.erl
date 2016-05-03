@@ -108,9 +108,8 @@ init([Partition]) ->
     %% @TODO(rdb|question) Maybe this pool should be BIIIIG for many gets
     PoolSize = app_helper:get_env(bigset, worker_pool_size, ?DEFAULT_WORKER_POOL),
     BatchSize  = app_helper:get_env(bigset, batch_size, ?DEFAULT_BATCH_SIZE),
-    %% @TODO(rdb) is it really OK to pass that DB ref to another
-    %% module? I don't think so. Get the abstraction level right.
-    HoffState = bigset_handoff_receiver:new(VnodeId, DB),
+
+    HoffState = bigset_handoff_receiver:new(VnodeId),
     {ok, #state {data_dir=DataDir,
                  vnodeid=VnodeId,
                  partition=Partition,
@@ -205,21 +204,21 @@ handoff_cancelled(State) ->
 handoff_finished(_TargetNode, State) ->
     {ok, State}.
 
-handle_handoff_data(<<KeyLen:32/integer, Rest/binary>>, State) ->
-    #state{db=DB, hoff_state=HoffState} = State,
+handle_handoff_data(Data, State) ->
+    #state{db=DB, vnodeid=Id, hoff_state=HoffState} = State,
 
-    <<Key0:KeyLen/binary, Value/binary>> = Rest,
-    <<IDLen:32/little-unsigned-integer, Key1/binary>> = Key0,
-    <<Sender:IDLen/binary, Key/binary>> = Key1,
+    {Sender, Set, KeyValue} = decode_handoff_item(Data),
 
-    DecodedKey = bigset:decode_key(Key),
+    {FirstWrite, Clock} = bigset:get_clock(Set, Id, DB),
 
     {Writes, HoffState2} = bigset_handoff_receiver:update(Sender,
-                                                          DecodedKey,
-                                                          Value,
+                                                          KeyValue,
+                                                          Clock,
                                                           HoffState),
 
-    ok = eleveldb:write(DB, Writes, ?WRITE_OPTS),
+    Writes2 = add_end_key(FirstWrite, Set, Writes),
+
+    ok = eleveldb:write(DB, Writes2, ?WRITE_OPTS),
 
     {reply, ok, State#state{hoff_state=HoffState2}}.
 
@@ -572,3 +571,17 @@ handle_replication(Op, State) ->
     Writes2 = add_end_key(FirstWrite, Set, Writes),
     ok = eleveldb:write(DB, Writes2, ?WRITE_OPTS),
     {dw, Partition}.
+
+%% @private decode_handoff_item
+%% parse out the sender ID and key data
+-spec decode_handoff_item(binary()) -> {Sender :: binary(),
+                                        Set :: binary(),
+                                        Key :: tuple()}.
+decode_handoff_item(<<KeyLen:32/integer, Rest/binary>>) ->
+    <<Key0:KeyLen/binary, Value/binary>> = Rest,
+    <<IDLen:32/little-unsigned-integer, Key1/binary>> = Key0,
+    <<Sender:IDLen/binary, Key/binary>> = Key1,
+
+    DecodedKey = bigset:decode_key(Key),
+    Set = bigset:get_set(DecodedKey),
+    {Sender, Set, {DecodedKey, Value}}.

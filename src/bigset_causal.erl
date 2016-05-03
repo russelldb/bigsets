@@ -137,3 +137,21 @@ merge_clock(Clock, C=#bigset_causal{clock=Clock2}) ->
 -spec tombstone_all(bigset_clock:clock(), causal()) -> causal().
 tombstone_all(TSClock, C) ->
     C#bigset_causal{tombstone=bigset_clock:merge(TSClock, tombstone(C))}.
+
+-ifdef(TEST).
+new(Clock) ->
+    #bigset_causal{clock=Clock, tombstone=bigset_clock:fresh()}.
+
+new(Clock, Tombstone) ->
+    #bigset_causal{clock=Clock, tombstone=Tombstone}.
+
+set_clock(Clock, C) ->
+    C#bigset_causal{clock=Clock}.
+
+set_tombstone(TS, C) ->
+    C#bigset_causal{tombstone=TS}.
+
+set_clock_ts(Clock, TS, C) ->
+    C#bigset_causal{clock=Clock, tombstone=TS}.
+
+-endif.

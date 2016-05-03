@@ -4,6 +4,9 @@
 
 -compile([export_all]).
 
+-type binary_key() :: binary().
+-type key_tuple() :: clock_key() | end_key() | element_key().
+
 preflist(Set) ->
     Hash = riak_core_util:chash_key({bigset, Set}),
     riak_core_apl:get_apl(Hash, 3, bigset).
@@ -133,6 +136,10 @@ bm_read(Set, N) ->
      {min, lists:min(Times)},
      {avg, lists:sum(Times) div length(Times)}].
 
+
+%%% keys funs %%%%
+
+
 %% Key prefix is the common prefix of a key for the given set
 -spec key_prefix(Set :: binary()) -> Prefix :: binary().
 key_prefix(Set) when is_binary(Set) ->
@@ -157,19 +164,6 @@ set_tombstone_key(Set, Actor) ->
     <<Pref/binary,
       $d, %% means set tombstone (d 'cos > than c and < e)
       Actor/binary>>.
-
--spec get_clock(ClockKey::binary(), db()) -> bigset_clock:clock().
-get_clock(ClockKey, DB) ->
-    clock(eleveldb:get(DB, ClockKey, ?READ_OPTS)).
-
--spec clock(not_found | {ok, binary()}) -> bigset_clock:clock().
-clock(not_found) ->
-    %% @TODO(rdb|correct) -> is this _really_ OK, what if we _know_
-    %% (how?) the set exists, a missing clock is bad. At least have
-    %% actor epochs, eh?
-    {true, bigset_causal:fresh()};
-clock({ok, ClockBin}) ->
-    {false, bigset:from_bin(ClockBin)}.
 
 end_key(Set) ->
     %% an explicit end key that always sorts lowest
@@ -202,7 +196,6 @@ decode_key(<<SetLen:32/little-unsigned-integer, Bin/binary>>) ->
     <<Set:SetLen/binary, Rest/binary>> = Bin,
     decode_key(Rest, Set).
 
-
 decode_key(<<$c, Actor/binary>>, Set) ->
     {clock, Set, Actor};
 decode_key(<<$d, Actor/binary>>, Set) ->
@@ -219,6 +212,16 @@ decode_element(<<ElemLen:32/little-unsigned-integer, Rest/binary>>, Set) ->
             <<Actor:ActorLen/binary,
               Cnt:64/little-unsigned-integer>> = ActorEtc,
     {element, Set, Elem, Actor, Cnt}.
+
+%% @doc the opposite of decode_key/1, will return a binary key for the
+%% decoded key tuples.
+-spec encode_key(key_tuple()) -> binary_key().
+encode_key({clock, Set, Actor}) ->
+    clock_key(Set, Actor);
+encode_key({end_key, Set}) ->
+    end_key(Set);
+encode_key({element, Set, Element, Actor, Cnt}) ->
+    insert_member_key(Set, Element, Actor, Cnt).
 
 %% @doc dot_from_key extract a dot from key `K'. Returns a
 %% bisget_causal:dot().
@@ -244,6 +247,26 @@ insert_member_key(Set, Elem, Actor, Cnt) ->
       Actor:ActorLen/binary,
       Cnt:64/little-unsigned-integer
     >>.
+
+%%% clock funs %%%
+
+-spec get_clock(ClockKey::binary(), db()) -> {boolean(), bigset_clock:clock()}.
+get_clock(ClockKey, DB) when is_binary(ClockKey)  ->
+    clock(eleveldb:get(DB, ClockKey, ?READ_OPTS)).
+
+-spec get_clock(Set::binary(), ID::binary(), db()) -> {boolean(), bigset_clock:clock()}.
+get_clock(Set, Id, DB) ->
+    ClockKey = clock_key(Set, Id),
+    get_clock(ClockKey, DB).
+
+-spec clock(not_found | {ok, binary()}) -> {boolean(), bigset_clock:clock()}.
+clock(not_found) ->
+    %% @TODO(rdb|correct) -> is this _really_ OK, what if we _know_
+    %% (how?) the set exists, a missing clock is bad. At least have
+    %% actor epochs, eh?
+    {true, bigset_causal:fresh()};
+clock({ok, ClockBin}) ->
+    {false, bigset:from_bin(ClockBin)}.
 
 from_bin(B) ->
     binary_to_term(B).

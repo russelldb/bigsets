@@ -249,10 +249,6 @@ handoff(From, To) ->
     Causal0 = bigset_causal:merge_clocks(ToCausal2, FromCausal),
     To#bigset{causal=bigset_causal:tombstone_all(ToRemove, Causal0),
               keys=ToKeys2}.
-    %% To#bigset{clock=bigset_clock:merge(ToClock2, FromClock), keys=ToKeys2,
-    %%           set_tombstone=bigset_clock:merge(ToRemove, ToTS)}.
-
-
 
 %% @private just pull all the dots at this replica for element `E' as
 %% the context. Simulates a per-elem-ctx for now
