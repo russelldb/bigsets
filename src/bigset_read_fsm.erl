@@ -143,14 +143,21 @@ await_clocks({not_found, Partition, _From}, State) ->
     %% @TODO(rdb|ugly) eugh, maybe read_core should return the state,
     %% eh?
     case {bigset_read_core:not_found(Core2),
-          bigset_read_core:r_clocks(Core2)} of
-        {true, false} ->
+          bigset_read_core:r_clocks(Core2),
+          bigset_read_core:is_done(Core2)} of
+        {true, false, _} ->
             {next_state, reply, State#state{reply={error, not_found}}, 0};
-        {false, false} ->
+        {false, false, _} ->
             {next_state, await_clocks, State#state{logic=Core2}};
-        {false, true} ->
+        {false, true, false} ->
             Core3 = send_clock(Core2, State),
-            {next_state, await_elements, State#state{logic=Core3}}
+            {next_state, await_elements, State#state{logic=Core3}};
+        {false, true, true} ->
+            Core3 = send_clock(Core2, State),
+            FinalElements = bigset_read_core:finalise(Core3),
+            maybe_send_results(FinalElements, State),
+            Reply = done,
+            {next_state, reply, State#state{reply=Reply}, 0}
     end.
 
 send_clock(Core, State) ->
