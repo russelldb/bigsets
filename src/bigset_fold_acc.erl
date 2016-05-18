@@ -74,71 +74,11 @@ fold({Key, Value}, Acc=#fold_acc{not_found=true}) ->
         _ ->
             throw({break, Acc})
     end;
-fold({Key, _Val}, Acc=#fold_acc{not_found=false}) ->
+fold({Key, Val}, Acc=#fold_acc{not_found=false}) ->
     %% an element key? We've sent the clock (not_found=false)
-    #fold_acc{set=Set, key_prefix=Pref, prefix_len=PrefLen} = Acc,
-    case Key of
-        <<Pref:PrefLen/binary, $c, _Rest/binary>> ->
-            %% a clock for another actor, skip it
-            Acc;
-        <<Pref:PrefLen/binary, $e, Rest/binary>> ->
-            {element, Set, Element, Actor, Cnt} = bigset:decode_element(Rest, Set),
-            #fold_acc{set_tombstone=SetTombstone} = Acc,
-            case bigset_clock:seen(SetTombstone, {Actor, Cnt}) of
-                false ->
-                    add(Element, Actor, Cnt, Acc);
-                true ->
-                    %% a vnode deleted this key, so it is as though we
-                    %% don't have it, just skip it, it will be
-                    %% compacted out next round
-                    Acc
-            end;
-        _ ->
-            %% The end key
-            throw({break, Acc})
-    end.
-
-%% @TODO(rdb|docs) below comment is incorrect/out-of-date for this
-%% design
-
-%% @private For each element we most fold over all entries for that
-%% element. Entries for an element can be an add, or a remove (and if
-%% we ever get compaction working there maybe a special aggregrated
-%% tombstone too.) We merge all the Contexts of the entries (adds and
-%% removes) to get a context that represents all the "seen" additions
-%% for the element. We use the ctx to filter the dots in the Add
-%% entries. Each add entry that is not seen by the aggregaeted context
-%% "survives" and is in the local set.
-
-%% NOTE: for causal consistency with
-%% Action-At-A-Distance this all changes
-
-%% @TODO(rdb|refactor) abstract the accumulation logic for different
-%% behaviours (CC vs EC)
-add(Element, Actor, Cnt, Acc=#fold_acc{current_elem=Element}) ->
-    %% Same element, keep accumulating info
-    #fold_acc{current_dots=Dots} = Acc,
-    %% @TODO(rdb) consider binary <<Cnt, Actor>> as it needs no encoding
-    Acc#fold_acc{current_dots=[{Actor, Cnt} | Dots]};
-add(Element, Actor, Cnt, Acc=#fold_acc{current_elem=_}) ->
-    %% New element, maybe store the old one
-    Acc2 = store_element(Acc),
-    Acc3 = maybe_flush(Acc2),
-    Acc3#fold_acc{current_elem=Element,
-                  current_dots=[{Actor, Cnt}]}.
-
-%% @private add an element to the accumulator.
-store_element(Acc=#fold_acc{current_elem=undefined}) ->
-    Acc;
-store_element(Acc) ->
-    #fold_acc{current_elem=Elem,
-              current_dots=Dots,
-              elements=Elements,
-              size=Size} = Acc,
-
-    Acc#fold_acc{elements=[{Elem, Dots} | Elements],
-                 size=Size+1}.
-
+    #fold_acc{elements=E, size=S} = Acc,
+    maybe_flush(Acc#fold_acc{elements=[{Key, binary_to_term(Val)} | E],
+                             size=S+1}).
 
 %% @private if the buffer is full, flush!
 maybe_flush(Acc=#fold_acc{size=Size, buffer_size=Size}) ->
@@ -180,8 +120,7 @@ finalise(Acc=#fold_acc{not_found=true}) ->
     send(not_found, Acc),
     done(Acc);
 finalise(Acc) ->
-    AccFinal = store_element(Acc),
-    done(AccFinal).
+    done(Acc).
 
 %% @private let the caller know we're done.
 done(Acc0) ->

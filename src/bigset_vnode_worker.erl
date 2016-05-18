@@ -56,7 +56,10 @@ handle_work({get, Id, DB, Set}, Sender, State) ->
     FirstKey = bigset:clock_key(Set, Id),
     EndKey = bigset:end_key(Set),
     Buffer = bigset_fold_acc:new(Set, Sender, BatchSize, Partition, Id),
-    FoldOpts = [{start_key, FirstKey}, {last_key, EndKey} | ?RFOLD_OPTS],
+    FoldOpts = [{start_key, FirstKey},
+                {last_key, EndKey},
+                {bigsets, true},
+                {vnode, Id} | ?RFOLD_OPTS],
 
     try
         AccFinal =
