@@ -156,10 +156,10 @@ clock_key(Set, Actor) ->
       $c, %% means clock
       Actor/binary>>.
 
-%%% codec See docs on key scheme, use Actor name in handoff filter key
-%%% so %% AAE/replication of filter is safe. Like a decomposed VV, an
-%%% actor may only update it's own handoff filter
-set_tombstone_key(Set, Actor) ->
+%%% codec See docs on key scheme, use Actor name in tombstone key
+%%% so AAE/replication of filter is safe. Like a decomposed VV, an
+%%% actor may only update it's own tombstone
+tombstone_key(Set, Actor) ->
     Pref = key_prefix(Set),
     <<Pref/binary,
       $d, %% means set tombstone (d 'cos > than c and < e)
@@ -187,6 +187,13 @@ get_set(<<SetLen:32/little-unsigned-integer, Rest/binary>>) ->
     Set;
 get_set(DecodedKey) when is_tuple(DecodedKey) ->
     element(2, DecodedKey).
+
+%% @doc get the set from the key and return the rest of the key as a
+%% sub binary
+-spec decode_set(binary()) -> {binary(), binary()}.
+decode_set(<<SetLen:32/little-unsigned-integer, Rest/binary>>) ->
+    <<Set:SetLen/binary, Key/binary>> = Rest,
+    {Set, Key}.
 
 %% @doc
 -spec decode_key(Key :: binary()) -> {clock, set(), actor()} |
@@ -224,8 +231,8 @@ encode_key({element, Set, Element, Actor, Cnt}) ->
     insert_member_key(Set, Element, Actor, Cnt).
 
 %% @doc dot_from_key extract a dot from key `K'. Returns a
-%% bisget_causal:dot().
--spec dot_from_key(Key :: binary()) -> bigset_causal:dot().
+%% bisget_clock:dot().
+-spec dot_from_key(Key :: binary()) -> bigset_clock:dot().
 dot_from_key(K) ->
     {element, _S, _E, Actor, Cnt} = decode_key(K),
     {Actor, Cnt}.
@@ -250,11 +257,25 @@ insert_member_key(Set, Elem, Actor, Cnt) ->
 
 %%% clock funs %%%
 
+%% @doc get the tombstone at `TombstoneKey' from leveldb instance
+%% `DB'. Returns a `bigset_clock:clock()'
+-spec get_tombstone(TombstoneKey::binary(), db()) -> bigset_clock:clock().
+get_tombstone(TombstoneKey, DB) ->
+    {_, TS} = get_clock(TombstoneKey, DB),
+    TS.
+
+%% @doc get the actor `Id's tombstone for `Set' from leveldb instance
+%% `DB'. Returns a `bigset_clock:clock()'
+-spec get_tombstone(set(), actor(), db()) -> bigset_clock:clock().
+get_tombstone(Set, Id, DB) ->
+    TombstoneKey = tombstone_key(Set, Id),
+    get_tombstone(TombstoneKey, DB).
+
 -spec get_clock(ClockKey::binary(), db()) -> {boolean(), bigset_clock:clock()}.
 get_clock(ClockKey, DB) when is_binary(ClockKey)  ->
     clock(eleveldb:get(DB, ClockKey, ?READ_OPTS)).
 
--spec get_clock(Set::binary(), ID::binary(), db()) -> {boolean(), bigset_clock:clock()}.
+-spec get_clock(set(), actor(), db()) -> {boolean(), bigset_clock:clock()}.
 get_clock(Set, Id, DB) ->
     ClockKey = clock_key(Set, Id),
     get_clock(ClockKey, DB).
@@ -264,7 +285,7 @@ clock(not_found) ->
     %% @TODO(rdb|correct) -> is this _really_ OK, what if we _know_
     %% (how?) the set exists, a missing clock is bad. At least have
     %% actor epochs, eh?
-    {true, bigset_causal:fresh()};
+    {true, bigset_clock:fresh()};
 clock({ok, ClockBin}) ->
     {false, bigset:from_bin(ClockBin)}.
 

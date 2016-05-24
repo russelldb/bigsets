@@ -109,7 +109,7 @@ init([Partition]) ->
     PoolSize = app_helper:get_env(bigset, worker_pool_size, ?DEFAULT_WORKER_POOL),
     BatchSize  = app_helper:get_env(bigset, batch_size, ?DEFAULT_BATCH_SIZE),
 
-    HoffState = bigset_handoff_receiver:new(VnodeId),
+    HoffState = bigset_handoff:new(VnodeId),
     {ok, #state {data_dir=DataDir,
                  vnodeid=VnodeId,
                  partition=Partition,
@@ -207,20 +207,54 @@ handoff_finished(_TargetNode, State) ->
 handle_handoff_data(Data, State) ->
     #state{db=DB, vnodeid=Id, hoff_state=HoffState} = State,
 
-    {Sender, Set, KeyValue} = decode_handoff_item(Data),
+    {Sender, Set, {Key, Value}} = decode_handoff_item(Data),
 
-    {FirstWrite, Clock} = bigset:get_clock(Set, Id, DB),
+    ClockKey = bigset:clock_key(Set, Id),
+    {FirstWrite, Clock} = bigset:get_clock(ClockKey, DB),
 
-    {Writes, HoffState2} = bigset_handoff_receiver:update(Sender,
-                                                          KeyValue,
-                                                          Clock,
-                                                          HoffState),
+    {Writes, NewHoffState} =
+        case bigset:decode_key(Key, Set) of
+            {clock, Set, Id} ->
+                %% my clock, no-op
+                {[], HoffState};
+            {clock, Set, Sender} ->
+                SenderClock = bigset:from_bin(Value),
+                HoffState2= bigset_handoff:sender_clock(Set, Sender, SenderClock, HoffState),
+                {[{put, Key, Value}], HoffState2};
+            {clock, Set, _Other} ->
+                {[], HoffState};
+            {set_tombstone, Set, Id} ->
+                {[], HoffState};
+            {set_tombstone, Set, _Other} ->
+                {[{put, Key, Value}], HoffState};
+            {element, Set, _E, Act, Cnt} ->
+                Dot = {Act, Cnt},
+                HoffState2 = bigset_handoff:add_dot(Set, Sender, Dot, HoffState),
+                case bigset_clock:seen(Dot, Clock) of
+                    true ->
+                        {[], HoffState2};
+                    false ->
+                        Clock2 = bigset_clock:add_dot(Dot, Clock),
+                        {[{put, ClockKey, Clock2},
+                          {put, Key, Value}],
+                         HoffState2}
+                end;
+            {end_key, Set}  ->
+                TombstoneKey = bigset:tombstone_key(Set, Id),
+                TS = bigset:get_tombstone(TombstoneKey, DB),
+                {C2, TS2, HoffState2} = bigset_handoff:end_key(Sender,
+                                                               Clock,
+                                                               TS),
+                {[{put, ClockKey, C2},
+                  {put, TombstoneKey, TS2}],
+                 HoffState2}
+        end,
 
     Writes2 = add_end_key(FirstWrite, Set, Writes),
 
     ok = eleveldb:write(DB, Writes2, ?WRITE_OPTS),
 
-    {reply, ok, State#state{hoff_state=HoffState2}}.
+    {reply, ok, State#state{hoff_state=NewHoffState}}.
 
 is_empty(State) ->
     #state{db=DB} = State,
@@ -359,9 +393,9 @@ clear_vnode_id(Partition) ->
 -spec gen_inserts(Set :: binary(),
                   Inserts :: [add()],
                   Actor :: binary(),
-                  Clock :: bigset_causal:causal(),
+                  Clock :: bigset_clock:clock(),
                   CtxDecoder :: bigset_ctx_codec:decoder()) ->
-                         {NewClock :: bigset_causal:causal(),
+                         {NewClock :: bigset_clock:clock(),
                           Writes :: [level_put()],
                           ReplicationDeltas :: [delta_element()]}.
 gen_inserts(Set, Inserts, Id, Clock, CtxDecoder) ->
@@ -373,17 +407,35 @@ gen_inserts(Set, Inserts, Id, Clock, CtxDecoder) ->
                         %% way in adds another loop over the inserts.
                         {Element, InsertCtx} = element_ctx(Insert, CtxDecoder),
                         %% Generate a dot per insert
-                        {{Id, Cnt}=_Dot, C2} = bigset_causal:increment(Id, C),
+                        {{Id, Cnt}=_Dot, C2} = bigset_clock:increment(Id, C),
                         ElemKey = bigset:insert_member_key(Set, Element, Id, Cnt),
-                        C3 = bigset_causal:tombstone_dots(InsertCtx, C2),
+                        {C3, DelKeys} = remove_seen(Set, Element, InsertCtx, C2),
                         {
                           C3, %% New Clock
-                          [{put, ElemKey, <<>>} | W], %% To write
+                          [DelKeys,{put, ElemKey, <<>>} | W], %% To write
                           [{ElemKey, InsertCtx} | R] %% To replicate
                         }
                 end,
                 {Clock, [], []},
                 Inserts).
+
+%% @private any dot in `Dots' seen by `Clock' may be a key on disk,
+%% generate a delete key for it. Otherwise, add the dot to `Clock' so
+%% we never write that key.
+remove_seen(Set, ElemKey, Dots, Clock) ->
+    lists:foldl(fun({A,C}=Dot, {ClockAcc, DelKeys}) ->
+                        case bigset_clock:seen(Dot, ClockAcc) of
+                            true ->
+                                Key = bigset:insert_member_key(Set, ElemKey, A, C),
+                                {ClockAcc,
+                                 [{delete, Key} | DelKeys]};
+                            false ->
+                                {bigset_clock:add_dot(Dot, ClockAcc),
+                                 DelKeys}
+                        end
+                end,
+                {Clock, []},
+                Dots).
 
 %% @priv return the {element, context} pair. Possible context values
 %% are: `undefined' which means "no context' making removes a no-op
@@ -539,14 +591,13 @@ handle_coord_write(Op, State) ->
     CtxDecoder = ctx_decoder(Ctx),
 
     {Clock2, InsertWrites, InsertReplicate} = gen_inserts(Set, Inserts, Id, Clock, CtxDecoder),
-
-    {Clock3, RemoveReplicate} = gen_removes(Set, Removes, Clock2, CtxDecoder),
+    {Clock3, RemoveWrites, RemoveReplicate} = gen_removes(Set, Removes, Clock2, CtxDecoder),
 
     BinClock = bigset:to_bin(Clock3),
-    Writes = lists:append([[{put, ClockKey, BinClock}], InsertWrites]),
-    Writes2 = add_end_key(FirstWrite, Set, Writes),
+    Writes0 = lists:flatten([{put, ClockKey, BinClock}, InsertWrites, RemoveWrites]),
+    Writes = add_end_key(FirstWrite, Set, Writes0),
 
-    ok = eleveldb:write(DB, Writes2, ?WRITE_OPTS),
+    ok = eleveldb:write(DB, Writes, ?WRITE_OPTS),
 
     {dw, Partition, InsertReplicate, RemoveReplicate}.
 
@@ -576,12 +627,12 @@ handle_replication(Op, State) ->
 %% parse out the sender ID and key data
 -spec decode_handoff_item(binary()) -> {Sender :: binary(),
                                         Set :: binary(),
-                                        Key :: tuple()}.
+                                        SubKey :: binary(),
+                                        Value :: binary()}.
 decode_handoff_item(<<KeyLen:32/integer, Rest/binary>>) ->
     <<Key0:KeyLen/binary, Value/binary>> = Rest,
     <<IDLen:32/little-unsigned-integer, Key1/binary>> = Key0,
     <<Sender:IDLen/binary, Key/binary>> = Key1,
 
-    DecodedKey = bigset:decode_key(Key),
-    Set = bigset:get_set(DecodedKey),
-    {Sender, Set, {DecodedKey, Value}}.
+    {Set, SubKey} = bigset:decode_set(Key),
+    {Sender, Set, SubKey, Value}.

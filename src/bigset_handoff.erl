@@ -5,7 +5,7 @@
 %%% @end
 %%% Created : 18 Jan 2016 by Russell Brown <russelldb@basho.com>
 
--module(bigset_handoff_receiver).
+-module(bigset_handoff).
 
 -compile(export_all).
 
@@ -17,7 +17,6 @@
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
-
 
 -record(state, {id :: binary(),
                 senders = orddict:new()
@@ -34,67 +33,52 @@
           tracker=bigset_clock:fresh() :: bigset_clock:clock()
          }).
 
+-type state() :: #state{}.
+
 new(Id) ->
     #state{id=Id}.
 
-%% @TODO(rdb|refactor) seems wrong that keys are encapsulated in
-%% bigset.erl functions but the matching here depends on the
-%% that. Maybe a case statement on type case bigset:key_type(Key) of
-%% sort of thing?  @doc returns a list of writes for the vnode, and an
-%% updated handoff state. Should it return a boolean(), state, and an
-%% optional updated clock?
-update(_Sender, {{clock, _Set, Actor}, _Value}, _Clock, State=#state{id=Actor}) ->
-    %% My clock passed back to me, No Op
-    {[], State};
-update(Sender, {{clock, Set, Sender}=DKey, Value}, _Clock, State) ->
-    %% Sender's clock, need this in handoff state, also store it
+sender_clock(Set, Sender, SenderClock, State) ->
     SenderState = get_sender_state(Sender, State),
-    SenderClock = bigset:from_bin(Value),
-    SenderState2 = SenderState#sender_state{clock=bigset_causal:clock(SenderClock),
+    SenderState2 = SenderState#sender_state{clock=SenderClock,
                                             set=Set},
-    State2 = update_sender_state(SenderState2, State),
-    Key = bigset:encode_key(DKey),
-    {[{put, Key, Value}],
-     State2};
-update(_Sender, {{clock, _Set, _Actor}=DKey, Value}, _Clock, State) ->
-    %% any other clock
-    Key = bigset:encode_key(DKey),
-    {[{put, Key, Value}],
-     State};
-update(_Sender, {{set_tombstone, _Set, Actor}, _Value}, _Clock, State=#state{id=Actor}) ->
-    %% My set tombstone passed back to me, No Op
-    {[], State};
-update(_Sender, {{set_tombstone, _Set, _Actor}=Key, Value}, _Clock, State) ->
-    %% any other tombstone
-    {[{put, Key, Value}],
-     State};
-update(Sender, {{element, Set, _E, Actor, Cntr}=DKey, Value}, LocalClock, State) ->
+    update_sender_state(SenderState2, State).
+
+add_dot(Set, Sender, Dot, State) ->
     #sender_state{set=Set, tracker=Tracker} =  get_sender_state(Sender, State),
-    #state{id=Id} = State,
-
-    ClockKey = bigset:clock_key(Set, Id),
-    Dot = {Actor, Cntr},
     Tracker2 = bigset_clock:add_dot(Dot, Tracker),
-    State2 = update_tracker(Tracker2, Sender, State),
+    update_tracker(Tracker2, Sender, State).
 
-    case bigset_causal:seen(Dot, LocalClock) of
-        true ->
-            {[], State2};
-        false ->
-            Key = bigset:encode_key(DKey),
-            Clock2 = bigset_causal:add_dot(Dot, LocalClock),
-            {[{put, ClockKey, bigset:to_bin(Clock2)},
-              {put, Key, Value}],
-             State2}
-    end;
-update(Sender, {{end_key, Set}, _V}, LocalCausal, State) ->
+%% @doc the `end_key' for a bigset means we can calculate from the
+%% tracker and sender_clock what dots have been removed by the sender
+%% and must therefore be removed by the receiver. Returns the new
+%% Tombstone and Clock. Events seen by the receiver and removed by the
+%% sender will be added to the Tombstone. Events unseen by the
+%% receiver but removed by the sender will be added to the clock (to
+%% ensure they're never written.)
+
+%%  @TODO NOTE: it is very possible that we add to the tombstone some
+%%  event that has already been compacted out and therefore removed
+%%  from the receivers tombstone. As yet we have no way of recording
+%%  this efficiently, which means we may have a tombstone that
+%%  accretes garbage over time. However, it depends on how compaction
+%%  works, if compaction coves the _whole set_ then it can shrink the
+%%  tombstone by simply subtracting the tombstone at the start of
+%%  compaction from the one on disk at the end.
+-spec end_key(set(), actor(),
+              bigset_clock:clock(),
+              bigset_clock:clock(),
+              state()) ->
+                     {Clock :: bigset_clock:clock(),
+                      Tombstone :: bigset_clock:clock(),
+                      state()}.
+end_key(Set, Sender, LocalClock, Tombstone, State) ->
     %% end of the set, generate the set tombstone to write, and clear
     %% the state
-    #state{id=Id} = State,
     #sender_state{clock=SenderClock,
                   tracker=Tracker,
                   set=Set} = get_sender_state(Sender, State),
-    LocalClock = bigset_causal:clock(LocalCausal),
+
 
     %% This section takes care of those keys that Receiver has seen,
     %% but Sender has removed. i.e. keys that are not handed off, but
@@ -110,15 +94,36 @@ update(Sender, {{end_key, Set}, _V}, LocalCausal, State) ->
     %% the handing off node has deleted
     ToRemove = bigset_clock:intersection(DelDots, LocalClock),
 
-    LocalCausal2 = bigset_causal:tombstone_all(ToRemove, LocalCausal),
-    LocalCausal3 = bigset_causal:merge_clock(SenderClock, LocalCausal2),
-    BinCausal = bigset:to_bin(LocalCausal3),
+    TS2 = bigset_clock:merge(ToRemove, Tombstone),
+    Clock2 = bigset_clock:merge(SenderClock, LocalClock),
+
     State2 = remove_sender(Sender, State),
+    {Clock2, TS2, State2}.
 
-    ClockKey = bigset:clock_key(Set, Id),
-
-    {[{put, ClockKey, BinCausal}],
-     State2}.
+%% @doc add the dots in `Dots' to the tombstone-clock or the set-clock
+%% depending on whether they're seen or not. Seen dots go on the
+%% tombstone (they need dropping from storage) unseen just go on the
+%% clock (so they never get written.). Returns updated clock and
+%% tombstone with `Dots' added.  @TODO @NOTE we may very well be adding dots
+%% to the tombstone that have been removed from the tombstone by a
+%% compaction. These dots must somehow be removed from the
+%% set-tombstone, maybe by a sweep/full-set-read
+-spec tombstone_dots([bigset_clock:dot()],
+                     {Clock::bigset_clock:clock(),
+                      Tombstone::bigset_clock:clock()}) ->
+                            {Clock::bigset_clock:clock(),
+                             Tombstone::bigset_clock:clock()}.
+tombstone_dots(Dots, {Clock, Tombstone}) ->
+    lists:foldl(fun(Dot, {SC, TS}) ->
+                        case bigset_clock:seen(SC, Dot) of
+                            true ->
+                                {SC, bigset_clock:add_dot(Dot, TS)};
+                            false ->
+                                {bigset_clock:add_dot(Dot, SC), TS}
+                        end
+                end,
+                {Clock, Tombstone},
+                Dots).
 
 remove_sender(Sender, State) ->
     #state{senders=Senders} = State,
@@ -146,100 +151,38 @@ get_sender_state(ID, Senders) ->
 get_receiver(#state{id=ID}) ->
     ID.
 
-
 -ifdef(TEST).
 
 -define(SET, <<"set">>).
 -define(REC, <<"receiver">>).
 -define(SENDER, <<"sender">>).
 
-my_clock_test() ->
-    State = new(?REC),
-    ?assertEqual({[], State}, update(<<"any">>, {{clock, ?SET, ?REC}, <<"v">>}, bigset_causal:fresh(), State)).
-
 sender_clock_test() ->
-    Key = {clock, ?SET, ?SENDER},
-    BinKey = bigset:encode_key(Key),
     State = new(?REC),
     SenderClock = {[{?SENDER, 3}, {b, 4}, {c, 4}], [{c,[7, 8]}]},
-    SenderCausal = bigset_causal:new(SenderClock),
-    HandOffValue = bigset:to_bin(SenderCausal),
-    {Writes, NewState} = update(?SENDER, {Key, HandOffValue}, bigset_causal:fresh(), State),
-
-    ?assertEqual([{put, BinKey, HandOffValue}], Writes),
+    NewState = sender_clock(?SET, ?SENDER, SenderClock, State),
     SenderState = get_sender_state(?SENDER, NewState),
     ?assertMatch(#sender_state{clock=SenderClock, set=?SET}, SenderState).
 
-other_clock_test() ->
-    Other = <<"other">>,
-    Key = {clock, ?SET, Other},
-    BinKey = bigset:encode_key(Key),
+add_dot_test() ->
     State = new(?REC),
-    OtherClock = {[{<<"other">>, 3}, {b, 4}, {c, 4}], [{c,[7, 8]}]},
-    OtherCausal = bigset_causal:new(OtherClock),
-    HandOffValue = bigset:to_bin(OtherCausal),
-    {Writes, NewState} = update(?SENDER, {Key, HandOffValue}, bigset_causal:fresh(), State),
-
-    ?assertEqual([{put, BinKey, HandOffValue}], Writes),
-    ?assertEqual(State, NewState).
-
-seen_element_test() ->
-    Key = {element, ?SET, <<"e">>, ?REC, 1},
-    MyClock = {[{?REC, 3}, {?SENDER, 4}, {<<"other">>, 4}], [{<<"other">>,[7, 8]}]},
-    MyCausal = bigset_causal:new(MyClock),
-    ElementValue = <<>>,
-    State = new(?REC),
-
+    Dot = {?SENDER, 11},
     SenderClock = {[{?SENDER, 3}, {b, 4}, {c, 4}], [{c,[7, 8]}]},
-    SenderCausal = bigset_causal:new(SenderClock),
-    HandOffValue = bigset:to_bin(SenderCausal),
-
-    {_Writes, NewState} = update(?SENDER, {{clock, ?SET, ?SENDER}, HandOffValue}, bigset_causal:fresh(), State),
-
-    {ElementWrites, NewState2} = update(?SENDER, {Key, ElementValue}, MyCausal, NewState),
-    ?assertEqual([], ElementWrites),
-    %% @TODO this is wrong, tracker should still be updated!!
-    ?assertNotEqual(NewState, NewState2),
-    SenderState = get_sender_state(?SENDER, NewState2),
-    #sender_state{tracker=Tracker} = SenderState,
-    ?assertEqual({[{?REC, 1}], []}, Tracker).
-
-unseen_element_test() ->
-    Key = {element, ?SET, <<"e">>, ?SENDER, 11},
-    MyClock = {[{?REC, 3}, {?SENDER, 4}, {<<"other">>, 4}], [{<<"other">>,[7, 8]}]},
-    MyCausal = bigset_causal:new(MyClock),
-    ElementValue = <<>>,
-    State = new(?REC),
-
-    SenderClock = {[{?SENDER, 3}, {b, 4}, {c, 4}], [{c,[7, 8]}]},
-    SenderCausal = bigset_causal:new(SenderClock),
-    HandOffValue = bigset:to_bin(SenderCausal),
 
     %% initialise sender state
-    {_Writes, NewState} = update(?SENDER, {{clock, ?SET, ?SENDER}, HandOffValue}, bigset_causal:fresh(), State),
+    NewState = sender_clock(?SET, ?SENDER, SenderClock, State),
 
-    {ElementWrites, NewState2} = update(?SENDER, {Key, ElementValue}, MyCausal, NewState),
+    NewState2 = add_dot(?SET, ?SENDER, Dot, NewState),
 
     SenderState = get_sender_state(?SENDER, NewState2),
     #sender_state{tracker=Tracker} = SenderState,
     %% tracker must have new dot
-    ?assertEqual({[], [{?SENDER, [11]}]}, Tracker),
-
-    %% Unpack writes and verify clock went up
-    ClockKey = bigset:clock_key(?SET, ?REC),
-    {value, {put, ClockKey, BinClock}, [{put, EKey, EVal}]} = lists:keytake(ClockKey, 2, ElementWrites),
-    NewClock = bigset:from_bin(BinClock),
-    ExpectedClock = bigset_causal:add_dot({?SENDER, 11}, MyCausal),
-    ?assertEqual(ExpectedClock, NewClock),
-    %% check that key/val is as expected
-    ?assertEqual(<<>>, EVal),
-    ?assertEqual(bigset:encode_key(Key), EKey).
+    ?assertEqual({[], [{?SENDER, [11]}]}, Tracker).
 
 %% @TODO(rdb|refactor) not overly happy with this, would prefer eqc,
 %% but yet to manage it.
 end_key_test() ->
     %% NOTE: clocks must be sorted as bigset_clock expects orddicts
-    Key = {end_key, ?SET},
     MyClock = {[
                 {<<"other1">>, 4},
                 {?REC, 10},
@@ -249,8 +192,6 @@ end_key_test() ->
                 {<<"other1">>, [7, 8]}
                ]
               },
-    MyCausal = bigset_causal:new(MyClock),
-    Value = <<>>,
 
     %% We want a mix here of things unseen by the receiver, and things
     %% seen. We want to have removed some things seen by the receiver
@@ -286,18 +227,13 @@ end_key_test() ->
                                 clock=SenderClock,
                                 tracker=Tracker},
 
-    ClockKey = bigset:clock_key(?SET, ?REC),
 
     State = update_sender_state(SenderState, new(?REC)),
     %% FINALLY! run the function
-    {Writes, FinalState} = update(?SENDER, {Key, Value}, MyCausal, State),
+    {ActualClock, ActualTombstone, FinalState} = end_key(?SET, ?SENDER, MyClock, bigset_clock:fresh(), State),
 
-    ?assertMatch([{put, ClockKey, _}], Writes),
-    [{put, _, BinCausal}] = Writes,
-    FinalCausal = bigset:from_bin(BinCausal),
-
-    ?assertEqual(FinalClock, bigset_causal:clock(FinalCausal)),
-    ?assertEqual(FinalTombstone, bigset_causal:tombstone(FinalCausal)),
+    ?assertEqual(FinalClock, ActualClock),
+    ?assertEqual(FinalTombstone, ActualTombstone),
     ?assertEqual(new(?REC), FinalState).
 
 -endif.
