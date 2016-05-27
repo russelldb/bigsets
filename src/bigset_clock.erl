@@ -11,9 +11,13 @@
 
 -export_type([clock/0, dot/0]).
 
+-ifdef(EQC).
+-include_lib("eqc/include/eqc.hrl").
+-endif.
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
+
 
 %% lazy inefficient dot cloud of dict Actor->[count()]
 -type clock() :: {riak_dt_vclock:vclock(), [riak_dt:dot()]}.
@@ -24,6 +28,9 @@
 -spec fresh() -> clock().
 fresh() ->
     {riak_dt_vclock:fresh(), ?DICT:new()}.
+
+fresh({Actor, Cnt}) ->
+    {riak_dt_vclock:fresh(Actor, Cnt), ?DICT:new()}.
 
 %% @doc increment the entry in `Clock' for `Actor'. Return the new
 %% Clock, and the `Dot' of the event of this increment. Works because
@@ -56,6 +63,11 @@ merge({VV1, Seen1}, {VV2, Seen2}) ->
                        Seen1,
                        Seen2),
     compress_seen(VV, Seen).
+
+merge(Clocks) ->
+    lists:foldl(fun merge/2,
+                fresh(),
+                Clocks).
 
 %% @doc make a bigset clock from a version vector
 -spec from_vv(riak_dt_vclock:vclock()) -> clock().
@@ -222,6 +234,7 @@ intersection(DotCloud, Clock) ->
 %% events. Generates a dict that represents all the events in A that
 %% are not in B. We actually assume that B is a subset of A, so we're
 %% talking about B's complement in A.
+%% Returns a dot-cloud
 complement({AVV, ADC}=A, {BVV, BDC}) ->
     %% This is horrendously ineffecient, we need to use math/bit
     %% twiddling to find a better way.
@@ -368,5 +381,106 @@ subtract_seen_test() ->
     DotList3  = [{c, 99}, {q, 1}],
     ?assertEqual([{q, 1}], subtract_seen(Clock2, DotList3)).
 
+
+-endif.
+
+-ifdef(EQC).
+
+prop_merge_clocks() ->
+    ?FORALL(Events, gen_all_system_events(),
+            ?FORALL(Clocks, gen_clocks(Events),
+                    begin
+                        Merged = bigset_clock:merge([Clock || {_Actor, Clock} <- Clocks]),
+                        equals({Events, []}, Merged)
+                    end)).
+
+prop_intersection() ->
+    ?FORALL(Events, gen_all_system_events(2),
+            ?FORALL([{_, Clock1}, {_, Clock2}], gen_clocks(Events),
+                    begin
+                        DC = clock_to_dotcloud(Clock1),
+                        Res = clock_to_set(intersection(DC, Clock2)),
+                        Set1 = clock_to_set(Clock1),
+                        Set2 = clock_to_set(Clock2),
+                        Expected = ordsets:intersection(Set1, Set2),
+                        equals(Expected, Res)
+                    end)).
+
+prop_complement() ->
+    ?FORALL(Events, gen_all_system_events(1),
+            ?FORALL([{_, Clock1}], gen_clocks(Events),
+                    ?FORALL(Clock2, gen_sub_clock(Clock1),
+                            begin
+                                Res = dot_cloud_to_set(complement(Clock1, Clock2)),
+                                Set1 = clock_to_set(Clock1),
+                                Set2 = clock_to_set(Clock2),
+                                Expected = ordsets:subtract(Set1, Set2),
+                                equals(Expected, Res)
+                            end))).
+
+clock_to_dotcloud({VV, DC}) ->
+    lists:foldl(fun({Act, Cnt}, Acc) ->
+                        [{Act, lists:umerge(lists:seq(1, Cnt), proplists:get_value(Act, DC, []))} | Acc]
+                end,
+                [Entry || {Act, _}=Entry <- DC,
+                          not lists:keymember(Act, 1, VV)],
+                VV).
+
+clock_to_set(Clock) ->
+    DC = clock_to_dotcloud(Clock),
+    dot_cloud_to_set(DC).
+
+set_to_clock(Set) ->
+    DC = set_to_dotcloud(Set),
+    compress_seen([], DC).
+
+set_to_dotcloud(Set) ->
+    ordsets:fold(fun({Act, Cnt}, Acc) ->
+                         orddict:update(Act, fun(L) ->
+                                                     lists:umerge(L, [Cnt]) end,
+                                        [Cnt],
+                                        Acc)
+                 end,
+                 orddict:new(),
+                 Set).
+
+dot_cloud_to_set(DC) ->
+    ordsets:from_list([{Act, Event} || {Act, Events} <- DC,
+                                     Event <- Events]).
+
+gen_clocks() ->
+    ?LET(Events, gen_all_system_events(),
+         gen_clocks(Events)).
+
+gen_clocks(Events) ->
+    [{Actor, gen_clock(Me, Events)} || {Actor, _}=Me <- Events].
+
+gen_clock(Me, Events) ->
+    ?LET(ClockMembers, sublist(Events),
+         ?LET(Entries, [bigset_clock:fresh(Me) | [gen_entry(Event) || Event <- ClockMembers,
+                                    Event /= Me]],
+              bigset_clock:merge(Entries))).
+
+gen_sub_clock(Clock) ->
+    Set = clock_to_set(Clock),
+    ?LET(SubSet, sublist(ordsets:to_list(Set)),
+         set_to_clock(ordsets:from_list(SubSet))).
+
+gen_entry({Actor, Max}) ->
+    ?LET(Events, non_empty(sublist(lists:seq(1, Max))),
+         entry_from_event_list(Actor, Events)).
+
+entry_from_event_list(Actor, Events) ->
+    bigset_clock:compress_seen(riak_dt_vclock:fresh(), [{Actor, Events}]).
+
+%% @priv generates the single system wide version vector that
+%% describes all events at a moment in time. Imagine a snapshot of a
+%% distributed system, each node's events are contiguous, this is that
+%% clock. We can use it to generate a valid bigset system state.
+gen_all_system_events() ->
+    ?LET(Actors, choose(1, 10), gen_all_system_events(Actors)).
+
+gen_all_system_events(Actors) ->
+     [{<<Actor>> , choose(1, 100)} || Actor <- lists:seq(1, Actors)].
 
 -endif.

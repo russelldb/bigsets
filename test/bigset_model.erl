@@ -50,38 +50,51 @@ new_mbs() ->
                  {delta(), bigset()}.
 add(Element, ID, Bigset) ->
     #bigset{causal=Causal, keys=Keys} = Bigset,
-    {{ID, Cnt}, C2} = bigset_causal:increment(ID, Causal),
-    Key = {Element, ID, Cnt},
     %% In the absence of a client context and AAAD, use the dots at
     %% the coordinating replica as the context of the add operation,
     %% any 'X' seen at this node will be removed by an add of an 'X'
-    Ctx = current_dots(Element, Keys),
+    Ctx = current_dots(Element, Keys, Causal),
+    add(Element, ID, Ctx, Bigset).
+
+add(Element, ID, Ctx, Bigset) ->
+    #bigset{causal=Causal, keys=Keys} = Bigset,
+    {{ID, Cnt}, C2} = bigset_causal:increment(ID, Causal),
+    Key = {Element, ID, Cnt},
     C3 = bigset_causal:tombstone_dots(Ctx, C2),
     Keys2 = ordsets:add_element(Key, Keys),
     {{add, {Key, Ctx}}, Bigset#bigset{causal=C3, keys=Keys2}}.
 
 -spec remove(element(), actor(), bigset()) ->
                     {delta(), bigset()}.
-remove(Element, _ID,  Bigset) ->
+remove(Element, ID,  Bigset) ->
     #bigset{causal=Clock, keys=Keys} = Bigset,
     %% In the absence of a client context and AAAD, use the dots at
     %% the coordinating replica as the context of the remove
     %% operation, any 'X' seen at this node will be removed by an
     %% remove of an 'X'
-    Ctx = current_dots(Element, Keys),
+    Ctx = current_dots(Element, Keys, Clock),
+    remove(Element, ID, Ctx, Bigset).
+
+remove(_Element, _ID, Ctx, Bigset) ->
+    #bigset{causal=Clock} = Bigset,
     Clock2 = bigset_causal:tombstone_dots(Ctx, Clock),
     {{remove, Ctx}, Bigset#bigset{causal=Clock2}}.
 
+%% You must always tombstone the removed context of an add. Just
+%% because the clock has seen the dot of an add does not mean it hs
+%% seen the removed dots. Imagie you have seen a remove of {a, 2} but
+%% not the add of {a, 2} that removes {a, 1}. Even though you don't
+%% write {a, 2}, you must remove what it removes.
 -spec delta_join(delta(), bigset()) -> bigset().
 delta_join({add, Delta}, Bigset) ->
     #bigset{causal=Clock, keys=Keys} = Bigset,
     {{_E, A, C}=Key, Ctx} = Delta,
+    C2 = bigset_causal:tombstone_dots(Ctx, Clock),    
     case bigset_causal:seen({A, C}, Clock) of
         true ->
-            Bigset;
+            Bigset#bigset{causal=C2};
         false ->
-            C2 = bigset_causal:add_dot({A, C}, Clock),
-            C3 = bigset_causal:tombstone_dots(Ctx, C2),
+            C3 = bigset_causal:add_dot({A, C}, C2),
             Bigset#bigset{causal=C3, keys=ordsets:add_element(Key, Keys)}
     end;
 delta_join({remove, Ctx}, Bigset) ->
@@ -115,6 +128,15 @@ compact(Bigset) ->
                  end,
                  Bigset,
                  Bigset#bigset.keys).
+
+is_member(Element, BS) ->
+    #bigset{causal=Clock, keys=Keys} = BS,
+    is_member(current_dots(Element, Keys, Clock)).
+
+is_member([]) ->
+    {false, []};
+is_member(Ctx) ->
+    {true, Ctx}.
 
 %% @doc a vnode read of an individual vnode represented by `BS'
 read(BS) ->
@@ -252,16 +274,21 @@ handoff(From, To) ->
 
 %% @private just pull all the dots at this replica for element `E' as
 %% the context. Simulates a per-elem-ctx for now
--spec current_dots(element(), [op_key()]) -> dotlist().
-current_dots(E, Keys) ->
-    current_dots(E, Keys, []).
+%%-spec current_dots(element(), [op_key()]) -> dotlist().
+current_dots(E, Keys, Clock) ->
+    current_dots(E, Keys, Clock, []).
 
--spec current_dots(element(), [op_key()], dotlist()) -> dotlist().
-current_dots(E, [{E, ID, Cnt} | Keys], Acc) ->
-    current_dots(E, Keys, [{ID, Cnt} | Acc]);
-current_dots(E, [{NE, _, _} | Keys], Acc) when NE < E ->
-    current_dots(E, Keys, Acc);
-current_dots(E, [{NE, _, _} | _Keys], Acc) when NE > E ->
+%%-spec current_dots(element(), [op_key()], dotlist()) -> dotlist().
+current_dots(E, [{E, ID, Cnt} | Keys], Clock, Acc) ->
+    case bigset_causal:is_tombstoned({ID, Cnt}, Clock) of
+        false ->
+            current_dots(E, Keys, Clock, [{ID, Cnt} | Acc]);
+        true ->
+            current_dots(E, Keys, Clock, Acc)
+    end;
+current_dots(E, [{NE, _, _} | Keys], Clock, Acc) when NE < E ->
+    current_dots(E, Keys, Clock, Acc);
+current_dots(E, [{NE, _, _} | _Keys], _Clock, Acc) when NE > E ->
     Acc;
-current_dots(_E, [], Acc) ->
+current_dots(_E, [], _Clock, Acc) ->
     Acc.

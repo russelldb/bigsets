@@ -454,6 +454,13 @@ gen_removes(_Set, Removes, Clock, CtxDecoder) ->
 replica_inserts(Clock0, Elements) ->
     F = fun({Key, Ctx}, {Clock, Writes}) ->
                 Dot = bigset:dot_from_key(Key),
+                %% You must always tombstone the removed context of an
+                %% add. Just because the clock has seen the dot of an
+                %% add does not mean it hs seen the removed
+                %% dots. Imagie you have seen a remove of {a, 2} but
+                %% not the add of {a, 2} that removes {a, 1}. Even
+                %% though you don't write {a, 2}, you must remove what
+                %% it removes.
                 Clock2 = bigset_causal:tombstone_dots(Ctx, Clock),
                 case bigset_causal:seen(Dot, Clock2) of
                     true ->

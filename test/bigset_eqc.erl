@@ -37,7 +37,8 @@
                 adds=[],      %% Elements that have been added to the set
                 deltas=[], %% delta result of add/remove goes here for later replication/delivery
                 delivered=[], %% track which deltas actually get delivered (for stats/funsies)
-                compacted=[] %% how many keys were removed by a compaction
+                compacted=[], %% how many keys were removed by a compaction
+                is_members=[]  %% the {Element, {Element, Ctx}} pairs for a remote/client remove cos symbolic state stuff
                }).
 
 -record(replica, {
@@ -79,14 +80,30 @@ check(File) ->
 initial_state() ->
     #state{}.
 
+%% @doc <i>Optional callback</i>, Invariant, checked for each visited state 
+%%      during test execution.
+-spec invariant(S :: eqc_statem:dynamic_state()) -> boolean().
+invariant(_S) ->
+    eq(lists:foldl(fun(#replica{bigset=BS, delta_set=DT}=Rep, Bads) ->
+                           case sets_equal(BS, DT) of
+                               true ->
+                                   Bads;
+                               Res ->
+                                   [{Res, Rep} | Bads]
+                           end
+                   end,
+                   [],
+                   ets:tab2list(?MODULE)),
+       []).
+   
 %% ------ Grouped operator: create_replica
-create_replica_pre(#state{replicas=Replicas}) ->
-    length(Replicas) < 10.
+create_replica_pre(#state{replicas=Replicas, dead_replicas=DeadReps}) ->
+    length(Replicas++DeadReps) < 10.
 
 %% @doc create_replica_command - Command generator
-create_replica_args(_S) ->
+create_replica_args(S) ->
     %% Don't waste time shrinking the replicas ID number
-    [noshrink(nat())].
+    ?SUCHTHAT(Args, [noshrink(choose(1, 20))], create_replica_pre(S, Args)).
 
 %% @doc create_replica_pre - don't create a replica that already
 %% exists
@@ -97,7 +114,7 @@ create_replica_pre(#state{replicas=Replicas, dead_replicas=DeadReps}, [Id]) ->
 
 %% @doc create a new replica
 create_replica(Id) ->
-    ets:insert(?MODULE, #replica{id=Id}).
+    ets:insert(?MODULE, #replica{id=Id}). %% @TODO use process_id in key for parallel eqc
 
 %% @doc create_replica_next - Add the new replica ID to state
 -spec create_replica_next(S :: eqc_statem:symbolic_state(),
@@ -110,15 +127,15 @@ create_replica_post(_S, [Replica], _) ->
     post_equals(Replica).
 
 %% ------ Grouped operator: add
-add_args(#state{replicas=Replicas}) ->
-    [elements(Replicas),
-     %% Start of with earlier/fewer elements
-     growingelements(?ELEMENTS)].
-
 %% @doc add_pre - Don't add to a set until we have a replica
 -spec add_pre(S :: eqc_statem:symbolic_state()) -> boolean().
 add_pre(#state{replicas=Replicas}) ->
     Replicas /= [].
+
+add_args(#state{replicas=Replicas}) ->
+    [elements(Replicas),
+     %% Start of with earlier/fewer elements
+     growingelements(?ELEMENTS)].
 
 %% @doc add_pre - Ensure correct shrinking, only select a replica that
 %% is in the state
@@ -145,7 +162,7 @@ add(Replica, Element) ->
 
 %% @doc add_next - Add the `Element' to the `adds' list so we can
 %% select from it when we come to remove. This increases the liklihood
-%% of a remove actuallybeing meaningful. Add to the replica's delta
+%% of a remove actually being meaningful. Add to the delta
 %% buffer too.
 -spec add_next(S :: eqc_statem:symbolic_state(),
                V :: eqc_statem:var(),
@@ -172,6 +189,7 @@ remove_args(#state{replicas=Replicas, adds=Adds}) ->
 remove_pre(#state{replicas=Replicas, adds=Adds}) ->
     Replicas /= [] andalso Adds /= [].
 
+%% @TODO add a client/ctx remove
 %% @doc remove_pre - Ensure correct shrinking
 -spec remove_pre(S :: eqc_statem:symbolic_state(),
                          Args :: [term()]) -> boolean().
@@ -231,24 +249,22 @@ replicate_pre(#state{replicas=Replicas, deltas=Deltas}, [Delta, To]) ->
         andalso lists:member(To, Replicas).
 
 %% @doc simulate replication by merging state at `To' with the delta
-replicate(Delta, To) ->
+replicate(Deltas, To) ->
     [#replica{id=To, delta_set=Set,
               bigset=BS}=ToRep] = ets:lookup(?MODULE, To),
 
-    {BS2, SwotDelta} = lists:foldl(fun(#delta{bs_delta=BSD, dt_delta=DT}, {B, D}) ->
+    {BS2, Set2} = lists:foldl(fun(#delta{bs_delta=BSD, dt_delta=DT}, {B, D}) ->
                                                {bigset_model:delta_join(BSD, B),
                                                 ?SWOT:merge(DT, D)}
                                        end,
-                                       {BS, ?SWOT:new()},
-                                       Delta),
+                                       {BS, Set},
+                                       Deltas),
 
-
-    Set2 = ?SWOT:merge(Set, SwotDelta),
     ets:insert(?MODULE, ToRep#replica{bigset=BS2,
                                       delta_set=Set2}).
 
-replicate_next(S=#state{delivered=Delivered}, _, [Delta, _To]) ->
-    S#state{delivered=[Delta | Delivered]}.
+replicate_next(S=#state{delivered=Delivered}, _, [Deltas, _To]) ->
+    S#state{delivered=[Deltas | Delivered]}.
 
 replicate_post(_S, [_Delta, Replica], _) ->
     post_equals(Replica).
@@ -275,10 +291,10 @@ compact_pre(#state{replicas=Replicas}, [Replica]) ->
 compact(Replica) ->
     [#replica{bigset=BS}=Rep] = ets:lookup(?MODULE, Replica),
 
-    {BS2, Compacted} = compact_bigset(BS),
+    {BS2, NumCompactedElems} = compact_bigset(BS),
 
     ets:insert(?MODULE, Rep#replica{bigset=BS2}),
-    {Compacted, BS, BS2}.
+    {NumCompactedElems, BS, BS2}.
 
 %% @doc compact_next - Next state function
 compact_next(S=#state{compacted=Compacted}, Value, [_Replica]) ->
@@ -289,12 +305,14 @@ compact_next(S=#state{compacted=Compacted}, Value, [_Replica]) ->
     when S    :: eqc_state:dynamic_state(),
          Args :: [term()],
          Res  :: term().
-compact_post(_S, [_Replica], {_Diff, Before, After}) ->
-    case replica_value(Before) == replica_value(After) of
-        true ->
+compact_post(_S, [_Replica], {Diff, Before, After}) ->
+    case {replica_value(Before) == replica_value(After), Diff >= 0} of
+        {true, true} ->
             true;
-        false ->
-            {post_compaction_not_eq, {before, replica_value(Before), Before}, '/=', {aft, replica_value(After), After}}
+        {false, _} ->
+            {post_compaction_not_eq, {before, replica_value(Before), Before}, '/=', {aft, replica_value(After), After}};
+        {true, false} ->
+            {post_compaction_bigger, Diff}
     end.
 
 %% --- Operation: handoff ---
@@ -353,18 +371,191 @@ handoff_next(S=#state{replicas=Replicas, dead_replicas=DeadReplicas}, _ID, [From
 handoff_post(_S, [_From, _To], _Res) ->
     true.
 
+%% --- Operation: client_remove ---
+%% @doc client_remove_pre/1 - Precondition for generation
+-spec client_remove_pre(S :: eqc_statem:symbolic_state()) -> boolean().
+client_remove_pre(#state{is_members=IsMembers}) ->
+    IsMembers /= [].
+
+%% @doc client_remove_args - Argument generator
+-spec client_remove_args(S :: eqc_statem:symbolic_state()) -> eqc_gen:gen([term()]).
+client_remove_args(#state{replicas=Replicas, is_members=IsMembers, adds=Adds}) -> 
+    AddedMembers = [IsMember || IsMember={Element,_} <- IsMembers, lists:member(Element, Adds)],
+    [frequency([{1, empty_ok}, {6, empty_nok}]),
+     elements(Replicas),
+     frequency([{1, elements(IsMembers)}] ++ [{10, elements(AddedMembers)} || AddedMembers /= []])
+    ].
+
+%% @doc client_remove_pre/2 - Precondition for client_remove
+-spec client_remove_pre(S, Args) -> boolean()
+    when S    :: eqc_statem:symbolic_state(),
+         Args :: [term()].
+client_remove_pre(#state{is_members=IsMembers, replicas=Replicas}, [_EmptyOk, Replica, IsMember]) ->
+    lists:member(IsMember, IsMembers) andalso lists:member(Replica, Replicas).
+
+%% @doc client_remove_dynamicpre - Dynamic precondition for client_remove
+-spec client_remove_dynamicpre(S, Args) -> boolean()
+    when S    :: eqc_statem:symbolic_state(),
+         Args :: [term()].
+client_remove_dynamicpre(_S, [empty_ok, _To, _]) ->
+    true;
+client_remove_dynamicpre(_S, [empty_nok, _To, {_, {_, []}}]) ->
+    false;
+client_remove_dynamicpre(_S, [empty_nok, _to, _]) ->
+    true.
+
+%% @doc client_remove - The actual operation
+client_remove(_EmptyOk, To, {Element, {Element, Ctx}}) -> 
+    [#replica{id=To, delta_set=Set,
+              bigset=BS}=ToRep] = ets:lookup(?MODULE, To),
+
+    {BSDelta, BS2} = bigset_model:remove(Element, To, Ctx, BS),
+    {ok, Delta} = ?SWOT:delta_update({remove, Element, Ctx}, To, Set),
+    Set2 = ?SWOT:merge(Delta, Set),
+
+    ets:insert(?MODULE, ToRep#replica{delta_set=Set2,
+                                      bigset=BS2}),
+    #delta{bs_delta=BSDelta, dt_delta=Delta}.
+
+%% @doc client_remove_next - Next state function
+-spec client_remove_next(S, Var, Args) -> NewS
+    when S    :: eqc_statem:symbolic_state() | eqc_state:dynamic_state(),
+         Var  :: eqc_statem:var() | term(),
+         Args :: [term()],
+         NewS :: eqc_statem:symbolic_state() | eqc_state:dynamic_state().
+client_remove_next(S=#state{deltas=Deltas}, Delta, [_EmptyOk, _From, _RemovedElement]) ->
+    S#state{deltas=[Delta | Deltas]}.
+
+%% @doc client_remove_features - Collects a list of features of this call with these arguments.
+-spec client_remove_features(S, Args, Res) -> list(any())
+    when S    :: eqc_statem:dynmic_state(),
+         Args :: [term()],
+         Res  :: term().
+client_remove_features(_S, [_EmptyOk, _To, {_Element, {_Element, []}}], _Res) ->
+    [{{?MODULE, client_remove, 2}, empty}];
+client_remove_features(_S, [_EmptyOk, _To, {_Element, {_Element, _Ctx}}], _Res) ->
+    [{{?MODULE, client_remove, 2}, non_empty}].
+
+%% --- Operation: client_remove ---
+%% @doc client_add_pre/1 - Precondition for generation
+-spec client_add_pre(S :: eqc_statem:symbolic_state()) -> boolean().
+client_add_pre(#state{is_members=IsMembers}) ->
+    IsMembers /= [].
+
+%% @doc client_add_args - Argument generator
+-spec client_add_args(S :: eqc_statem:symbolic_state()) -> eqc_gen:gen([term()]).
+client_add_args(#state{replicas=Replicas, is_members=IsMembers}) -> 
+    [elements(Replicas),
+     elements(IsMembers)].
+
+%% @doc client_add_pre/2 - Precondition for client_remove
+-spec client_add_pre(S, Args) -> boolean()
+    when S    :: eqc_statem:symbolic_state(),
+         Args :: [term()].
+client_add_pre(#state{is_members=IsMembers, replicas=Replicas}, [Replica, IsMember]) ->
+    lists:member(IsMember, IsMembers) andalso lists:member(Replica, Replicas).
+
+%% @doc client_add - The actual operation
+client_add(To, {Element, {Element, Ctx}}) -> 
+    [#replica{id=To, delta_set=Set,
+              bigset=BS}=ToRep] = ets:lookup(?MODULE, To),
+
+    {BSDelta, BS2} = bigset_model:add(Element, To, Ctx, BS),
+    {ok, Delta} = ?SWOT:delta_update({add, Element, Ctx}, To, Set),
+    Set2 = ?SWOT:merge(Delta, Set),
+
+    ets:insert(?MODULE, ToRep#replica{delta_set=Set2,
+                                      bigset=BS2}),
+    #delta{bs_delta=BSDelta, dt_delta=Delta}.
+
+%% @doc client_add_next - Next state function
+-spec client_add_next(S, Var, Args) -> NewS
+    when S    :: eqc_statem:symbolic_state() | eqc_state:dynamic_state(),
+         Var  :: eqc_statem:var() | term(),
+         Args :: [term()],
+         NewS :: eqc_statem:symbolic_state() | eqc_state:dynamic_state().
+client_add_next(S=#state{adds=Adds, deltas=Deltas}, Delta, [_Replica, {Element, _}]) ->
+    S#state{adds=lists:umerge(Adds, [Element]),
+            deltas=[Delta | Deltas]}.
+
+%% @doc client_add_features - Collects a list of features of this call with these arguments.
+-spec client_add_features(S, Args, Res) -> list(any())
+    when S    :: eqc_statem:dynmic_state(),
+         Args :: [term()],
+         Res  :: term().
+client_add_features(_S, [_To, {_Element, {_Element, []}}], _Res) ->
+    [{{?MODULE, client_add, 2}, empty}];
+client_add_features(_S, [_To, {_Element, {_Element, _Ctx}}], _Res) ->
+    [{{?MODULE, client_add, 2}, non_empty}].
+
+
+%% @TODO do we need two is_member? One for removes (with a high-prob
+%% of having a ctx And one without, so we can _always_ add?
+
+%% --- Operation: is_member ---
+%% %% @doc is_member_pre/1 - Precondition for generation
+-spec is_member_pre(S :: eqc_statem:symbolic_state()) -> boolean().
+is_member_pre(#state{replicas=Replicas}) ->
+    Replicas /= [].
+
+%% @doc is_member_args - Argument generator
+-spec is_member_args(S :: eqc_statem:symbolic_state()) -> eqc_gen:gen([term()]).
+is_member_args(#state{replicas=Replicas}) ->
+    [elements(Replicas),
+     growingelements(?ELEMENTS)].
+
+%% @doc is_member_pre/2 - Precondition for is_member
+-spec is_member_pre(S, Args) -> boolean()
+    when S    :: eqc_statem:symbolic_state(),
+         Args :: [term()].
+is_member_pre(#state{replicas=Replicas}, [From, _Element]) ->
+    lists:member(From, Replicas).
+
+%% @doc is_member - The actual operation
+is_member(Replica, Element) -> 
+    [#replica{id=Replica,
+              bigset=BS}] = ets:lookup(?MODULE, Replica),
+    
+    {_Bool, Ctx} = bigset_model:is_member(Element, BS),
+    {Element, Ctx}.
+
+%% @doc is_member_next - Next state function
+-spec is_member_next(S, Var, Args) -> NewS
+    when S    :: eqc_statem:symbolic_state() | eqc_state:dynamic_state(),
+         Var  :: eqc_statem:var() | term(),
+         Args :: [term()],
+         NewS :: eqc_statem:symbolic_state() | eqc_state:dynamic_state().
+is_member_next(S=#state{is_members=IsMembers}, Value, [_Replica, Element]) ->
+    S#state{is_members=IsMembers ++ [{Element, Value}]}.
+
+%% @doc is_member_features - Collects a list of features of this call with these arguments.
+-spec is_member_features(S, Args, Res) -> list(any())
+    when S    :: eqc_statem:dynmic_state(),
+         Args :: [term()],
+         Res  :: term().
+is_member_features(_S, [_Replica, _Element], {_Element, []}) ->
+    [{{?MODULE, is_member, 2}, empty}];
+is_member_features(_S, _, _) ->
+    [{{?MODULE, is_member, 2}, non_empty}].
+
 %% @doc weights for commands. Don't create too many replicas, but
 %% prejudice in favour of creating more than 1. Try and balance
 %% removes with adds. But favour adds so we have something to
 %% remove. See the aggregation output.
-weight(S, create_replica) when length(S#state.replicas) > 2 ->
+weight(S, create_replica) when length(S#state.replicas) > 6 ->
     1;
-weight(S, create_replica) when length(S#state.replicas) < 5 ->
-    3;
-weight(_S, remove) ->
+weight(_S, create_replica) ->
     5;
+weight(_S, remove) ->
+    0;
 weight(_S, add) ->
+    0;
+weight(_S, client_remove) ->
+    10;
+weight(_S, client_add) ->
     8;
+weight(_S, is_member) ->
+    10;
 weight(_S, replicate) ->
     7;
 weight(_S, compaction) ->
@@ -380,7 +571,7 @@ weight(_S, _) ->
 %% the OR-Set impl.
 -spec prop_merge() -> eqc:property().
 prop_merge() ->
-    ?FORALL(Cmds, more_commands(2, commands(?MODULE)),
+    ?FORALL(Cmds, more_commands(20, commands(?MODULE)),
             begin
                 %% Store the state external to the statem for correct
                 %% shrinking. This is best practice.
@@ -412,18 +603,38 @@ prop_merge() ->
 
                 ets:delete(?MODULE),
                 pretty_commands(?MODULE, Cmds, {H, S, Res},
-                                aggregate(command_names(Cmds),
-                                          aggregate(with_title('Compaction Effect'), Compacted,
-                                                    measure(deltas, length(Deltas),
-                                                            measure(commands, length(Cmds),
-                                                                    measure(delivered, length(Delivered),
-                                                                            measure(undelivered, length(Deltas) - length(Delivered),
-                                                                                    measure(replicas, length(S#state.replicas),
-                                                                                            measure(bs_ln, BigsetLength,
-                                                                                                    measure(elements, length(?SWOT:value(MergedSwot)),
-                                                                                                            conjunction([{result, Res == ok},
-                                                                                                                         {equal, equals(sets_equal(MergedBigset, MergedSwot), true)}
-                                                                                                                        ])))))))))))
+                                aggregate(
+                                  command_names(Cmds),
+                                  aggregate(
+                                    with_title('Compaction Effect'), Compacted,
+                                    aggregate(
+                                      with_title('Context'), call_features(is_member, H),
+                                      aggregate(
+                                      with_title('Context Remove'), call_features(client_remove, H),
+                                        aggregate(
+                                      with_title('Context Add'), call_features(client_add, H),
+                                    measure(
+                                      deltas, length(Deltas),
+                                      measure(
+                                        commands, length(H),
+                                        measure(
+                                          delivered, length(Delivered),
+                                          measure(
+                                            undelivered, length(Deltas) - length(Delivered),
+                                            measure(
+                                              replicas, length(S#state.replicas),
+                                              measure(
+                                                dead_replicas, length(S#state.dead_replicas),
+                                                measure(
+                                                  adds, length(S#state.adds),
+                                                  measure(
+                                                    bs_ln, BigsetLength,
+                                                    measure(
+                                                      elements, length(?SWOT:value(MergedSwot)),
+                                                      conjunction([{result, Res == ok},
+                                                                   {equal, equals(sets_equal(MergedBigset, MergedSwot), true)}]
+                                                                  ))))))))))))))))
+
 
             end).
 
@@ -446,9 +657,9 @@ orswot_length(ORSWOT) ->
                             {integer(), bigset_model:bigset()}.
 compact_bigset(BS) ->
     Before = bigset_model:size(BS),
-    Compacted = bigset_model:compact(BS),
-    After = bigset_model:size(Compacted),
-    {Compacted, Before-After}.
+    CompactedBigset = bigset_model:compact(BS),
+    After = bigset_model:size(CompactedBigset),
+    {CompactedBigset, Before-After}.
 
 bigset_length(BS, BSLen) ->
     max(bigset_model:size(BS), BSLen).

@@ -307,38 +307,6 @@ end_key_test() ->
 
 -define(ELEMENTS, [<<C:8/integer>> || C <- lists:seq(97, 122)]).
 
-prop_new() ->
-    ?FORALL(Id, binary(),
-            begin
-                S = new(Id),
-                equals(S#state.id, Id)
-            end).
-
-gen_clocks() ->
-    ?LET(Events, gen_all_system_events(),
-         gen_clocks(Events)).
-
-gen_clocks(Events) ->
-    [{Actor, gen_clock(Me, Events)} || {Actor, _}=Me <- Events].
-
-gen_clock(Me, Events) ->
-    ?LET(ClockMembers, sublist(Events),
-         [Me | [gen_entry(Event) || Event <- ClockMembers,
-                                    Event /= Me]]).
-
-gen_entry({Actor, Max}) ->
-    ?LET(Events, sublist(lists:seq(1, Max)),
-         entry_from_event_list(Actor, Events)).
-
-entry_from_event_list(Actor, Events) ->
-    bigset_clock:compress_seen(riak_dt_vclock:fresh(), [{Actor, Events}]).
-
-%% @priv generates the single system wide version vector that
-%% describes all events at a moment in time. Imagine a snapshot of a
-%% distributed system, each node's events are contiguous, this is that
-%% clock. We can use it to generate a valid bigset system state.
-gen_all_system_events() ->
-    ?LET(Actors, choose(1, 10), [{<<Actor>> , choose(1, 100)} || Actor <- lists:seq(1, Actors)]).
 
 gen_bigset() ->
     ?LET(BS,
@@ -377,7 +345,7 @@ store({Clock, Keys}, Deltas) ->
                            Deltas).
 
 gen_bigset(Set) ->
-    ?LET(System, gen_all_system_events(), gen_bigset(System, Set)).
+    ?LET(System, bigset_clock:gen_all_system_events(), gen_bigset(System, Set)).
 
 gen_bigset(System, Set) ->
     lists:foldl(fun({Actor, _Cnt}=ActorEvents, Acc) ->
