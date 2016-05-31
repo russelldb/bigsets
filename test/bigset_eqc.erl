@@ -31,9 +31,11 @@
 -define(SWOT, riak_dt_delta_orswot).
 -define(CLOCK, bigset_clock).
 -define(SET, set).
+-define(HOFF_REC, bigset_eqc_hoff_rec).
 
 -record(state, {replicas=[], %% Actor Ids for replicas in the system
-                dead_replicas=[], %% Actor Ids for replicas that have been removed
+                handing_off=[], %% pid of handing-off processes
+                removed_replicas=[], %% Actor Ids for replicas that have been removed from preflist
                 adds=[],      %% Elements that have been added to the set
                 deltas=[], %% delta result of add/remove goes here for later replication/delivery
                 delivered=[], %% track which deltas actually get delivered (for stats/funsies)
@@ -51,6 +53,13 @@
           bs_delta,
           dt_delta
          }).
+
+-record(hoff_state, {
+          tracker=bigset_clock:fresh(),
+          sender_clock,
+          sender,
+          receiver,
+          keys=[]}).
 
 %% The set of possible elements in the set
 -define(ELEMENTS, ['A', 'B', 'C', 'D', 'X', 'Y', 'Z']).
@@ -80,24 +89,31 @@ check(File) ->
 initial_state() ->
     #state{}.
 
-%% @doc <i>Optional callback</i>, Invariant, checked for each visited state 
+%% @doc <i>Optional callback</i>, Invariant, checked for each visited state
 %%      during test execution.
+%% @TODO this invariant does not hold for a replica receiving handoff
 -spec invariant(S :: eqc_statem:dynamic_state()) -> boolean().
 invariant(_S) ->
-    eq(lists:foldl(fun(#replica{bigset=BS, delta_set=DT}=Rep, Bads) ->
-                           case sets_equal(BS, DT) of
-                               true ->
-                                   Bads;
-                               Res ->
-                                   [{Res, Rep} | Bads]
+    Hoffs = ets:tab2list(?HOFF_REC),
+    eq(lists:foldl(fun(#replica{id=ID, bigset=BS, delta_set=DT}=Rep, Bads) ->
+                           case lists:keymember(ID, 2, Hoffs) of
+                               false ->
+                                   case sets_equal(BS, DT) of
+                                       true ->
+                                           Bads;
+                                       Res ->
+                                           [{Res, Rep} | Bads]
+                                   end;
+                               _ ->
+                                   []
                            end
                    end,
                    [],
                    ets:tab2list(?MODULE)),
        []).
-   
+
 %% ------ Grouped operator: create_replica
-create_replica_pre(#state{replicas=Replicas, dead_replicas=DeadReps}) ->
+create_replica_pre(#state{replicas=Replicas, removed_replicas=DeadReps}) ->
     length(Replicas++DeadReps) < 10.
 
 %% @doc create_replica_command - Command generator
@@ -109,7 +125,7 @@ create_replica_args(S) ->
 %% exists
 -spec create_replica_pre(S :: eqc_statem:symbolic_state(),
                          Args :: [term()]) -> boolean().
-create_replica_pre(#state{replicas=Replicas, dead_replicas=DeadReps}, [Id]) ->
+create_replica_pre(#state{replicas=Replicas, removed_replicas=DeadReps}, [Id]) ->
     not lists:member(Id, Replicas) andalso not lists:member(Id, DeadReps).
 
 %% @doc create a new replica
@@ -315,6 +331,95 @@ compact_post(_S, [_Replica], {Diff, Before, After}) ->
             {post_compaction_bigger, Diff}
     end.
 
+%% --- Operation: start_handoff ---
+%% @doc start_handoff_pre/1 - Precondition for generation
+-spec start_handoff_pre(S :: eqc_statem:symbolic_state()) -> boolean().
+start_handoff_pre(#state{replicas=Replicas}) ->
+    length(Replicas) > 1.
+
+%% @doc start_handoff_args - Argument generator
+-spec start_handoff_args(S :: eqc_statem:symbolic_state()) -> eqc_gen:gen([term()]).
+start_handoff_args(#state{replicas=Replicas}) ->
+    [elements(Replicas),
+     elements(Replicas)].
+
+%% @doc start_handoff_pre/2 - Precondition for start_handoff
+-spec start_handoff_pre(S, Args) -> boolean()
+    when S    :: eqc_statem:symbolic_state(),
+         Args :: [term()].
+start_handoff_pre(#state{replicas=Replicas}, [Sender, Receiver]) ->
+    Sender /= Receiver andalso
+        lists:member(Sender, Replicas) andalso
+        lists:member(Receiver, Replicas).
+
+%% @doc start_handoff - The actual operation
+start_handoff(Sender, Receiver) ->
+    [#replica{id=Sender,
+              bigset=FromBS}] = ets:lookup(?MODULE, Sender),
+    ets:insert(?HOFF_REC, {Sender, Receiver}),
+    spawn_link(fun() ->
+                       Clock =  bigset_model:clock(FromBS),
+                       Keys = bigset_model:handoff_keys(FromBS) ++ [end_key],
+                       bigset_handoff_worker(#hoff_state{sender_clock=Clock,
+                                                         sender=Sender, receiver=Receiver, keys=Keys})
+               end).
+
+%% @doc start_handoff_next - Next state function
+-spec start_handoff_next(S, Var, Args) -> NewS
+    when S    :: eqc_statem:symbolic_state() | eqc_state:dynamic_state(),
+         Var  :: eqc_statem:var() | term(),
+         Args :: [term()],
+         NewS :: eqc_statem:symbolic_state() | eqc_state:dynamic_state().
+start_handoff_next(S=#state{removed_replicas=DeadReps,
+                            replicas=Replicas,
+                            handing_off=HOFF}, Value, [Sender, _Receiver]) ->
+    S#state{
+      replicas=lists:delete(Sender, Replicas),
+      handing_off=HOFF++[Value],
+      removed_replicas=[Sender | DeadReps]}.
+
+%% @doc start_handoff_post - Postcondition for start_handoff
+-spec start_handoff_post(S, Args, Res) -> true | term()
+    when S    :: eqc_state:dynamic_state(),
+         Args :: [term()],
+         Res  :: term().
+start_handoff_post(_S, [_Sender, _Receiver], _Res) ->
+    true.
+
+%% --- Operation: proceed_handoff ---
+%% @doc proceed_handoff_pre/1 - Precondition for generation
+-spec proceed_handoff_pre(S :: eqc_statem:symbolic_state()) -> boolean().
+proceed_handoff_pre(#state{handing_off=Hoffs}) ->
+    Hoffs /= [].
+
+%% @doc proceed_handoff_args - Argument generator
+-spec proceed_handoff_args(S :: eqc_statem:symbolic_state()) -> eqc_gen:gen([term()]).
+proceed_handoff_args(#state{handing_off=Hoffs}) ->
+    [elements(Hoffs)].
+
+%% @doc proceed_handoff_pre/2 - Precondition for proceed_handoff
+-spec proceed_handoff_pre(S, Args) -> boolean()
+    when S    :: eqc_statem:symbolic_state(),
+         Args :: [term()].
+proceed_handoff_pre(#state{handing_off=Hoffs}, [Pid]) ->
+    lists:member(Pid, Hoffs).
+
+%% @doc proceed_handoff - The actual operation
+proceed_handoff(Pid) ->
+    Pid ! {proceed, self()},
+    receive
+        {ok, HoffComplete, Pid} ->
+            HoffComplete
+    end.
+
+%% @doc proceed_handoff_features - Collects a list of features of this call with these arguments.
+-spec proceed_handoff_features(S, Args, Res) -> list(any())
+    when S    :: eqc_statem:dynmic_state(),
+         Args :: [term()],
+         Res  :: term().
+proceed_handoff_features(_S, [_Pid], Res) ->
+    [{{?MODULE, proceed_handoff, 1}, Res}].
+
 %% --- Operation: handoff ---
 %% @doc handoff_pre/1 - Precondition for generation
 -spec handoff_pre(S :: eqc_statem:symbolic_state()) -> boolean().
@@ -360,8 +465,8 @@ handoff(From, To) ->
          Var  :: eqc_statem:var() | term(),
          Args :: [term()],
          NewS :: eqc_statem:symbolic_state() | eqc_state:dynamic_state().
-handoff_next(S=#state{replicas=Replicas, dead_replicas=DeadReplicas}, _ID, [From, _To]) ->
-    S#state{replicas=lists:delete(From, Replicas), dead_replicas=[From | DeadReplicas]}.
+handoff_next(S=#state{replicas=Replicas, removed_replicas=DeadReplicas}, _ID, [From, _To]) ->
+    S#state{replicas=lists:delete(From, Replicas), removed_replicas=[From | DeadReplicas]}.
 
 %% @doc handoff_post - Postcondition for handoff
 -spec handoff_post(S, Args, Res) -> true | term()
@@ -560,10 +665,14 @@ weight(_S, replicate) ->
     7;
 weight(_S, compaction) ->
     4;
-weight(S, handoff) when length(S#state.replicas) > 5 ->
+weight(_S, handoff) ->
+    0;
+weight(S, start_handoff) when length(S#state.replicas) > 5 ->
     4;
-weight(S, handoff) when length(S#state.replicas) < 5 ->
+weight(S, start_handoff) when length(S#state.replicas) < 5 ->
     1;
+weight(S, proceed_handoff) when length(S#state.handing_off) > 0 ->
+    16;
 weight(_S, _) ->
     1.
 
@@ -572,12 +681,14 @@ weight(_S, _) ->
 -spec prop_merge() -> eqc:property().
 prop_merge() ->
     ?FORALL(Cmds, more_commands(20, commands(?MODULE)),
-            begin
+            ?TRAPEXIT(begin
                 %% Store the state external to the statem for correct
                 %% shrinking. This is best practice.
                 (catch ets:delete(?MODULE)),
-                ets:new(?MODULE, [named_table, set, {keypos, #replica.id}]),
-                {H, S=#state{delivered=Delivered0, deltas=Deltas}, Res} = run_commands(?MODULE,Cmds),
+                (catch ets:delete(?HOFF_REC)),
+                ets:new(?MODULE, [public, named_table, set, {keypos, #replica.id}]),
+                ets:new(?HOFF_REC, [public, named_table, set]),
+                {H, S=#state{delivered=Delivered0, deltas=Deltas, handing_off=HOFFs}, Res} = run_commands(?MODULE,Cmds),
 
                 {MergedBigset, MergedSwot, BigsetLength} = lists:foldl(fun(#replica{bigset=Bigset, delta_set=ORSWOT}, {MBS, MOS, BSLen}) ->
                                                                                BigsetCompacted = bigset_model:compact(Bigset),
@@ -588,6 +699,11 @@ prop_merge() ->
                                                                        end,
                                                                        {bigset_model:new_mbs(), ?SWOT:new(), 0},
                                                                        ets:tab2list(?MODULE)),
+
+                [begin
+                     unlink(Pid),
+                     exit(Pid, kill)
+                 end || Pid <- HOFFs],
 
                 Delivered = lists:flatten(Delivered0),
                 Compacted = [begin
@@ -602,6 +718,7 @@ prop_merge() ->
                              end || V <- S#state.compacted],
 
                 ets:delete(?MODULE),
+                ets:delete(?HOFF_REC),
                 pretty_commands(?MODULE, Cmds, {H, S, Res},
                                 aggregate(
                                   command_names(Cmds),
@@ -610,33 +727,35 @@ prop_merge() ->
                                     aggregate(
                                       with_title('Context'), call_features(is_member, H),
                                       aggregate(
-                                      with_title('Context Remove'), call_features(client_remove, H),
+                                        with_title('Context Remove'), call_features(client_remove, H),
                                         aggregate(
-                                      with_title('Context Add'), call_features(client_add, H),
-                                    measure(
-                                      deltas, length(Deltas),
-                                      measure(
-                                        commands, length(H),
-                                        measure(
-                                          delivered, length(Delivered),
+                                          with_title('Context Add'), call_features(client_add, H),
+                                        aggregate(
+                                          with_title('Complete Handoff'), call_features(proceed_handoff, H),
                                           measure(
-                                            undelivered, length(Deltas) - length(Delivered),
+                                            deltas, length(Deltas),
                                             measure(
-                                              replicas, length(S#state.replicas),
+                                              commands, length(H),
                                               measure(
-                                                dead_replicas, length(S#state.dead_replicas),
+                                                delivered, length(Delivered),
                                                 measure(
-                                                  adds, length(S#state.adds),
+                                                  undelivered, length(Deltas) - length(Delivered),
                                                   measure(
-                                                    bs_ln, BigsetLength,
+                                                    replicas, length(S#state.replicas),
                                                     measure(
-                                                      elements, length(?SWOT:value(MergedSwot)),
-                                                      conjunction([{result, Res == ok},
-                                                                   {equal, equals(sets_equal(MergedBigset, MergedSwot), true)}]
-                                                                  ))))))))))))))))
+                                                      removed_replicas, length(S#state.removed_replicas),
+                                                      measure(
+                                                        adds, length(S#state.adds),
+                                                        measure(
+                                                          bs_ln, BigsetLength,
+                                                          measure(
+                                                            elements, length(?SWOT:value(MergedSwot)),
+                                                            conjunction([{result, Res == ok},
+                                                                         {equal, equals(sets_equal(MergedBigset, MergedSwot), true)}]
+                                                                       )))))))))))))))))
 
 
-            end).
+            end)).
 
 lmax([]) ->
     0;
@@ -691,5 +810,46 @@ subset(Set) ->
 
 post_equals(_Replica) ->
     true.
+
+%% Helper functions
+
+%% @private bigset_handoff_worker
+bigset_handoff_worker(HoffState=#hoff_state{receiver=To,
+                                            keys=Keys,
+                                            sender_clock=SenderClock,
+                                            sender=Sender,
+                                            tracker=Tracker}) ->
+    receive
+        {proceed, Pid} ->
+            [#replica{id=To, delta_set=ToSet,
+                      bigset=ToBS}=ToRep] = ets:lookup(?MODULE, To),
+            [#replica{id=Sender, delta_set=FromSet}] = ets:lookup(?MODULE, Sender),
+
+            {HoffComplete, HoffState2} = case Keys of
+                             [] ->
+                                 {empty, HoffState};
+                             [end_key] ->
+                                 ToBS2 = bigset_model:receive_end_key(SenderClock, Tracker, ToBS),
+                                 ToSet2 = ?SWOT:merge(ToSet, FromSet),
+
+                                 ets:insert(?MODULE, ToRep#replica{bigset=ToBS2, delta_set=ToSet2}),
+                                 ets:delete(?HOFF_REC, Sender),
+                                 {complete, HoffState#hoff_state{keys=[]}};
+                             [{_E, A, C}=K | T] ->
+                                 Dot = {A, C},
+                                 T2 = bigset_clock:add_dot(Dot, Tracker),
+                                 ToBS2 = bigset_model:receive_handoff_key(K, ToBS),
+                                 ets:insert(?MODULE, ToRep#replica{bigset=ToBS2}),
+                                 {incomplete, HoffState#hoff_state{tracker=T2, keys=T}}
+                         end,
+
+            Pid ! {ok, HoffComplete,  self()},
+            bigset_handoff_worker(HoffState2);
+        {restart, Pid} ->
+            Pid ! {ok, self()},
+            bigset_handoff_worker(HoffState)
+    after 60000 ->
+            ok
+    end.
 
 -endif.

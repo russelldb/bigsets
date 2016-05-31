@@ -395,8 +395,8 @@ prop_merge_clocks() ->
                     end)).
 
 prop_intersection() ->
-    ?FORALL(Events, gen_all_system_events(2),
-            ?FORALL([{_, Clock1}, {_, Clock2}], gen_clocks(Events),
+    ?FORALL(Events, gen_all_system_events(),
+            ?FORALL([{_, Clock1}, {_, Clock2} | _], gen_clocks(Events),
                     begin
                         DC = clock_to_dotcloud(Clock1),
                         Res = clock_to_set(intersection(DC, Clock2)),
@@ -407,15 +407,22 @@ prop_intersection() ->
                     end)).
 
 prop_complement() ->
-    ?FORALL(Events, gen_all_system_events(1),
-            ?FORALL([{_, Clock1}], gen_clocks(Events),
-                    ?FORALL(Clock2, gen_sub_clock(Clock1),
+    ?FORALL(Events, gen_all_system_events(),
+            ?FORALL([{_, {Base1, _DC1}=Clock1} | _], gen_clocks(Events),
+                    ?FORALL({Base2, _DC}=Clock2, gen_sub_clock(Clock1),
                             begin
                                 Res = dot_cloud_to_set(complement(Clock1, Clock2)),
                                 Set1 = clock_to_set(Clock1),
                                 Set2 = clock_to_set(Clock2),
                                 Expected = ordsets:subtract(Set1, Set2),
-                                equals(Expected, Res)
+                                %% @TODO(rdb) remove some/all stats
+                                %% @TODO(rdb) add check_distribution when we get off r16
+                                collect({all_nodes1, length(all_nodes(Clock1))},
+                                        collect({all_nodes2, length(all_nodes(Clock2))},
+                                                collect({base1_length, length(Base1)},
+                                                        collect({base2_length, length(Base2)},
+                                                                collect({empty_base2, Base2 == []},
+                                                                        equals(Expected, Res))))))
                             end))).
 
 clock_to_dotcloud({VV, DC}) ->
@@ -478,7 +485,7 @@ entry_from_event_list(Actor, Events) ->
 %% distributed system, each node's events are contiguous, this is that
 %% clock. We can use it to generate a valid bigset system state.
 gen_all_system_events() ->
-    ?LET(Actors, choose(1, 10), gen_all_system_events(Actors)).
+    ?LET(Actors, choose(2, 10), gen_all_system_events(Actors)).
 
 gen_all_system_events(Actors) ->
      [{<<Actor>> , choose(1, 100)} || Actor <- lists:seq(1, Actors)].

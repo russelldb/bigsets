@@ -89,7 +89,7 @@ remove(_Element, _ID, Ctx, Bigset) ->
 delta_join({add, Delta}, Bigset) ->
     #bigset{causal=Clock, keys=Keys} = Bigset,
     {{_E, A, C}=Key, Ctx} = Delta,
-    C2 = bigset_causal:tombstone_dots(Ctx, Clock),    
+    C2 = bigset_causal:tombstone_dots(Ctx, Clock),
     case bigset_causal:seen({A, C}, Clock) of
         true ->
             Bigset#bigset{causal=C2};
@@ -101,6 +101,29 @@ delta_join({remove, Ctx}, Bigset) ->
     #bigset{causal=Clock} = Bigset,
     C2 = bigset_causal:tombstone_dots(Ctx, Clock),
     Bigset#bigset{causal=C2}.
+
+receive_end_key(SenderClock, Tracker, Bigset) ->
+    #bigset{causal=Causal} = Bigset,
+    DelDots = bigset_clock:complement(SenderClock, Tracker),
+    LocalClock = bigset_causal:clock(Causal),
+    %% All the dots that Receiver had seen before hand off, but which
+    %% the handing off node has deleted
+    ToRemove = bigset_clock:intersection(DelDots, LocalClock),
+
+    LocalCausal2 = bigset_causal:tombstone_all(ToRemove, Causal),
+    LocalCausal3 = bigset_causal:merge_clock(SenderClock, LocalCausal2),
+    Bigset#bigset{causal=LocalCausal3}.
+
+receive_handoff_key({_E, A, C}=Key, Bigset) ->
+    #bigset{causal=Causal, keys=Keys} = Bigset,
+    Dot = {A, C},
+    case bigset_causal:seen(Dot, Causal) of
+        true ->
+            Bigset;
+        false ->
+            Bigset#bigset{causal=bigset_causal:add_dot(Dot, Causal),
+                          keys=ordsets:add_element(Key, Keys)}
+    end.
 
 -spec value(merged_bigset() | bigset()) -> [term()].
 value(#bigset{}=Bigset) ->
@@ -214,6 +237,15 @@ read_merge(MBS1, MBS2) ->
 
     {bigset_clock:merge(Clock1, Clock2),
      MergedKeys}.
+
+clock(#bigset{causal=Causal}) ->
+    bigset_causal:clock(Causal).
+
+handoff_keys(#bigset{causal=Causal, keys=Keys}) ->
+    ordsets:filter(fun({_E, A, C}) ->
+                           not bigset_causal:is_tombstoned({A, C}, Causal)
+                   end,
+                   Keys).
 
 %% @doc simulate handoff of keys from `From' to `To'. Returns `To'
 %% after receiving handoff.  @TODO(rdb) find a way to use the handoff
