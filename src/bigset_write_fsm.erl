@@ -28,8 +28,8 @@
                 set :: binary(),
                 preflist :: riak_core_apl:preflist(),
                 results :: [result()],
-                replicate :: {Inserts :: [delta_element()],
-                              Removes :: [bigset_causal:dot()]},
+                replicate :: {Inserts :: [delta_add()],
+                              Removes :: [delta_remove()]},
                 options=[] :: list(),
                 timer=undefined :: reference() | undefined,
                 reply = ok
@@ -38,7 +38,7 @@
 -type state() :: #state{}.
 
 -type result() :: coord_res() | rep_res().
--type coord_res() :: {dw, partition(), [delta_element()], Removes :: list()}.
+-type coord_res() :: {dw, partition(), [delta_add()], [delta_remove()]}.
 -type rep_res() ::   {w | dw, partition()}.
 -type partition() :: non_neg_integer().
 -type reqid() :: term().

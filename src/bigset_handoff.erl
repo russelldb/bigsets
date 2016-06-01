@@ -115,7 +115,7 @@ end_key(Set, Sender, LocalClock, Tombstone, State) ->
                              Tombstone::bigset_clock:clock()}.
 tombstone_dots(Dots, {Clock, Tombstone}) ->
     lists:foldl(fun(Dot, {SC, TS}) ->
-                        case bigset_clock:seen(SC, Dot) of
+                        case bigset_clock:seen(Dot, SC) of
                             true ->
                                 {SC, bigset_clock:add_dot(Dot, TS)};
                             false ->

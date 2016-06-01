@@ -197,7 +197,7 @@ decode_set(<<SetLen:32/little-unsigned-integer, Rest/binary>>) ->
 
 %% @doc
 -spec decode_key(Key :: binary()) -> {clock, set(), actor()} |
-                                     {element, set(), member(), actor(), counter(), tsb()} |
+                                     {element, set(), member(), actor(), counter()} |
                                      {end_key, set()}.
 decode_key(<<SetLen:32/little-unsigned-integer, Bin/binary>>) ->
     <<Set:SetLen/binary, Rest/binary>> = Bin,
