@@ -7,9 +7,8 @@
 -type clock_key() :: {clock, set(), actor()}.
 -type end_key() :: {end_key, set()}.
 -type element_key() :: {element, set(), member(), actor(), non_neg_integer()}.
-%% TombStoneBit, 0 for added, 1 for removed.
--type tsb() :: <<_:1>>.
--type member_key() :: {s, set(), member(), actor(), counter(), tsb()}.
+-type dot() :: bigset_clock:dot().
+-type dot_list() :: [dot()].
 -type ctx() :: binary().
 -type add() :: {member(), ctx()} | member().
 -type adds() :: {member(), ctx()}.
@@ -17,8 +16,9 @@
 -type removes() :: [remove()].
 -type db() :: eleveldb:db_ref().
 
--type delta_element() :: {ElementKey :: binary(),
-                          ctx()}.
+-type delta_add() :: {ElementKey :: binary(),
+                          dot_list()}.
+-type delta_remove() :: {member(), dot_list()}.
 
 -record(bigset_read_fsm_v1, {req_id,
                              from,
@@ -41,8 +41,8 @@
                            ctx :: binary()
                           }).
 -record(bigset_replicate_req_v1, {set :: set(),
-                                  inserts :: [delta_element()],
-                                  removes :: removes()
+                                  inserts :: [delta_add()],
+                                  removes :: [delta_remove()]
                                  }).
 
 -record(bigset_read_req_v1, {set}).

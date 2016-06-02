@@ -66,11 +66,9 @@ fold({Key, Value}, Acc=#fold_acc{not_found=true}) ->
     case bigset:decode_key(Key) of
         {clock, Set, Actor} ->
             %% Set clock, send at once
-            Causal = bigset:from_bin(Value),
-            Clock = bigset_causal:clock(Causal),
-            Tombstone = bigset_causal:tombstone(Causal),
+            Clock = bigset:from_bin(Value),
             send({clock, Clock}, Acc),
-            Acc#fold_acc{not_found=false, set_tombstone=Tombstone};
+            Acc#fold_acc{not_found=false};
         _ ->
             throw({break, Acc})
     end;

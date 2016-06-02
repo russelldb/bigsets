@@ -81,17 +81,33 @@ from_vv(Clock) ->
 %% gapped dots. If adding this dot closes some gaps, the seen set is
 %% compressed onto the clock.
 -spec add_dot(riak_dt_vclock:dot(), clock()) -> clock().
-add_dot({Actor, Cnt}, {Clock, Seen}) ->
-    Seen2 = ?DICT:update(Actor,
-                         fun(Dots) ->
-                                 lists:umerge([Cnt], Dots)
-                         end,
-                         [Cnt],
-                         Seen),
+add_dot(Dot, {Clock, Seen}) ->
+    Seen2 = add_dot_to_cloud(Dot, Seen),
     compress_seen(Clock, Seen2).
 
--spec seen(clock(), dot()) -> boolean().
-seen({Clock, Seen}, {Actor, Cnt}=Dot) ->
+add_dot_to_cloud({Actor, Cnt}, Cloud) ->
+    ?DICT:update(Actor,
+                 fun(Dots) ->
+                         lists:umerge([Cnt], Dots)
+                 end,
+                 [Cnt],
+                 Cloud).
+
+%% @doc given a list of `riak_dt_vclock:dot()' and a `Clock::clock()',
+%% add the dots from `Dots' to the clock. All dots contiguous with
+%% events summerised by the clocks VV it will be added to the VV, any
+%% exceptions (see DVV, or CVE papers) will be added to the set of
+%% gapped dots. If adding a dot closes some gaps, the seen set is
+%% compressed onto the clock.
+    -spec add_dots([riak_dt_vclock:dot()], clock()) -> clock().
+add_dots(Dots, {Clock, Seen}) ->
+    Seen2 = lists:foldl(fun add_dot_to_cloud/2,
+                        Seen,
+                        Dots),
+    compress_seen(Clock, Seen2).
+
+-spec seen(dot(), clock()) -> boolean().
+seen({Actor, Cnt}=Dot, {Clock, Seen}) ->
     (riak_dt_vclock:descends(Clock, [Dot]) orelse
      lists:member(Cnt, fetch_dot_list(Actor, Seen))).
 
@@ -108,7 +124,7 @@ fetch_dot_list(Actor, Seen) ->
 subtract_seen(Clock, Dots) ->
     %% @TODO(rdb|optimise) this is maybe a tad inefficient.
     lists:filter(fun(Dot) ->
-                         not seen(Clock, Dot)
+                         not seen(Dot, Clock)
                  end,
                  Dots).
 
@@ -216,17 +232,17 @@ orddict_to_proplist(Dots) ->
 %% orddict of {actor, [dot()]} as returned by `complement/2'
 intersection(DotCloud, Clock) ->
     Intersection = orddict:fold(fun(Actor, Dots, Acc) ->
-                         Dots2 = lists:filter(fun(X) ->
-                                                      bigset_clock:seen(Clock, {Actor, X}) end,
-                                              Dots),
-                         case Dots2 of
-                             [] ->
-                                 Acc;
-                             _ ->
-                                 [{Actor, Dots2} | Acc]
-                         end
-                 end,
-                 [],
+                                        Dots2 = lists:filter(fun(X) ->
+                                                                     seen({Actor, X}, Clock) end,
+                                                             Dots),
+                                        case Dots2 of
+                                            [] ->
+                                                Acc;
+                                            _ ->
+                                                [{Actor, Dots2} | Acc]
+                                        end
+                                end,
+                                [],
                                 DotCloud),
     compress_seen([], Intersection).
 
@@ -335,12 +351,12 @@ add_dot_low_dot_test() ->
 
 seen_test() ->
     Clock = {[{a, 2}, {b, 9}, {z, 4}], [{a, [7]}, {c, [99]}]},
-    ?assert(seen(Clock, {a, 1})),
-    ?assert(seen(Clock, {z, 4})),
-    ?assert(seen(Clock, {c, 99})),
-    ?assertNot(seen(Clock, {a, 5})),
-    ?assertNot(seen(Clock, {x, 1})),
-    ?assertNot(seen(Clock, {c, 1})).
+    ?assert(seen({a, 1}, Clock)),
+    ?assert(seen({z, 4}, Clock)),
+    ?assert(seen({c, 99}, Clock)),
+    ?assertNot(seen({a, 5}, Clock)),
+    ?assertNot(seen({x, 1}, Clock)),
+    ?assertNot(seen({c, 1}, Clock)).
 
 contiguous_counter_test() ->
     Clock = {[{a, 2}, {b, 9}, {z, 4}], [{a, [7]}, {c, [99]}]},
