@@ -72,7 +72,7 @@
                               io:format(user, Str, Args) end, P)).
 
 eqc_test_() ->
-    {timeout, 60, ?_assertEqual(true, eqc:quickcheck(eqc:testing_time(50, ?QC_OUT(prop_merge()))))}.
+    {timeout, 120, ?_assertEqual(true, eqc:quickcheck(eqc:testing_time(50, ?QC_OUT(prop_merge()))))}.
 
 run() ->
     run(?NUMTESTS).

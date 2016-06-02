@@ -419,6 +419,32 @@ subtract_seen_test() ->
 
 -ifdef(EQC).
 
+-define(NUMTESTS, 1000).
+-define(QC_OUT(P),
+        eqc:on_output(fun(Str, Args) ->
+                              io:format(user, Str, Args) end, P)).
+
+eqc_test_() ->
+    {timeout, 60, [
+                   ?_assertEqual(true, eqc:quickcheck(?QC_OUT(prop_merge_clocks()))),
+                   ?_assertEqual(true, eqc:quickcheck(?QC_OUT(prop_intersection()))),
+                   ?_assertEqual(true, eqc:quickcheck(?QC_OUT(prop_complement())))
+                  ]}.
+
+run(Prop) ->
+    run(Prop, ?NUMTESTS).
+
+run(Prop, Count) ->
+    eqc:quickcheck(eqc:numtests(Count, Prop)).
+
+eqc_check(Prop) ->
+    eqc:check(Prop).
+
+eqc_check(Prop, File) ->
+    {ok, Bytes} = file:read_file(File),
+    CE = binary_to_term(Bytes),
+    eqc:check(Prop, CE).
+
 prop_merge_clocks() ->
     ?FORALL(Events, gen_all_system_events(),
             ?FORALL(Clocks, gen_clocks(Events),
@@ -441,21 +467,15 @@ prop_intersection() ->
 
 prop_complement() ->
     ?FORALL(Events, gen_all_system_events(),
-            ?FORALL([{_, {Base1, _DC1}=Clock1} | _], gen_clocks(Events),
-                    ?FORALL({Base2, _DC}=Clock2, gen_sub_clock(Clock1),
+            ?FORALL([{_, {_Base1, _DC1}=Clock1} | _], gen_clocks(Events),
+                    ?FORALL({_Base2, _DC}=Clock2, gen_sub_clock(Clock1),
                             begin
                                 Res = dot_cloud_to_set(complement(Clock1, Clock2)),
                                 Set1 = clock_to_set(Clock1),
                                 Set2 = clock_to_set(Clock2),
                                 Expected = ordsets:subtract(Set1, Set2),
-                                %% @TODO(rdb) remove some/all stats
                                 %% @TODO(rdb) add check_distribution when we get off r16
-                                collect({all_nodes1, length(all_nodes(Clock1))},
-                                        collect({all_nodes2, length(all_nodes(Clock2))},
-                                                collect({base1_length, length(Base1)},
-                                                        collect({base2_length, length(Base2)},
-                                                                collect({empty_base2, Base2 == []},
-                                                                        equals(Expected, Res))))))
+                                equals(Expected, Res)
                             end))).
 
 clock_to_dotcloud({VV, DC}) ->
