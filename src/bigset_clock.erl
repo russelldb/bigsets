@@ -22,6 +22,7 @@
 %% lazy inefficient dot cloud of dict Actor->[count()]
 -type clock() :: {riak_dt_vclock:vclock(), [riak_dt:dot()]}.
 -type dot() :: riak_dt:dot().
+-type dotcloud() :: [{riak_dt_vclock:actor(), [pos_integer()]}].
 
 -define(DICT, orddict).
 
@@ -230,6 +231,7 @@ orddict_to_proplist(Dots) ->
 
 %% @doc intersection is all the dots in A that are also in B. A is an
 %% orddict of {actor, [dot()]} as returned by `complement/2'
+-spec intersection(dotcloud(), clock()) -> clock().
 intersection(DotCloud, Clock) ->
     Intersection = orddict:fold(fun(Actor, Dots, Acc) ->
                                         Dots2 = lists:filter(fun(X) ->
@@ -251,6 +253,7 @@ intersection(DotCloud, Clock) ->
 %% are not in B. We actually assume that B is a subset of A, so we're
 %% talking about B's complement in A.
 %% Returns a dot-cloud
+-spec complement(clock(), clock()) -> dotcloud().
 complement({AVV, ADC}=A, {BVV, BDC}) ->
     %% This is horrendously ineffecient, we need to use math/bit
     %% twiddling to find a better way.
