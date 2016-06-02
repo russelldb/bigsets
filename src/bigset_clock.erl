@@ -141,13 +141,13 @@ subtract(Clock, Dots) ->
 %% Remove an event `dot()' `Dot' from the clock() `Clock', effectively
 %% un-see `Dot'.
 subtract_dot(Clock, Dot) ->
-    {VV, DC} = Clock,
+    {VV, DotCloud} = Clock,
     {Actor, Cnt} = Dot,
-    DL = fetch_dot_list(Actor, DC),
-    case lists:member(Cnt, DL) of
+    DotList = fetch_dot_list(Actor, DotCloud),
+    case lists:member(Cnt, DotList) of
         %% Dot in the dot cloud, remove it
         true ->
-            {VV, orddict:store(Actor, lists:delete(Cnt, DL), DC)};
+            {VV, delete_dot(Dot, DotList, DotCloud)};
         false ->
             %% Check the clock
             case riak_dt_vclock:get_counter(Actor, VV) of
@@ -157,12 +157,26 @@ subtract_dot(Clock, Dot) ->
                     %% less than cnt in the base
                     NewBase = Cnt-1,
                     NewDots = lists:seq(Cnt+1, N),
-                    {riak_dt_vclock:set_counter(Actor, NewBase, VV),
-                     orddict:store(Actor, lists:umerge(NewDots, DL), DC)};
+                    NewVV = riak_dt_vclock:set_counter(Actor, NewBase, VV),
+                    NewDC = case NewDots of
+                                [] ->
+                                    DotCloud;
+                                _ ->
+                                    orddict:store(Actor, lists:umerge(NewDots, DotList), DotCloud)
+                            end,
+                    {NewVV, NewDC};
                 _ ->
                     %% NoOp
                     Clock
             end
+    end.
+
+delete_dot({Actor, Cnt}, DotList, DotCloud) ->
+    case lists:delete(Cnt, DotList) of
+        [] ->
+            orddict:erase(Actor, DotCloud);
+        DotList2 ->
+            orddict:store(Actor, DotList2, DotCloud)
     end.
 
 %% @doc get the counter for `Actor' where `counter' is the maximum

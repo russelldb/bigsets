@@ -76,7 +76,7 @@ remove_seen(Element, Ctx, Clock, Keys) ->
                             true ->
                                 {ClockAcc, ordsets:del_element({Element, DA, DC}, KeysAcc)};
                             false ->
-                                {bigset_clock:add_dot(Dot, ClockAcc), Keys}
+                                {bigset_clock:add_dot(Dot, ClockAcc), KeysAcc}
                         end
                 end,
                 {Clock, Keys},
@@ -156,17 +156,18 @@ size(Bigset) ->
 %% set-tombstone is discarded.
 -spec compact(bigset()) -> bigset().
 compact(Bigset) ->
-    ordsets:fold(fun({_E, A, C}=Key, BS=#bigset{tombstone=Tombstone, keys=Elements}) ->
+    BS = ordsets:fold(fun({_E, A, C}=Key, BS=#bigset{tombstone=Tombstone, keys=Elements}) ->
                          case bigset_clock:seen({A, C}, Tombstone) of
                              true ->
-                                 BS#bigset{tombstone=bigset_clock:subtract_dot(Tombstone, {A, C}),
+                                 BS#bigset{%%tombstone=bigset_clock:subtract_dot(Tombstone, {A, C}),
                                            keys=ordsets:del_element(Key, Elements)};
                              false ->
                                  BS
                          end
                  end,
                  Bigset,
-                 Bigset#bigset.keys).
+                      Bigset#bigset.keys),
+    BS#bigset{tombstone=bigset_clock:fresh()}.
 
 is_member(Element, BS) ->
     #bigset{tombstone=Tombstone, keys=Keys} = BS,
@@ -256,6 +257,9 @@ read_merge(MBS1, MBS2) ->
 clock(#bigset{clock=Clock}) ->
     Clock.
 
+tombstone(#bigset{tombstone=Tombstone}) ->
+    Tombstone.
+
 handoff_keys(#bigset{tombstone=Tombstone, keys=Keys}) ->
     ordsets:filter(fun({_E, A, C}) ->
                            not bigset_clock:seen({A, C}, Tombstone)
@@ -339,3 +343,9 @@ current_dots(E, [{NE, _, _} | _Keys], _Tombstone, Acc) when NE > E ->
     Acc;
 current_dots(_E, [], _Tombstone, Acc) ->
     Acc.
+
+merge(#bigset{tombstone=TS1, clock=C1, keys=K1},
+      #bigset{tombstone=TS2, clock=C2, keys=K2}) ->
+    #bigset{tombstone=bigset_clock:merge(TS1, TS2),
+            clock=bigset_clock:merge(C1, C2),
+            keys=ordsets:union(K1, K2)}.
