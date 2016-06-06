@@ -23,8 +23,13 @@
 -record(bigset_read_fsm_v1, {req_id,
                              from,
                              set,
-                             member,
                              options}).
+
+-record(bigset_query_fsm_v1, {req_id,
+                              from,
+                              set,
+                              members,
+                              options}).
 
 -record(bigset_op_req_v1, {set :: binary(), %% The name of the set
                            inserts:: adds(), %% to be stored
@@ -48,7 +53,7 @@
 -record(bigset_read_req_v1, {set}).
 
 -record(bigset_contains_req_v1, {set :: set(), %% The set
-                                 member :: member() %%  element to check membership
+                                 members :: [member()] %%  elements to check membership
                                 }).
 
 %% Tombstone byte meaning
@@ -61,6 +66,7 @@
 -define(CONTAINS_REQ, #bigset_contains_req_v1).
 
 -define(READ_FSM_ARGS, #bigset_read_fsm_v1).
+-define(QUERY_FSM_ARGS, #bigset_query_fsm_v1).
 
 -define(DEFAULT_BATCH_SIZE, 1000).
 -define(DEFAULT_WORKER_POOL, 100).

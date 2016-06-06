@@ -170,11 +170,11 @@ handle_command(?READ_REQ{set=Set}, Sender, State) ->
 %%% Contains Query
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-handle_command(?CONTAINS_REQ{set=Set, member=Member}, Sender, State) ->
+handle_command(?CONTAINS_REQ{set=Set, members=Members}, Sender, State) ->
     %% contains is a special kind of read, and an async fold operation
     %% @see bigset_vnode_worker for that code.
-    #state{db=DB} = State,
-    {async, {is_member, DB, Set, Member}, Sender, State}.
+    #state{db=DB, vnodeid=Id} = State,
+    {async, {contains, Id, DB, Set, Members}, Sender, State}.
 
 -spec handle_handoff_command(term(), term(), state()) ->
                                     {noreply, state()}.

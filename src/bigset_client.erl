@@ -21,7 +21,9 @@
          stream_read/2,
          stream_read/3,
          is_member/2,
-         is_member/4
+         is_member/4,
+         is_subset/2,
+         is_subset/4
         ]).
 
 -define(DEFAULT_TIMEOUT, 60000).
@@ -42,6 +44,31 @@ new(Node) ->
     {?MODULE, Node}.
 
 
+-spec is_subset(set(), [member()]) ->
+                       [{member(), ctx()}].
+is_subset(Set, Members) ->
+    is_subset(Set, Members, [], new()).
+
+is_subset(Set, Members, Options, {?MODULE, Node}) ->
+    Me = self(),
+    ReqId = mk_reqid(),
+    Request = ?QUERY_FSM_ARGS{req_id=ReqId,
+                             from=Me,
+                             set=Set,
+                             members=Members,
+                             options=Options},
+
+    case node() of
+        Node ->
+            bigset_query_fsm:start_link(Request);
+        _ ->
+            proc_lib:spawn_link(Node, bigset_read_fsm, start_link,
+                                [Request])
+    end,
+    Timeout = recv_timeout(Options),
+    Res = wait_for_query(ReqId, Timeout),
+    Res.
+
 -spec is_member(set(), member()) ->
                        {true, ctx()} |
                        {false, <<>>} |
@@ -53,25 +80,8 @@ is_member(Set, Member) ->
                        {true, ctx()} |
                        {false, <<>>} |
                        {error, Reason :: term()}.
-is_member(Set, Member, Options, {?MODULE, Node}) ->
-    Me = self(),
-    ReqId = mk_reqid(),
-    Request = ?READ_FSM_ARGS{req_id=ReqId,
-                             from=Me,
-                             set=Set,
-                             member=Member,
-                             options=Options},
-
-    case node() of
-        Node ->
-            bigset_read_fsm:start_link(Request);
-        _ ->
-            proc_lib:spawn_link(Node, bigset_read_fsm, start_link,
-                                [Request])
-    end,
-    Timeout = recv_timeout(Options),
-    Res = wait_for_read(ReqId, Timeout),
-    Res.
+is_member(Set, Member, Options, {?MODULE, _Node}=Client) ->
+    is_subset(Set, [Member], Options, Client).
 
 -spec update(set(), adds()) ->
                     ok | {error, Reason :: term()}.
@@ -179,6 +189,14 @@ wait_for_reqid(ReqId, Timeout) ->
     end.
 
 -record(read_acc, {ctx,elements=[]}).
+
+wait_for_query(ReqId, Timeout) ->
+    receive
+        {ReqId, Resp} ->
+            {ok, Resp}
+    after Timeout ->
+            {error, timeout}
+    end.
 
 %% How to stream??  Ideally the process calling the client calls
 %% receive!
