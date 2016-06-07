@@ -62,7 +62,7 @@ is_subset(Set, Members, Options, {?MODULE, Node}) ->
         Node ->
             bigset_query_fsm:start_link(Request);
         _ ->
-            proc_lib:spawn_link(Node, bigset_read_fsm, start_link,
+            proc_lib:spawn_link(Node, bigset_query_fsm, start_link,
                                 [Request])
     end,
     Timeout = recv_timeout(Options),
@@ -80,8 +80,8 @@ is_member(Set, Member) ->
                        {true, ctx()} |
                        {false, <<>>} |
                        {error, Reason :: term()}.
-is_member(Set, Member, Options, {?MODULE, _Node}=Client) ->
-    is_subset(Set, [Member], Options, Client).
+is_member(Set, Member, Options, {?MODULE, _Node}=This) ->
+    is_subset(Set, [Member], Options, This).
 
 -spec update(set(), adds()) ->
                     ok | {error, Reason :: term()}.
@@ -128,8 +128,6 @@ read(Set, Options) ->
                   {ok, {ctx, binary()}, {elems, [{binary(), binary()}]}} |
                   {error, Reason :: term()}.
 read(Set, Options, {?MODULE, Node}) ->
-
-
     Me = self(),
     ReqId = mk_reqid(),
     Request = ?READ_FSM_ARGS{req_id=ReqId, from=Me, set=Set, options=Options},
