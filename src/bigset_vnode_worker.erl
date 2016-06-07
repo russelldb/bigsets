@@ -86,12 +86,13 @@ handle_work({handoff, DB, FoldFun, Acc0}, Sender, State) ->
 handle_work({contains, Id, DB, Set, Members0}, Sender, State) ->
     #state{partition=Partition} = State,
     Members = lists:usort(Members0),
-    %%    lager:info("~p is ~p", [Partition, self()]),
 
     Monitor = riak_core_vnode:monitor(Sender),
     %% clock is first key, this actors clock key is the first key we
     %% care about. Read it, and tombstone, then move iterator to first
     %% member and fold over just those entries
+    %%
+    %% @TODO bench folding over these rather than reads
 
     {NotFound, Clock} = bigset:get_clock(Set, Id, DB),
     Tombstone = bigset:get_tombstone(Set, Id, DB),
@@ -101,7 +102,8 @@ handle_work({contains, Id, DB, Set, Members0}, Sender, State) ->
             riak_core_vnode:reply(Sender, {not_found, Partition, {self(), Monitor}}),
             erlang:demonitor(Monitor, [flush]);
         false ->
-            {ok, Iter} = eleveldb:iterator(DB, [{iterator_refresh, true}]),%%, keys_only),
+            %% @TODO is keys_only faster?
+            {ok, Iter} = eleveldb:iterator(DB, [{iterator_refresh, true}], keys_only),
             Subset = read_subset(Set, Tombstone, Members, Iter),
             riak_core_vnode:reply(Sender, {{set, Clock, Subset, done}, Partition, {self(), Monitor}}),
             erlang:demonitor(Monitor, [flush])
@@ -168,7 +170,7 @@ move_iterator(Iter, Action) ->
     case eleveldb:iterator_move(Iter, Action) of
         {error, invalid_iterator} ->
             {Iter, done};
-        {ok, Key, _V} ->
+        {ok, Key} ->
             try
                 {Iter, bigset:decode_key(Key)}
             catch C:E ->
