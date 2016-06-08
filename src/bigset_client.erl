@@ -128,9 +128,15 @@ read(Set, Options) ->
                   {ok, {ctx, binary()}, {elems, [{binary(), binary()}]}} |
                   {error, Reason :: term()}.
 read(Set, Options, {?MODULE, Node}) ->
+    Opts = case validate_read_options(Options) of
+               valid ->
+                   Options;
+               {invalid, Message, Options} ->
+                   {error, invalid_options, Message, Options}
+           end,
     Me = self(),
     ReqId = mk_reqid(),
-    Request = ?READ_FSM_ARGS{req_id=ReqId, from=Me, set=Set, options=Options},
+    Request = ?READ_FSM_ARGS{req_id=ReqId, from=Me, set=Set, options=Opts},
 
     case node() of
         Node ->
@@ -221,3 +227,19 @@ wait_for_read(ReqId, Timeout, Acc) ->
 %% @private
 mk_reqid() ->
     erlang:phash2({self(), os:timestamp()}). % only has to be unique per-pid
+
+validate_read_options(Opts) ->
+    validate_read_options(Opts, []).
+
+validate_read_options([], []) ->
+    valid;
+validate_read_options([], Errs) ->
+    {invalid_options, Errs};
+validate_read_options([{range_start, Start} | Opts], Errs) ->
+    {Errs2, Opts2} = validate_range_opts(Start, proplists:lookup(range_end, Opts), Errs),
+    validate_read_options(Opts2, Errs);
+validate_read_options([{range_end, End} | Opts], Errs) ->
+    {Errs2, Opts2} = validate_range_options(End, proplists:lookup(range_start, Opts), Errs),
+    validate_read_options(Opts2, Errs2).
+
+
