@@ -66,7 +66,7 @@
 %% The set of possible elements in the set
 -define(ELEMENTS, ['A', 'B', 'C', 'D', 'X', 'Y', 'Z']).
 
--define(NUMTESTS, 1000).
+-define(NUMTESTS, 100).
 -define(QC_OUT(P),
         eqc:on_output(fun(Str, Args) ->
                               io:format(user, Str, Args) end, P)).
@@ -91,9 +91,8 @@ check(File) ->
 initial_state() ->
     #state{}.
 
-%% @doc <i>Optional callback</i>, Invariant, checked for each visited state
-%%      during test execution.
-%% @TODO this invariant does not hold for a replica receiving handoff
+%% @doc <i>Optional callback</i>, Invariant, checked for each visited
+%% state during test execution.
 -spec invariant(S :: eqc_statem:dynamic_state()) -> boolean().
 invariant(_S) ->
     Hoffs = ets:tab2list(?HOFF_REC),
@@ -342,7 +341,9 @@ start_handoff_pre(#state{replicas=Replicas}) ->
 %% @doc start_handoff_args - Argument generator
 -spec start_handoff_args(S :: eqc_statem:symbolic_state()) -> eqc_gen:gen([term()]).
 start_handoff_args(#state{replicas=Replicas, hoff_targets=HoffTargets, deleters=Deleters}) ->
+    %% prejudice in favour of handing off removed keys
     [oneof([elements(Replicas)] ++ [elements(Deleters) || Deleters /= []]),
+     %% we want to test multiple concurrent handoffs
      oneof([elements(Replicas)] ++ [elements(HoffTargets) || HoffTargets /= []])].
 
 %% @doc start_handoff_pre/2 - Precondition for start_handoff
@@ -359,8 +360,10 @@ start_handoff_pre(#state{replicas=Replicas}, [Sender, Receiver]) ->
     when S    :: eqc_statem:symbolic_state(),
          Args :: [term()].
 start_handoff_dynamicpre(_S, [Sender, Receiver]) ->
+    %% A handing off node can never be a receiver, nor a receiver be a
+    %% handoffer
     ets:match_object(?HOFF_REC, {'_', Sender}) == [] andalso
-        ets:match_object(?HOFF_REC, {Receiver, '_'}) == [] andalso
+        ets:match_object(?HOFF_REC, {Receiver, '_'})  == [] andalso
         ets:match_object(?HOFF_REC, {Sender, Receiver}) == [].
 
 %% @doc start_handoff - The actual operation
