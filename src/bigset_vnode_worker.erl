@@ -59,7 +59,8 @@ handle_work({get, Id, DB, Set}, Sender, State) ->
     EndKey = bigset:end_key(Set),
     Buffer = bigset_fold_acc:new(Set, Sender, BatchSize, Partition, Id),
     FoldOpts = [{start_key, FirstKey},
-                {last_key, EndKey},
+                {end_key, EndKey},
+                %{end_inclusive, true}, % set this to process the bigset's end key
                 {bigsets, true},
                 {vnode, Id} | ?RFOLD_OPTS],
 
