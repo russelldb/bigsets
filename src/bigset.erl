@@ -4,6 +4,8 @@
 
 -compile([export_all]).
 
+-ignore_xref([preflist/1, preflist_ann/1, dev_client/0]).
+
 -type binary_key() :: binary().
 -type key_tuple() :: clock_key() | end_key() | element_key().
 

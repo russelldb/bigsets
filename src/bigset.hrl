@@ -1,3 +1,4 @@
+-type partition() :: pos_integer().
 -type set() :: binary().
 -type member() :: binary().
 -type actor() :: binary().
@@ -15,6 +16,12 @@
 -type remove() :: {member(), ctx()} | member().
 -type removes() :: [remove()].
 -type db() :: eleveldb:db_ref().
+-type element() :: {member(), dot_list()}.
+-type elements() :: [element()].
+-type repair_data() :: {member(), AddDots :: dot_list()} |
+                       {member(), AddDots :: dot_list(), RemDots :: dot_list()}.
+-type repair() :: {Partition :: pos_integer(), repair_data()}.
+-type repairs() :: [repair()].
 
 -type delta_add() :: {ElementKey :: binary(),
                           dot_list()}.
