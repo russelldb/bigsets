@@ -117,7 +117,7 @@ maybe_merge_and_flush(Core) ->
         {true, LeastLastElement, MergableActors} ->
             SplitFun = split_fun(LeastLastElement),
             %% of the actors that are mergable, split their lists
-            %% fold instead so that you can merge+update the Core to return in one pass!!
+            %% fold instead so that you can merge+update the Core to return in one pass
             {MergedActor, NewActors} =lists:foldl(fun({Partition, Actor}, {MergedSet, NewCore}) ->
                                                           #actor{elements=Elements} = Actor,
                                                           {Merge, Keep} = lists:splitwith(SplitFun, Elements),
@@ -166,12 +166,12 @@ elements_split(Least, <<Sz:32/integer, Rest/binary>>, Cntr) ->
 %%   element. We're taking the least last element of all the actors
 %%   elements since this defines the common subset of the set we've
 %%   received and can merge safely.
--spec mergable(Actors :: [#actor{}],
+-spec mergable(Actors :: [{Partition :: pos_integer(), #actor{}}],
                LeastLastElement :: undefined | {binary(), [riak_dt:dot()]},
                MergedAccumulator :: [#actor{}]) ->
                       {true,
                        LeastLastElement :: {binary(), [riak_dt:dot()]},
-                       [#actor{}]} |
+                       [{Partition:: pos_integer(), #actor{}}]} |
                       false.
 mergable([], LeastLast, MergeActors) ->
     {true, LeastLast, MergeActors};
@@ -231,77 +231,11 @@ merge([{_Partition, Actor} | Rest], Mergedest0) ->
 orswot_merge(#actor{clock=C1, elements=E}, A=#actor{clock=C2, elements=E}) ->
     A#actor{clock=bigset_clock:merge(C1, C2)};
 orswot_merge(A1, A2) ->
-    #actor{elements=E1, clock=C1} = A1,
-    #actor{elements=E2, clock=C2} = A2,
-    Clock = bigset_clock:merge(C1, C2),
-
-    %% ugly cut and paste from old riak_dt_orswot before
-    %% @TODO(rdb|refactor|optimise) this is a candidate for optimising
-    %% assuming most replicas are mostly in sync
-    {E2Unique, Keeps} = lists:foldl(fun({E, Dots}, {E2Remains, Acc}) ->
-                                            case lists:keytake(E, 1, E2Remains) of
-                                                false ->
-                                                    %% Only present on E1 side, filter
-                                                    %% the dots
-                                                    Acc2 = filter_element(E, Dots, C2, Acc),
-                                                    {E2Remains, Acc2};
-                                                {value, {E, Dots2}, NewE2} ->
-                                                    Acc2 = merge_element(E, {Dots, C1}, {Dots2, C2}, Acc),
-                                                    {NewE2, Acc2}
-                                            end
-                                    end,
-                                    {E2, []},
-                                    E1),
-    E2Keeps = lists:foldl(fun({E, Dots}, Acc) ->
-                                  %% Only present on E2 side, filter
-                                  %% the dots
-                                  filter_element(E, Dots, C1, Acc)
-                          end,
-                          [],
-                          E2Unique),
-
-    Elements = lists:umerge(lists:reverse(Keeps), lists:reverse(E2Keeps)),
-
+    #actor{partition=P1, elements=E1, clock=C1} = A1,
+    #actor{partition=P2, elements=E2, clock=C2} = A2,
+    {_Repairs, Clock, Elements} = bigset_read_merge:merge_sets([{P1, C1, E1},
+                                                               {P2, C2, E2}]),
     #actor{clock=Clock, elements=Elements}.
-
-
-%% @private if `Clock' as seen all `Dots' return Acc, otherwise add
-%% `Element' and unseen/surviving dots to `Acc' and return.
-filter_element(Element, Dots, Clock, Acc) ->
-    case bigset_clock:subtract_seen(Clock, Dots) of
-        [] ->
-            %% Removed, do not keep
-            Acc;
-        SurvivingDots ->
-            %% @TODO in this proto 2 is the most sets we will merge,
-            %% so we can binary/compress dots here
-            [{Element, SurvivingDots} | Acc]
-    end.
-
-%% @private must be a better way, eh?  If a dot is present in both LHS
-%% and RHS dots, then keep that dot, if a dot is only on one side,
-%% keep it only if the otherside has not seen it (and therefore
-%% removed it) if following this filtering of dots, any dot remains,
-%% accumulate the element. If no dots are common or unseen, discard
-%% the element.
-merge_element(Element, {LHSDots, LHSClock}, {RHSDots, RHSClock}, Acc) ->
-    %% On both sides
-    CommonDots = sets:intersection(sets:from_list(LHSDots), sets:from_list(RHSDots)),
-    LHSUnique = sets:to_list(sets:subtract(sets:from_list(LHSDots), CommonDots)),
-    RHSUnique = sets:to_list(sets:subtract(sets:from_list(RHSDots), CommonDots)),
-    LHSKeep = bigset_clock:subtract_seen(RHSClock, LHSUnique),
-    RHSKeep = bigset_clock:subtract_seen(LHSClock, RHSUnique),
-    V = riak_dt_vclock:merge([sets:to_list(CommonDots), LHSKeep, RHSKeep]),
-    %% Perfectly possible that an item in both sets should be dropped
-    case V of
-        [] ->
-            %% Removed from both sides, do not accumulate
-            Acc;
-        _ ->
-            %% @TODO again here could maybe compress dots for smaller
-            %% datas
-            [{Element, V} | Acc]
-    end.
 
 set_actor(Partition, Actor, State) ->
     #state{actors=Actors} = State,
