@@ -9,11 +9,11 @@
 -module(bigset_vnode).
 
 -behaviour(riak_core_vnode).
--include("bigset.hrl").
 -include_lib("riak_core/include/riak_core_vnode.hrl").
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
+-include("bigset.hrl").
 
 -export([start_vnode/1,
          coordinate/2,

@@ -39,7 +39,6 @@
 -type message() :: not_found | {clock, clock()} |
                    done | {elements, elements()}.
 -type from() :: {pid(), reference()}.
--type elements() :: [{Member :: binary(), [Dot :: riak_dt_vclock:dot()]}].
 -type clock() :: bigset_clock:clock().
 -type partition() :: non_neg_integer().
 -type reqid() :: term().

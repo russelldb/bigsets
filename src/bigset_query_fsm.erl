@@ -36,6 +36,7 @@
                 repair = [] :: repairs()
                }).
 
+-type partition() :: pos_integer().
 -type state() :: #state{}.
 -type result() :: {message(), partition(), from()}.
 -type message() :: not_found | {set, clock(), elements(), done}.
@@ -163,7 +164,7 @@ merge_results(Results) ->
                         {Repairs, {set, Clock, Elements, done}}
                 end,
                 hd(Results),
-                Results).
+                tl(Results)).
 
 schedule_timeout(infinity) ->
     undefined;

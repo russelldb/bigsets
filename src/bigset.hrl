@@ -1,4 +1,3 @@
--type partition() :: pos_integer().
 -type set() :: binary().
 -type member() :: binary().
 -type actor() :: binary().
