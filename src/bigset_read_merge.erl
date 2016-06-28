@@ -3,6 +3,7 @@
 %%% @doc
 %%% Funtions for merging sets/partial sets and generating repair data
 %%% from results
+%%% @TODO Is the repair data the complement of the merge data?
 %%% @end
 %%% Created : 15 Jun 2016 by Russell Brown <russelldb@basho.com>
 
@@ -23,29 +24,40 @@
 -export([merge_sets/1]).
 -endif.
 
--type partition() :: pos_integer().
+-type partition() :: pos_integer() | [pos_integer()].
+
 
 %% @doc merge a list of (possibly partial) sets into a single set and
 %% a dictionary of repairs.  @TODO what is the `partition()' tag for a
 %% set that is the result of merging two(or more) results? A list of
 %% all the partitions that are in the dict?
 -spec merge_sets([{partition(), bigset_clock:clock(), elements()}]) ->
-                        {repairs(), bigset_clock:clock(), elements()}.
-merge_sets([]) ->
-    {[], bigset_clock:fresh(), []};
-merge_sets([{_P, Clock, Elements}]) ->
-    {[], {Clock, Elements}};
+                        {repairs(), {partition(), bigset_clock:clock(), elements()}}.
 merge_sets(Sets) ->
+    merge_sets(Sets, []).
+
+-spec merge_sets([{partition(), bigset_clock:clock(), elements()}], repairs()) ->
+                        {repairs(), {partition(), bigset_clock:clock(), elements()}}.
+merge_sets(Sets, Repairs) ->
     lists:foldl(fun(Set, {RepairsAcc, SetAcc}) ->
                         merge_set(SetAcc, Set, [], RepairsAcc)
                 end,
-                {[], hd(Sets)},
+                {Repairs, hd(Sets)},
                 tl(Sets)).
+
+-spec merge_ids(partition(), partition()) -> partition().
+merge_ids(P1, P2) ->
+    partition_to_list(P1) ++ partition_to_list(P2).
+
+partition_to_list(L) when is_list(L) ->
+    L;
+partition_to_list(I) ->
+    [I].
 
 %% @doc given a pair of sets, and a dictionary of repairs, merge into
 %% one set.
-merge_set({_P1, Clock1, []}, {_P2, Clock2, []}, ElementAcc, RepairAcc) ->
-    {RepairAcc, bigset_clock:merge(Clock1, Clock2), lists:reverse(ElementAcc)};
+merge_set({P1, Clock1, []}, {P2, Clock2, []}, ElementAcc, RepairAcc) ->
+    {RepairAcc, {merge_ids(P1, P2), bigset_clock:merge(Clock1, Clock2), lists:reverse(ElementAcc)}};
 merge_set({P1, Clock1, [{Element, Dots1} | T1]}, {P2, Clock2, [{Element2, _Dots2} | _T2]=E2}, ElementAcc, RepairAcc) when Element < Element2 ->
     {RepairAcc2, SurvivingDots} = handle_dots(Element, {P1, Dots1}, {P2, Clock2}, RepairAcc),
     ElementAcc2 = maybe_store_dots(Element, SurvivingDots, ElementAcc),
@@ -139,31 +151,38 @@ repair_update(Action, Partition, Element, Dot, Repairs) ->
 %% @TODO either make repairs a dict, or work with the three tuple
 %% defined elsewhere!
 get_repair(Partition, Repairs) ->
-    case lists:keyfind(Partition, 1, Repairs) of
-        {Partition, _Adds, _Removes}=Tuple ->
-            Tuple;
-        false ->
-            %% @TODO should be a record??
-            {Partition, [], []}
+    case orddict:find(Partition, Repairs) of
+        {ok, Repair} ->
+            Repair;
+        error ->
+            []
     end.
 
 set_repair(Partion, Repair, Repairs) ->
-    [Repair | lists:keydelete(Partion, 1, Repairs)].
+    orddict:store(Partion, Repair, Repairs).
 
-add_repair(add, Element, Dot, Repair) ->
-    add_repair(2, Element, Dot, Repair);
-add_repair(remove, Element, Dot, Repair) ->
-    add_repair(3, Element, Dot, Repair);
-add_repair(N, Element, Dot, Repair) when N == 2; N == 3 ->
-    Updated = update_element(Element, Dot, element(N, Repair)),
-    erlang:setelement(N, Repair, Updated).
+add_repair(Action, Element, Dot, Repair) ->
+    update_element(Action, Element, Dot, Repair).
 
-update_element(Element, Dot, Entries) ->
-    orddict:update(Element, fun(L) ->
-                                    lists:umerge([Dot], L)
-                            end,
-                   [Dot],
+update_element(Action, Element, Dot, Entries) ->
+    {Fun, Default} = update_fun(Action, Dot),
+
+    orddict:update(Element, Fun,
+                   Default,
                    Entries).
+
+update_fun(add, Dot) ->
+    {fun({Adds, Removes}) ->
+             {lists:umerge([Dot], Adds), Removes}
+     end,
+     {[Dot], []}
+    };
+update_fun(remove, Dot) ->
+    {fun({Adds, Removes}) ->
+             {Adds, lists:umerge([Dot], Removes)}
+     end,
+     {[], [Dot]}
+    }.
 
 intersection(Dots1, Dots2) ->
     ordsets:intersection(ordsets:from_list(Dots1), ordsets:from_list(Dots2)).
@@ -180,25 +199,24 @@ maybe_store_dots(Element, Dots, Elements) ->
 
 get_repair_test() ->
     Partition = 1,
-    ?assertEqual({Partition, [], []}, get_repair(Partition, [])),
-    Expected = {Partition,
-                [{<<"e1">>, [{a, 3}, {b, 5}, {d, 1}]},
-                 {<<"e4">>, [{a, 6}]}],
-                [{<<"e100">>, [{a, 12}, {b, 56}]}]},
-    Repairs = [Expected,
-               {2, [], [{<<"e99">>, [{a, 3}]}]},
-               {100, [{<<"e9">>, [{x, 13}]}], []}
+    ?assertEqual([], get_repair(Partition, [])),
+    Expected = [{<<"e1">>, {[{a, 3}, {b, 5}, {d, 1}], []}},
+                 {<<"e4">>, {[{a, 6}], []}},
+                 {<<"e100">>, {[], [{a, 12}, {b, 56}]}}],
+    P1 = {Partition, Expected},
+    Repairs = [P1,
+               {2, [{<<"e99">>, {[], [{a, 3}]}}]},
+               {100, [{<<"e9">>, {[{x, 13}], []}}]}
               ],
     ?assertEqual(Expected, get_repair(Partition, Repairs)).
 
 add_repair_test() ->
     Elem = <<"e1">>,
     Dot = {a, 1},
-    EmptyRepair = {1, [], []},
-    AddExpected = {1, [{Elem, [Dot]}], []},
-    RemExpected = {1, [], [{Elem, [Dot]}]},
-    AddActual = add_repair(add, Elem, Dot, EmptyRepair),
-    RemActual = add_repair(remove, Elem, Dot, EmptyRepair),
+    AddExpected = [{Elem, {[Dot], []}}],
+    RemExpected = [{Elem, {[], [Dot]}}],
+    AddActual = add_repair(add, Elem, Dot, []),
+    RemActual = add_repair(remove, Elem, Dot, []),
     ?assertEqual(AddExpected, AddActual),
     ?assertEqual(RemExpected, RemActual).
 
@@ -207,12 +225,12 @@ repair_update_test() ->
     Element = <<"e1">>,
     Dot = {a, 1},
     Repairs = [],
-    Expected = [{Partition, [], [{Element, [Dot]}]}],
+    Expected = [{Partition,[{Element, {[], [Dot]}}]}],
     Actual = repair_update(remove, Partition, Element, Dot, Repairs),
     ?assertEqual(Expected, Actual).
 
 repair_remove_test() ->
-    Expected = [{2, [], [{<<"e1">>, [{a, 2}]}]}],
+    Expected = [{2, [{<<"e1">>, {[], [{a, 2}]}}]}],
     Actual = repair_remove(2, <<"e1">>, {a, 2}, []),
     ?assertEqual(Expected, Actual).
 
@@ -220,10 +238,10 @@ repair_remove_test() ->
 %% quickchecked!
 merge_test() ->
     Clock1 = {[{a, 10}, {b, 3}, {d, 4}], %%base vv of clock1
-              [{b, [4,5]}, {c, [13]}, {d, [6,7]}]}, %% dot cloud 1
+              [{b, [5,6]}, {c, [13]}, {d, [6,7]}]}, %% dot cloud 1
     Set1 = {1, %% partition 1
             Clock1,
-            [{<<"element1">>, [{a, 8}, {b, 4}]},
+            [{<<"element1">>, [{a, 8}, {b, 5}]},
              {<<"element3">>, [{a, 1}, {c, 13}]},
              {<<"element4">>, [{a, 3}, {d, 1}]},
              {<<"element6">>, [{a, 10}]}] %% elements 1
@@ -235,28 +253,23 @@ merge_test() ->
             Clock2,
             [{<<"element1">>, [{a, 8}, {b, 4}]},
              {<<"element2">>, [{a, 4}, {d, 2}, {c, 15}]},
-             {<<"element4">>, [{a, 3}]},
+             {<<"element4">>, [{a, 3}, {c, 5}]},
              {<<"element5">>, [{c, 16}]}] %% elements 2
            },
 
     %% we expect a repair entry for both partitions
-    ExpectedRepairs = [
-                       {1,
-                        [{<<"element2">>, [{c, 15}]},
-                         {<<"element5">>, [{c, 16}]}], %% add repairs
-                        [{<<"element3">>, [{a, 1}, {c, 13}]},
-                         {<<"element4">>, [{d, 1}]}] %% remove repairs
-                       },
-                       {2,
-                        [{<<"element6">>, [{a, 10}]}], %% adds
-                        [{<<"element2">>, [{a, 4}, {d, 2}]}] %% removes
-                       }
-                      ],
+    ExpectedRepairs =   [{1,[{<<"element2">>,{[{c,15}],[]}},
+                             {<<"element3">>,{[],[{a,1},{c,13}]}},
+                             {<<"element4">>,{[{c,5}],[{d,1}]}},
+                             {<<"element5">>,{[{c,16}],[]}}]},
+                         {2,
+                          [{<<"element2">>,{[],[{a,4},{d,2}]}},
+                           {<<"element6">>,{[{a,10}],[]}}]}],
 
     ExpectedClock = bigset_clock:merge(Clock1, Clock2),
     ExpectedElements = [{<<"element1">>, [{a, 8}, {b, 4}]}, %%both
                         {<<"element2">>, [{c, 15}]}, %% one remaining dot from 2
-                        {<<"element4">>, [{a, 3}]}, %% one remaining dot from 2
+                        {<<"element4">>, [{a, 3}, {c, 5}]}, %% one remaining dot from 2 and 1 new one
                         {<<"element5">>, [{c, 16}]}, %% in set 2
                         {<<"element6">>, [{a, 10}]} %% in set 1
                        ],
@@ -267,5 +280,206 @@ merge_test() ->
     ?assertEqual(ExpectedClock, Clock),
     ?assertEqual(ExpectedElements, Elements).
 
+
+old_repair_to_new_repair(Repairs) ->
+    lists:map(fun({P, A, R}) ->
+                      {P, old_to_new(A, R)}
+              end,
+              Repairs).
+
+old_to_new(A, R) ->
+    NewAdds = orddict:map(fun(_E, As) ->
+                                  {As, []}
+                          end,
+                          A),
+    NewRems = orddict:map(fun(_E, Rs) ->
+                                  {[], Rs}
+                          end,
+                          R),
+    orddict:merge(fun(_E, {Adds, []}, {[], Rems}) ->
+                          {Adds, Rems}
+                  end,
+                  NewAdds,
+                  NewRems).
+
+
 -endif.
 
+-ifdef(EQC).
+
+-define(ELEMENTS, ['A', 'B', 'C', 'D', 'X', 'Y', 'Z']).
+
+gen_element() ->
+    elements(?ELEMENTS).
+
+%% prop() ->
+%%     ?FORALL(Events, bigset_clock:gen_all_system_events(),
+%%             ?FORALL(Clocks, gen_clocks(Events),
+%%                     ?FORALL(SystemDigest, gen_system_digest(Events),
+%%                             ?FORALL(Digests, gen_local_digests(SystemDigest, Clocks),
+%%                                     ?FORALL(DotToElement, function1(gen_element())
+%%                                             ?FORALL(Sets, gen_sets(Clocks, Digests, DotToElement),
+%%                                                     begin
+%%                                                         {Repairs, Clock, Elements} = merge_sets(Sets),
+%%                                                         RepairedSets = apply_repairs(Repairs, Sets),
+%%                                                         conjunction(
+%%                                                           [{Id, equals(Set, RepairedSet)} || {Id, RepairedSet} <- RepairedSets] ++
+%%                                                               [{merge, equals(Set, {Clock, Elements})])
+%%                                                           end))))))).
+
+
+prop2() ->
+    ?FORALL(DotToElement, function1(gen_element()),
+            ?FORALL(Events, bigset_clock:gen_all_system_events(),
+                    ?FORALL({Clocks, SystemRemoves}, {bigset_clock:gen_clocks(Events), gen_removes(Events)},
+                            ?FORALL({LocalRemoves, Elements}, {gen_local_removes(SystemRemoves, Clocks),
+                                                               gen_elements({Events, []}, SystemRemoves, DotToElement)},
+                                    ?FORALL(Sets, gen_sets2(Clocks, LocalRemoves, DotToElement),
+                                            begin
+                                                Set = {{Events, []}, Elements},
+                                                {Repairs, {_Id, Clock, MergedElements}} = merge_sets(Sets),
+                                                RepairedSets = apply_repairs(Repairs, Sets),
+                                                conjunction(
+                                                  [{Id, set_equals(Set, {SClock, SElements})} ||
+                                                      {Id, SClock, SElements} <- RepairedSets] ++
+                                                      [{merge, set_equals(Set, {Clock, MergedElements})}])
+                                            end))))).
+
+
+set_equals(S1, S2) ->
+    ?WHENFAIL(io:format("System:: ~p~n /= ~n Repaired Set:: ~p~n", [S1, S2]),
+              S1 == S2).
+
+prop_diverges() ->
+    fails(?FORALL(Events, bigset_clock:gen_all_system_events(),
+            ?FORALL(Clocks, bigset_clock:gen_clocks(Events),
+                    ?FORALL(SystemRemoves, gen_removes(Events),
+                            ?FORALL(LocalRemoves, gen_local_removes(SystemRemoves, Clocks),
+                                    ?FORALL(DotToElement, function1(gen_element()),
+                                            ?FORALL(Elements, gen_elements({Events, []}, SystemRemoves, DotToElement),
+                                                    ?FORALL(Sets, gen_sets2(Clocks, LocalRemoves, DotToElement),
+                                                            begin
+                                                                Set = [{{Events, []}, Elements}],
+                                                                equals(Set, lists:usort(Sets))
+                                                            end)))))))).
+
+
+gen_sets() ->
+    ?LET(Events, bigset_clock:gen_all_system_events(),
+         ?LET(Clocks, bigset_clock:gen_clocks(Events),
+              ?LET(SystemRemoves, gen_removes(Events),
+                   ?LET(LocalRemoves, gen_local_removes(SystemRemoves, Clocks),
+                        ?LET(DotToElement, function1(gen_element()),
+%%                             ?LET(Elements, gen_elements({Events, []}, SystemRemoves, DotToElement),
+                                  gen_sets2(Clocks, LocalRemoves, DotToElement)))))).
+
+
+apply_repairs(Repairs, Sets) ->
+    [case orddict:find(Id, Repairs) of
+         error ->
+             Set;
+         {ok, Repair} ->
+             apply_repair(Repair, Set)
+     end || {Id, _Clock, _Elem}=Set <- Sets].
+
+apply_repair(Repairs, Set) ->
+    lists:foldl(fun({Element, {Adds, Removes}}, {Id, Clock, Elements}) ->
+                        {Clock2, Elements2} = apply_removes(Clock, Elements, Element, Removes),
+                        {Clock3, Elements3} = apply_adds(Clock2, Elements2, Element, Adds),
+                        {Id, Clock3, Elements3}
+                end,
+                Set,
+                Repairs).
+
+apply_removes(Clock, Elements, _Element, _Removes) ->
+    {Clock, Elements}.
+
+apply_adds(Clock, Elements, Element, Adds) ->
+    lists:foldl(fun(Dot, {ClockAcc, ElementAcc}) ->
+                        case bigset_clock:seen(Dot, ClockAcc) of
+                            true ->
+                                {ClockAcc, ElementAcc};
+                            false ->
+                                {bigset_clock:add_dot(Dot, ClockAcc),
+                                 orddict:update(Element, fun(Dots) ->
+                                                                 lists:umerge([Dot], Dots) end,
+                                                [Dot],
+                                                ElementAcc)}
+                        end
+                end,
+                {Clock, Elements},
+                Adds).
+
+gen_system_digest(Events) ->
+    Set =  bigset_clock:clock_to_set({Events, []}),
+    growing_sublist(Set).
+
+gen_local_digests(Digest, Clocks) ->
+    [{Id, gen_local_digest(Digest, Clock)} || {Id, Clock} <- Clocks].
+
+gen_local_digest(Digest, Clock) ->
+    Set = bigset_clock:clock_to_set(Clock),
+    ?LET(Diff, growing_sublist(ordsets:subtract(Set, Digest)),
+         ordsets:union(Diff, Digest)).
+
+gen_sets(Clocks, Digests, DotToElement) ->
+    lists:zipwith(fun({Id, Clock}, {Id, Digest}) ->
+                          {Id, Clock,  lists:foldl(fun(Dot, Acc) ->
+                                                           Element = DotToElement(Dot),
+                                                           orddict:update(Element,
+                                                                          fun(Dots) ->
+                                                                                  lists:umerge([Dot],[Dots])
+                                                                          end,
+                                                                          [Dot],
+                                                                          Acc)
+                                                   end,
+                                                   orddict:new(),
+                                                   Digest)}
+                  end,
+                  Clocks,
+                  Digests).
+
+%% since sublist shrinks toward the empty set this is a subset
+%% that shrinks towards the whole set
+growing_sublist(Set) ->
+    ?LET(Removals, sublist(Set),
+         ordsets:subtract(Set, Removals)).
+
+gen_removes(Events) ->
+    Set = bigset_clock:clock_to_set({Events, []}),
+    sublist(Set).
+
+gen_local_removes(Removes, Clocks) ->
+    ?LET(DotsNodes,
+         [{Dot, non_empty(sublist([Id || {Id, Clock} <- Clocks, bigset_clock:seen(Dot, Clock)]))}
+            || Dot <- Removes],
+         [{Id, gen_local_remove(Id, DotsNodes)} || {Id, _Clock} <- Clocks]).
+
+gen_local_remove(Id, DotsNodes) ->
+    [Dot || {Dot, Nodes} <- DotsNodes,
+            lists:member(Id, Nodes)].
+
+gen_elements(Clock, Removes, DotToElement) ->
+    ClockSet = bigset_clock:clock_to_set(Clock),
+    Digest = ordsets:subtract(ClockSet, Removes),
+    lists:foldl(fun(Dot, Acc) ->
+                        Element = DotToElement(Dot),
+                        orddict:update(Element,
+                                       fun(Dots) ->
+                                               lists:umerge([Dot],Dots)
+                                       end,
+                                       [Dot],
+                                       Acc)
+                end,
+                orddict:new(),
+                Digest).
+
+gen_sets2(Clocks, Removes, DotToElement) ->
+    lists:zipwith(fun({Id, Clock}, {Id, Removed}) ->
+                          Elements = gen_elements(Clock, Removed, DotToElement),
+                          {Id, Clock, Elements}
+                  end,
+                  Clocks,
+                  Removes).
+
+-endif.

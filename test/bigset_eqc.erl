@@ -568,7 +568,7 @@ client_add_pre(#state{is_members=IsMembers}) ->
 
 %% @doc client_add_args - Argument generator
 -spec client_add_args(S :: eqc_statem:symbolic_state()) -> eqc_gen:gen([term()]).
-client_add_args(#state{replicas=Replicas, is_members=IsMembers}) -> 
+client_add_args(#state{replicas=Replicas, is_members=IsMembers}) ->
     [elements(Replicas),
      elements(IsMembers)].
 
@@ -580,7 +580,7 @@ client_add_pre(#state{is_members=IsMembers, replicas=Replicas}, [Replica, IsMemb
     lists:member(IsMember, IsMembers) andalso lists:member(Replica, Replicas).
 
 %% @doc client_add - The actual operation
-client_add(To, {Element, {Element, Ctx}}) -> 
+client_add(To, {Element, {Element, Ctx}}) ->
     [#replica{id=To, delta_set=Set,
               bigset=BS}=ToRep] = ets:lookup(?MODULE, To),
 

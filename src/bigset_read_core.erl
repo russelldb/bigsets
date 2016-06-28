@@ -12,7 +12,7 @@
 %% API
 -compile([export_all]).
 
--define(EMPTY, []).
+-include("bigset.hrl").
 
 -record(actor,
         {
@@ -20,7 +20,7 @@
           clock=undefined :: undefined | bigset_clock:clock(),
           %% @TODO(rdb|experiment) conisder the Dot->Elem mapping as
           %% per Carlos's DotKernel
-          elements= ?EMPTY:: [{binary(), riak_dt_vclock:dot()}],
+          elements= [] :: elements(),
           not_found = true :: boolean(),
           done = false :: boolean()
         }).
@@ -35,8 +35,6 @@
           clock %% Merged clock
         }).
 
--type elements() :: [{binary(), binary()}].
-
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
@@ -44,12 +42,52 @@
 new(R) ->
     #state{r=R}.
 
+%% handle_message(Partition, Message, Core) ->
+%%     case we_want_this_message(Partition, Message, Core) of
+%%         true ->
+%%          process_message(Partition, Message, Core);
+%%         false ->
+%%             get_result(Core)
+%%     end.
+
+%% we_want_this_message(Partition, Message, #state{clocks=Clocks, not_founds=NotFounds, r=R}) when Clocks + NotFounds >= R ->
+%%     is_actor(Partition, Core);
+%% we_want_this_message(Partition, Message, Core) ->
+%%     true.
+
+%% is_actor(Partition, Core) ->
+%%     #state{actors=Actors} = State,
+%%     orddict:is_key(Partition, Actors).
+
+%% process_message(Partition, ?READ_RESULT{not_found=true}, Core) ->
+%%     Actor = get_actor(Partition, Core),
+%%     Actor2 = set_not_found(Actor),
+%%     Core2=#state{not_founds=NF} = set_actor(Partition, Actor2, Core),
+%%     Core3 = Core2#state{not_founds=NF+1},
+%%     get_result(Core3);
+%% process_message(Partition, Message=?READ_RESULT{}, Core) ->
+%%     ?READ_RESULT{clock=Clock, elements=Elements, done=Done} = Message,
+%%     Core2 = clock(Partition, Clock, Core),
+%%     Core3 = done(Done, Partition, Core2),
+%%     elements(Partition, Elements, Core3).
+
 %% @doc call when a clock is received
+clock(_Partition, undefined, Core) ->
+    Core;
 clock(Partition, Clock, Core) ->
     Actor = get_actor(Partition, Core),
     Actor2 = add_clock(Actor, Clock),
     Core2=#state{clocks=Clocks} = set_actor(Partition, Actor2, Core),
     Core2#state{clocks=Clocks+1}.
+
+%% @doc maybe set a partition as done
+done(false, _Partition, Core) ->
+    Core;
+done(true, Partition, Core) ->
+    Actor = get_actor(Partition, Core),
+    Actor2 = set_done(Actor),
+    Core2=#state{done=Done}=set_actor(Partition, Actor2, Core),
+    Core2#state{done=Done+1}.
 
 %% @doc only call if `r_clocks/1' is `true'
 get_clock(Core) ->
@@ -88,13 +126,6 @@ elements(Partition, Elements, Core) ->
     Core2 = set_actor(Partition, Actor2, Core),
     maybe_merge_and_flush(Core2).
 
-%% @doc set a partition as done
-done(Partition, Core) ->
-    Actor = get_actor(Partition, Core),
-    Actor2 = set_done(Actor),
-    Core2=#state{done=Done}=set_actor(Partition, Actor2, Core),
-    Core2#state{done=Done+1}.
-
 is_done(#state{not_founds=NF, done=Done, r=R}) when NF+Done == R ->
     true;
 is_done(_S) ->
@@ -102,9 +133,9 @@ is_done(_S) ->
 
 %% @private see if we have enough results to merge a subset and send
 %% it to the client @TODO(rdb|refactor) ugly
--spec maybe_merge_and_flush(#state{}) -> {[elements()], #state{}}.
+-spec maybe_merge_and_flush(#state{}) -> {{repairs(), [elements()]}, #state{}}.
 maybe_merge_and_flush(Core=#state{not_founds=NF, clocks=C, r=R}) when NF+C < R ->
-    {undefined, Core};
+    {{[], undefined}, Core};
 maybe_merge_and_flush(Core) ->
     %% need to be R before we proceed
     %% if any actor has a clock, but no values, and is not 'done' we
@@ -118,17 +149,17 @@ maybe_merge_and_flush(Core) ->
             SplitFun = split_fun(LeastLastElement),
             %% of the actors that are mergable, split their lists
             %% fold instead so that you can merge+update the Core to return in one pass
-            {MergedActor, NewActors} =lists:foldl(fun({Partition, Actor}, {MergedSet, NewCore}) ->
+            {{Repairs, MergedActor}, NewActors} =lists:foldl(fun({Partition, Actor}, {{RepairAcc, MergedSet}, NewCore}) ->
                                                           #actor{elements=Elements} = Actor,
                                                           {Merge, Keep} = lists:splitwith(SplitFun, Elements),
                                                           {
-                                                            merge([{Partition, Actor#actor{elements=Merge}}], MergedSet),
+                                                            merge([{Partition, Actor#actor{elements=Merge}}], MergedSet, RepairAcc),
                                                             orddict:store(Partition, Actor#actor{elements=Keep}, NewCore)
                                                           }
                                                   end,
-                                                  {undefined, Actors},
+                                                  {{undefined, []}, Actors},
                                                   MergableActors),
-            {MergedActor#actor.elements, Core#state{actors=NewActors}}
+            {{Repairs, MergedActor#actor.elements}, Core#state{actors=NewActors}}
     end.
 
 %% Consider just the element, not the dots
@@ -177,12 +208,12 @@ mergable([], LeastLast, MergeActors) ->
     {true, LeastLast, MergeActors};
 mergable([{_Partition, #actor{not_found=true}} | Rest], LeastLast, MergeActors) ->
     mergable(Rest, LeastLast, MergeActors);
-mergable([{Partition, #actor{done=false, elements= ?EMPTY}} | _Rest], _Acc, _MergeActors) ->
+mergable([{Partition, #actor{done=false, elements= []}} | _Rest], _Acc, _MergeActors) ->
     %% We can't do anything, some partition has no elements
     %% and is not 'done'
     lager:debug("no elements for some vnode ~p~n", [Partition]),
     false;
-mergable([{_P, #actor{done=true, elements= ?EMPTY}}=Actor | Rest], LeastLast, MergeActors) ->
+mergable([{_P, #actor{done=true, elements= []}}=Actor | Rest], LeastLast, MergeActors) ->
     mergable(Rest, LeastLast, [Actor | MergeActors]);
 mergable([{_P, #actor{elements=E}}=Actor | Rest], undefined, MergeActors) ->
     mergable(Rest, last_element(E), [Actor | MergeActors]);
@@ -201,9 +232,9 @@ last_element(<<Sz:32/integer, Rest/binary>>) ->
 %% @perform a CRDT orswot merge
 finalise(#state{actors=Actors}) ->
     {true, _LLE, MergableActors} = mergable(Actors, undefined, []),
-    case merge(MergableActors, undefined) of
-        #actor{elements=Elements} ->
-            Elements;
+    case merge(MergableActors, undefined, []) of
+        {Repairs, #actor{elements=Elements}} ->
+            {Repairs, Elements};
         undefined ->
             undefined
     end.
@@ -220,22 +251,23 @@ merge_clocks([{_P, #actor{clock=undefined}} | Rest], Acc) ->
 merge_clocks([{_P, #actor{clock=Clock}} | Rest], Acc) ->
     merge_clocks(Rest, bigset_clock:merge(Clock, Acc)).
 
-merge([], Actor) ->
-    Actor;
-merge([{_Partition, Actor} | Rest], undefined) ->
-    merge(Rest, Actor);
-merge([{_Partition, Actor} | Rest], Mergedest0) ->
-    Mergedest = orswot_merge(Actor, Mergedest0),
-    merge(Rest, Mergedest).
+merge([], Actor, Repairs) ->
+    {Actor, Repairs};
+merge([{_Partition, Actor} | Rest], undefined, Repairs) ->
+    merge(Rest, Actor, Repairs);
+merge([{_Partition, Actor} | Rest], Mergedest0, Repairs) ->
+    {Repairs2, Mergedest} = orswot_merge(Actor, Mergedest0, Repairs),
+    merge(Rest, Mergedest, Repairs2).
 
-orswot_merge(#actor{clock=C1, elements=E}, A=#actor{clock=C2, elements=E}) ->
-    A#actor{clock=bigset_clock:merge(C1, C2)};
-orswot_merge(A1, A2) ->
+orswot_merge(#actor{clock=C1, elements=E}, A=#actor{clock=C2, elements=E}, Repairs) ->
+    {Repairs, A#actor{clock=bigset_clock:merge(C1, C2)}};
+orswot_merge(A1, A2, Repairs) ->
     #actor{partition=P1, elements=E1, clock=C1} = A1,
     #actor{partition=P2, elements=E2, clock=C2} = A2,
-    {_Repairs, Clock, Elements} = bigset_read_merge:merge_sets([{P1, C1, E1},
-                                                               {P2, C2, E2}]),
-    #actor{clock=Clock, elements=Elements}.
+    {Repairs2, Clock, Elements} = bigset_read_merge:merge_sets([{P1, C1, E1},
+                                                               {P2, C2, E2}],
+                                                               Repairs),
+    {Repairs2, #actor{clock=Clock, elements=Elements}}.
 
 set_actor(Partition, Actor, State) ->
     #state{actors=Actors} = State,

@@ -19,6 +19,7 @@
          coordinate/2,
          replicate/2,
          read/2,
+         repair/2,
          contains/2,
          init/1,
          terminate/2,
@@ -92,6 +93,12 @@ read(PrefList, Req=?READ_REQ{}) ->
 
 %% @doc does Set contain Element
 contains(PrefList, Req=?CONTAINS_REQ{}) ->
+    riak_core_vnode_master:command(PrefList,
+                                   Req,
+                                   {fsm, undefined, self()},
+                                   bigset_vnode_master).
+
+repair(PrefList, Req=?REPAIR_REQ{}) ->
     riak_core_vnode_master:command(PrefList,
                                    Req,
                                    {fsm, undefined, self()},
@@ -174,7 +181,19 @@ handle_command(?CONTAINS_REQ{set=Set, members=Members}, Sender, State) ->
     %% contains is a special kind of read, and an async fold operation
     %% @see bigset_vnode_worker for that code.
     #state{db=DB, vnodeid=Id} = State,
-    {async, {contains, Id, DB, Set, Members}, Sender, State}.
+    {async, {contains, Id, DB, Set, Members}, Sender, State};
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%% Read Repair
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+handle_command(?REPAIR_REQ{}=Req, _Sender, State) ->
+    %% Much like a delta replicate, but slightly different format.
+    %% see types in bigset.hrl for structure of Repairs.
+    ok = handle_read_repair(Req, State),
+    {noreply, State}.
+
 
 -spec handle_handoff_command(term(), term(), state()) ->
                                     {noreply, state()}.
@@ -295,7 +314,6 @@ handle_exit(_Pid, _Reason, State) ->
     {noreply, State}.
 
 terminate(_Reason, State) ->
-    lager:info("State ~p~n", [State]),
     case State#state.db of
         undefined ->
             ok;
@@ -635,6 +653,52 @@ handle_replication(Op, State) ->
     Writes2 = add_end_key(FirstWrite, Set, Writes),
     ok = eleveldb:write(DB, Writes2, ?WRITE_OPTS),
     {dw, Partition}.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%% Read Repair Write
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+handle_read_repair(Req, State) ->
+    ?REPAIR_REQ{set=Set, repairs=Repairs} = Req,
+    #state{db=DB, vnodeid=Id, partition=Partition} = State,
+    lager:info("Read repair triggered ~p", [Partition]),
+
+    %% Read local clock
+    ClockKey = bigset:clock_key(Set, Id),
+    {FirstWrite, Clock0} = bigset:get_clock(ClockKey, DB),
+    {Clock, Writes0} = repair_writes(Set, Clock0, Repairs),
+    BinClock = bigset:to_bin(Clock),
+    Writes = [{put, ClockKey, BinClock} | Writes0],
+    Writes2 = add_end_key(FirstWrite, Set, Writes),
+    eleveldb:write(DB, Writes2, ?WRITE_OPTS).
+
+repair_writes(Set, Clock, Repairs) ->
+    lists:foldl(fun({Element, {Adds, Removes}}, {ClockAcc, WriteAcc}) ->
+                        %% traverse removes first in case a dot is on both
+                        {ClockAcc1, WriteAcc1} = remove_seen(Set, Element, Removes, ClockAcc, WriteAcc),
+                        %% use clock from removes stops us from
+                        %% writing something unseen and removing it in
+                        %% the same action
+                        repair_adds(Set, Element, Adds, ClockAcc1, WriteAcc1);
+                   ({Element, Adds}, {ClockAcc, WriteAcc}) ->
+                        repair_adds(Set, Element, Adds, ClockAcc, WriteAcc)
+                end,
+                {Clock, []},
+                Repairs).
+
+repair_adds(Set, Element, Dots, Clock, Acc) ->
+    lists:foldl(fun({Actor, Cnt}=Dot, {ClockAcc, WriteAcc}) ->
+                        case bigset_clock:seen(Dot, Clock) of
+                            true ->
+                                %% do nothing
+                                {Clock, Acc};
+                            false ->
+                                Key = bigset:insert_member_key(Set, Element, Actor, Cnt),
+                                {bigset_clock:add_dot(Dot, ClockAcc),
+                                 [{put, Key, <<>>} | WriteAcc]}
+                        end
+                end,
+                {Clock, Acc},
+                Dots).
 
 %% @private decode_handoff_item
 %% parse out the sender ID and key data

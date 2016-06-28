@@ -17,7 +17,7 @@
 
 %% gen_fsm callbacks
 -export([init/1, prepare/2,  validate/2, read/2,
-         await_clocks/2, await_elements/2, reply/2, handle_event/3,
+         await_set/2, reply/2, handle_event/3,
          handle_sync_event/4, handle_info/3, terminate/3, code_change/4]).
 
 -define(SERVER, ?MODULE).
@@ -101,95 +101,30 @@ read(timeout, State) ->
     bigset_vnode:read(PL, Req),
     {next_state, await_clocks, State}.
 
--spec await_clocks(result(), state()) -> {next_state, reply, state(), 0} |
-                                         {next_state, await_clocks, state()} |
-                                         {next_state, await_elements, state()}.
-await_clocks(request_timeout, State) ->
+-spec await_set(result(), #state{}) -> term().
+await_set(request_timeout, State) ->
     {next_state, reply, State#state{reply={error, timeout}}, 0};
-await_clocks({{clock, Clock}, Partition, From}, State) ->
-    ack(From),
+await_set({Message=?READ_RESULT{}, Partition, From}, State) ->
     #state{logic=Core} = State,
-    Core2 = bigset_read_core:clock(Partition, Clock, Core),
+    ack_or_stop(Partition, From, Core),
+    #state{logic=Core} = State,
+    {{Repairs, Result}, Core2} = bigset_read_core:handle_message(Partition, Message, Core),
+    maybe_send_results(Result, State),
+    maybe_send_repairs(Repairs, State),
 
-    case bigset_read_core:r_clocks(Core2) of
+    case bigset_read_core:is_finished(Core2) of
         true ->
-            Core3 = send_clock(Core2, State),
-            {next_state, await_elements, State#state{logic=Core3}};
+            {{FinalRepairs, FinalResult}, FinalMessage, FinalCore} = bigset_read_core:finalise(Core2),
+            maybe_send_results(FinalResult, State),
+            maybe_send_repairs(FinalRepairs, State),
+            Reply = FinalMessage,
+            {next_state, reply, State#state{reply=Reply, logic=FinalCore}, 0};
         false ->
-            {next_state, await_clocks, State#state{logic=Core2}}
-    end;
-await_clocks({{elements, Elements}, Partition, From}, State) ->
-    ack(From),
-    #state{logic=Core} = State,
-    {undefined, Core2} = bigset_read_core:elements(Partition, Elements, Core),
-    {next_state, await_clocks, State#state{logic=Core2}};
-await_clocks({done, Partition, _From}, State) ->
-    #state{logic=Core} = State,
-    Core2 = bigset_read_core:done(Partition, Core),
-    lager:debug("ac::: done ~p~n", [Partition]),
-    {next_state, await_clocks, State#state{logic=Core2}};
-await_clocks({not_found, Partition, _From}, State) ->
-    lager:debug("ac::: notfound  ~p~n", [Partition]),
-    #state{logic=Core} = State,
-    Core2 = bigset_read_core:not_found(Partition, Core),
-    %% @TODO(rdb|ugly) eugh, maybe read_core should return the state,
-    %% eh?
-    case {bigset_read_core:not_found(Core2),
-          bigset_read_core:r_clocks(Core2),
-          bigset_read_core:is_done(Core2)} of
-        {true, false, _} ->
-            {next_state, reply, State#state{reply={error, not_found}}, 0};
-        {false, false, _} ->
-            {next_state, await_clocks, State#state{logic=Core2}};
-        {false, true, false} ->
-            Core3 = send_clock(Core2, State),
-            {next_state, await_elements, State#state{logic=Core3}};
-        {false, true, true} ->
-            Core3 = send_clock(Core2, State),
-            FinalElements = bigset_read_core:finalise(Core3),
-            maybe_send_results(FinalElements, State),
-            Reply = done,
-            {next_state, reply, State#state{reply=Reply}, 0}
+            {next_state, await_set, State#state{logic=Core2}}
     end.
 
-send_clock(Core, State) ->
-    {_CtxClock, Core3} = bigset_read_core:get_clock(Core),
-    %%    CtxBin = bigset:to_bin(CtxClock),
-    send_reply({ok, {ctx, <<>>}}, State),
-    Core3.
-
--spec await_elements(result(), state()) ->
-                        {next_state, reply, state(), 0} |
-                        {next_state, await_elements, state()}.
-await_elements(request_timeout, State) ->
-    {next_state, reply, State#state{reply={error, timeout}}, 0};
-await_elements({not_found, _Partition, _From}, State) ->
-    %% quite literally do not care!
-    {next_state, await_elements, State};
-await_elements({{clock, _Clock}, _Partition, From}, State) ->
-    %% Too late to take part in R, stop folding, buddy!
-    stop_fold(From),
-    {next_state, await_elements, State};
-await_elements({{elements, Elements}, Partition, From}, State) ->
-    ack(From),
-    #state{logic=Core} = State,
-    {Send, Core2} = bigset_read_core:elements(Partition, Elements, Core),
-    maybe_send_results(Send, State),
-    State2 = State#state{logic=Core2},
-    {next_state, await_elements, State2};
-await_elements({done, Partition, _From}, State) ->
-    #state{logic=Core} = State,
-    Core2 = bigset_read_core:done(Partition, Core),
-    State2 = State#state{logic=Core2},
-    case bigset_read_core:is_done(Core2) of
-        true ->
-            FinalElements = bigset_read_core:finalise(Core2),
-            maybe_send_results(FinalElements, State),
-            Reply = done,
-            {next_state, reply, State2#state{reply=Reply}, 0};
-        false ->
-            {next_state, await_elements, State2}
-    end.
+maybe_send_repairs(Repairs, State) ->
+    {Repairs, State}.
 
 maybe_send_results(undefined, _State) ->
     ok;
@@ -234,6 +169,15 @@ schedule_timeout(infinity) ->
     undefined;
 schedule_timeout(Timeout) ->
     erlang:send_after(Timeout, self(), request_timeout).
+
+%% decide if this Partition needs an ack message or a stop message.
+ack_or_stop(Partition, From, Core) ->
+    case bigset_read_core:ack_or_stop(Partition, Core) of
+        ack ->
+            ack(From);
+        stop ->
+            stop_fold(From)
+    end.
 
 -spec ack(From::{pid(), reference()}) -> term().
 ack({Pid, Ref}) ->

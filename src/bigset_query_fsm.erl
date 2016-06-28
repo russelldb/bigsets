@@ -17,7 +17,7 @@
 
 %% gen_fsm callbacks
 -export([init/1, prepare/2,  validate/2, read/2,
-         await_set/2, reply/2, handle_event/3,
+         await_set/2, reply/2, repair/2, handle_event/3,
          handle_sync_event/4, handle_info/3, terminate/3, code_change/4]).
 
 -define(SERVER, ?MODULE).
@@ -97,10 +97,9 @@ validate(timeout, State) ->
 read(request_timeout, State) ->
     {next_state, reply, State#state{reply={error, timeout}}, 0};
 read(timeout, State) ->
-    #state{preflist=[N1, _N2, N3], set=Set, members=Members} = State,
+    #state{preflist=PL, set=Set, members=Members} = State,
     Req = ?CONTAINS_REQ{set=Set, members=Members},
-    bigset_vnode:contains([N1, N3], Req),
-
+    bigset_vnode:contains(PL, Req),
     {next_state, await_set, State}.
 
 -spec await_set(result() | request_timeout, state()) ->
@@ -114,12 +113,14 @@ await_set({Result, Partition, _From}, State) ->
     case length(Results) of
         2 ->
             {Repairs, Reply} = merge_results(Results),
+            lager:info("repairs are ~p", [Repairs]),
             {next_state, reply, State#state{repair=Repairs, reply=Reply, results=Results}, 0};
         _ ->
             {next_state, await_set, State#state{results=Results}}
     end.
 
--spec reply(timeout, State) -> {stop, normal, State}.
+-spec reply(timeout, #state{}) -> {stop, normal, #state{}} |
+                                  {next_state, repair, #state{}, 0}.
 reply(_, State=#state{reply=not_found}) ->
     #state{from=From, req_id=ReqId} = State,
     From ! {ReqId, not_found},
@@ -127,7 +128,28 @@ reply(_, State=#state{reply=not_found}) ->
 reply(_, State=#state{reply={set, _Clock, Elements, done}}) ->
     #state{from=From, req_id=ReqId} = State,
     From ! {ReqId, Elements},
+    lager:info("should be repair", []),
+    {next_state, repair, State, 0}.
+
+-spec repair(timeout, #state{}) -> {stop, normal, #state{}}.
+repair(timeout, State) ->
+    %% send each repair to the relevant node
+    #state{repair=Repairs, preflist=PL, set=Set} = State,
+    lager:info("sending ~p", [Repairs]),
+    [read_repair(Set, Repair, PL) || Repair <- Repairs],
     {stop, normal, State}.
+
+read_repair(_Set, {_Partition, []}, _PL) ->
+    ok;
+read_repair(Set, {Partition, Repairs}, PL) ->
+    lager:info("repairing ~p", [Partition]),
+    case lists:keyfind(Partition, 1, PL) of
+        false ->
+            ok;
+        Entry ->
+            lager:info("calling repair on ~p", [Partition]),
+            bigset_vnode:repair([Entry], ?REPAIR_REQ{set=Set, repairs=Repairs})
+    end.
 
 
 handle_event(_Event, _StateName, State) ->
