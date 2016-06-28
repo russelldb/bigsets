@@ -312,22 +312,6 @@ old_to_new(A, R) ->
 gen_element() ->
     elements(?ELEMENTS).
 
-%% prop() ->
-%%     ?FORALL(Events, bigset_clock:gen_all_system_events(),
-%%             ?FORALL(Clocks, gen_clocks(Events),
-%%                     ?FORALL(SystemDigest, gen_system_digest(Events),
-%%                             ?FORALL(Digests, gen_local_digests(SystemDigest, Clocks),
-%%                                     ?FORALL(DotToElement, function1(gen_element())
-%%                                             ?FORALL(Sets, gen_sets(Clocks, Digests, DotToElement),
-%%                                                     begin
-%%                                                         {Repairs, Clock, Elements} = merge_sets(Sets),
-%%                                                         RepairedSets = apply_repairs(Repairs, Sets),
-%%                                                         conjunction(
-%%                                                           [{Id, equals(Set, RepairedSet)} || {Id, RepairedSet} <- RepairedSets] ++
-%%                                                               [{merge, equals(Set, {Clock, Elements})])
-%%                                                           end))))))).
-
-
 prop2() ->
     ?FORALL(DotToElement, function1(gen_element()),
             ?FORALL(Events, bigset_clock:gen_all_system_events(),
@@ -339,16 +323,34 @@ prop2() ->
                                                 Set = {{Events, []}, Elements},
                                                 {Repairs, {_Id, Clock, MergedElements}} = merge_sets(Sets),
                                                 RepairedSets = apply_repairs(Repairs, Sets),
-                                                conjunction(
-                                                  [{Id, set_equals(Set, {SClock, SElements})} ||
-                                                      {Id, SClock, SElements} <- RepairedSets] ++
-                                                      [{merge, set_equals(Set, {Clock, MergedElements})}])
+                                                RepairLengths = [length(Repair) || {_, Repair} <- Repairs],
+                                                aggregate(with_title("repaired elements"), RepairLengths,
+                                                          measure(clock_width, length(Events),
+                                                                  measure(repair_length, length(Repairs),
+                                                                          conjunction(
+                                                                            [{Id, set_equals(Set, {SClock, SElements})} ||
+                                                                                {Id, SClock, SElements} <- RepairedSets] ++
+                                                                                [{merge, set_equals(Set, {Clock, MergedElements})}])
+                                                                         )))
                                             end))))).
 
+set_equals({Clock1, S1}, {Clock2, S2}) ->
+    EventSet1 = bigset_clock:clock_to_set(Clock1),
+    EventSet2 = bigset_clock:clock_to_set(Clock2),
+    Diff = ordsets:subtract(EventSet1, EventSet2),
 
-set_equals(S1, S2) ->
-    ?WHENFAIL(io:format("System:: ~p~n /= ~n Repaired Set:: ~p~n", [S1, S2]),
-              S1 == S2).
+    Digest = elements_to_digest(S2),
+
+    conjunction([{Dot, not lists:member(Dot, Digest)} || Dot <- Diff] ++
+                    [{elements_equal,
+                          ?WHENFAIL(io:format("System:: ~p~n /= ~n Repaired Set:: ~p~n", [{Clock1, S1}, {Clock2, S2}]),
+              {Clock1, S1} == {Clock2, S2})}]).
+
+elements_to_digest(Elems) ->
+    orddict:fold(fun(_E, Dots, Acc) ->
+                         lists:merge(Dots, Acc) end,
+                 [],
+                 Elems).
 
 prop_diverges() ->
     fails(?FORALL(Events, bigset_clock:gen_all_system_events(),
@@ -391,8 +393,24 @@ apply_repair(Repairs, Set) ->
                 Set,
                 Repairs).
 
-apply_removes(Clock, Elements, _Element, _Removes) ->
-    {Clock, Elements}.
+apply_removes(Clock, Elements, Element, Removes) ->
+    lists:foldl(fun(Dot, {ClockAcc, ElementAcc}) ->
+                        case bigset_clock:seen(Dot, ClockAcc) of
+                            false ->
+                                {bigset_clock:add_dot(Dot, ClockAcc), ElementAcc};
+                            true ->
+                                {ClockAcc,
+                                 orddict:filter(fun(_Key, []) -> false;
+                                                   (_Key, _Val) -> true
+                                                end,
+                                                orddict:update(Element, fun(Dots) ->
+                                                                                Dots -- [Dot] end,
+                                                               [Dot],
+                                                               ElementAcc))}
+                        end
+                end,
+                {Clock, Elements},
+                Removes).
 
 apply_adds(Clock, Elements, Element, Adds) ->
     lists:foldl(fun(Dot, {ClockAcc, ElementAcc}) ->
