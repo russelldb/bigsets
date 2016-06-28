@@ -274,8 +274,9 @@ merge_test() ->
                         {<<"element6">>, [{a, 10}]} %% in set 1
                        ],
 
-    {Repairs, Clock, Elements} = merge_sets([Set1, Set2]),
+    {Repairs, Id, Clock, Elements} = merge_sets([Set1, Set2]),
 
+    ?assertEqual([1,2], Id),
     ?assertEqual(ExpectedRepairs, lists:sort(Repairs)),
     ?assertEqual(ExpectedClock, Clock),
     ?assertEqual(ExpectedElements, Elements).
@@ -343,8 +344,8 @@ set_equals({Clock1, S1}, {Clock2, S2}) ->
 
     conjunction([{Dot, not lists:member(Dot, Digest)} || Dot <- Diff] ++
                     [{elements_equal,
-                          ?WHENFAIL(io:format("System:: ~p~n /= ~n Repaired Set:: ~p~n", [{Clock1, S1}, {Clock2, S2}]),
-              {Clock1, S1} == {Clock2, S2})}]).
+                      ?WHENFAIL(io:format("System:: ~p~n /= ~n Repaired Set:: ~p~n", [S1, S2]),
+                                S1 == S2)}]).
 
 elements_to_digest(Elems) ->
     orddict:fold(fun(_E, Dots, Acc) ->
