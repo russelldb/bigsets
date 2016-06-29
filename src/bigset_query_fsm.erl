@@ -112,7 +112,7 @@ await_set({Result, Partition, _From}, State) ->
     Results = [{Partition, Result} | Results0],
     case length(Results) of
         2 ->
-            {Repairs, Reply} = merge_results(Results),
+            {Repairs, {_Id, Reply}} = merge_results(Results),
             lager:info("repairs are ~p", [Repairs]),
             {next_state, reply, State#state{repair=Repairs, reply=Reply, results=Results}, 0};
         _ ->
@@ -182,8 +182,8 @@ merge_results(Results) ->
                    ({_P1, {set, _Clock, Elements, done}}=Res, {P2, not_found}=_Acc) ->
                         {[{P2, Elements}], Res};
                    ({P1, {set, Clock1, Elements1, done}}, {P2, {set, Clock2, Elements2, done}}) ->
-                        {Repairs, Clock, Elements} = bigset_read_merge:merge_sets([{P1, Clock1, Elements1}, {P2, Clock2, Elements2}]),
-                        {Repairs, {set, Clock, Elements, done}}
+                        {Repairs, {Id, Clock, Elements}} = bigset_read_merge:merge_sets([{P1, Clock1, Elements1}, {P2, Clock2, Elements2}]),
+                        {Repairs, {Id, {set, Clock, Elements, done}}}
                 end,
                 hd(Results),
                 tl(Results)).

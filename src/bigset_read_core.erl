@@ -264,10 +264,10 @@ orswot_merge(#actor{clock=C1, elements=E}, A=#actor{clock=C2, elements=E}, Repai
 orswot_merge(A1, A2, Repairs) ->
     #actor{partition=P1, elements=E1, clock=C1} = A1,
     #actor{partition=P2, elements=E2, clock=C2} = A2,
-    {Repairs2, Clock, Elements} = bigset_read_merge:merge_sets([{P1, C1, E1},
+    {Repairs2, {Id, Clock, Elements}} = bigset_read_merge:merge_sets([{P1, C1, E1},
                                                                {P2, C2, E2}],
                                                                Repairs),
-    {Repairs2, #actor{clock=Clock, elements=Elements}}.
+    {Repairs2, #actor{partition=Id, clock=Clock, elements=Elements}}.
 
 set_actor(Partition, Actor, State) ->
     #state{actors=Actors} = State,
