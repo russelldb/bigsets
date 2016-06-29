@@ -251,7 +251,7 @@ merge_test() ->
               [{a, [8]}]}, %% dot cloud 2
     Set2 = {2, %% partition 2
             Clock2,
-            [{<<"element1">>, [{a, 8}, {b, 4}]},
+            [{<<"element1">>, [{a, 8}, {b, 5}]},
              {<<"element2">>, [{a, 4}, {d, 2}, {c, 15}]},
              {<<"element4">>, [{a, 3}, {c, 5}]},
              {<<"element5">>, [{c, 16}]}] %% elements 2
@@ -267,14 +267,14 @@ merge_test() ->
                            {<<"element6">>,{[{a,10}],[]}}]}],
 
     ExpectedClock = bigset_clock:merge(Clock1, Clock2),
-    ExpectedElements = [{<<"element1">>, [{a, 8}, {b, 4}]}, %%both
+    ExpectedElements = [{<<"element1">>, [{a, 8}, {b, 5}]}, %%both
                         {<<"element2">>, [{c, 15}]}, %% one remaining dot from 2
                         {<<"element4">>, [{a, 3}, {c, 5}]}, %% one remaining dot from 2 and 1 new one
                         {<<"element5">>, [{c, 16}]}, %% in set 2
                         {<<"element6">>, [{a, 10}]} %% in set 1
                        ],
 
-    {Repairs, Id, Clock, Elements} = merge_sets([Set1, Set2]),
+    {Repairs, {Id, Clock, Elements}} = merge_sets([Set1, Set2]),
 
     ?assertEqual([1,2], Id),
     ?assertEqual(ExpectedRepairs, lists:sort(Repairs)),
