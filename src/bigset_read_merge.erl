@@ -308,12 +308,36 @@ old_to_new(A, R) ->
 
 -ifdef(EQC).
 
+-define(NUMTESTS, 1000).
+-define(QC_OUT(P),
+        eqc:on_output(fun(Str, Args) ->
+                              io:format(user, Str, Args) end, P)).
+
+eqc_test_() ->
+    {timeout, 60, [
+                   ?_assertEqual(true, eqc:quickcheck(eqc:testing_time(30, ?QC_OUT(prop_repair()))))
+                  ]}.
+
+run() ->
+    run(?NUMTESTS).
+
+run(Count) ->
+    eqc:quickcheck(eqc:numtests(Count, prop_repair())).
+
+eqc_check() ->
+    eqc:check(prop_repair()).
+
+eqc_check(File) ->
+    {ok, Bytes} = file:read_file(File),
+    CE = binary_to_term(Bytes),
+    eqc:check(prop_repair(), CE).
+
 -define(ELEMENTS, ['A', 'B', 'C', 'D', 'X', 'Y', 'Z']).
 
 gen_element() ->
     elements(?ELEMENTS).
 
-prop2() ->
+prop_repair() ->
     ?FORALL(DotToElement, function1(gen_element()),
             ?FORALL(Events, bigset_clock:gen_all_system_events(),
                     ?FORALL({Clocks, SystemRemoves}, {bigset_clock:gen_clocks(Events), gen_removes(Events)},
