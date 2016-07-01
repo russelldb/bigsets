@@ -38,12 +38,12 @@ merge_sets(Sets) ->
 
 -spec merge_sets([{partition(), bigset_clock:clock(), elements()}], repairs()) ->
                         {repairs(), {partition(), bigset_clock:clock(), elements()}}.
-merge_sets(Sets, Repairs) ->
-    lists:foldl(fun(Set, {RepairsAcc, SetAcc}) ->
-                        merge_set(SetAcc, Set, [], RepairsAcc)
+merge_sets([Set|Sets], Repairs) ->
+    lists:foldl(fun(S, {RepairsAcc, SetAcc}) ->
+                        merge_set(SetAcc, S, [], RepairsAcc)
                 end,
-                {Repairs, hd(Sets)},
-                tl(Sets)).
+                {Repairs, Set},
+                Sets).
 
 -spec merge_ids(partition(), partition()) -> partition().
 merge_ids(P1, P2) ->
@@ -338,26 +338,25 @@ gen_element() ->
     elements(?ELEMENTS).
 
 prop_repair() ->
-    ?FORALL(DotToElement, function1(gen_element()),
-            ?FORALL(Events, bigset_clock:gen_all_system_events(),
-                    ?FORALL({Clocks, SystemRemoves}, {bigset_clock:gen_clocks(Events), gen_removes(Events)},
-                            ?FORALL({LocalRemoves, Elements}, {gen_local_removes(SystemRemoves, Clocks),
-                                                               gen_elements({Events, []}, SystemRemoves, DotToElement)},
-                                    ?FORALL(Sets, gen_sets2(Clocks, LocalRemoves, DotToElement),
-                                            begin
-                                                Set = {{Events, []}, Elements},
-                                                {Repairs, {_Id, Clock, MergedElements}} = merge_sets(Sets),
-                                                RepairedSets = apply_repairs(Repairs, Sets),
-                                                RepairLengths = [length(Repair) || {_, Repair} <- Repairs],
-                                                aggregate(with_title("repaired elements"), RepairLengths,
-                                                          measure(clock_width, length(Events),
-                                                                  measure(repair_length, length(Repairs),
-                                                                          conjunction(
-                                                                            [{Id, set_equals(Set, {SClock, SElements})} ||
-                                                                                {Id, SClock, SElements} <- RepairedSets] ++
-                                                                                [{merge, set_equals(Set, {Clock, MergedElements})}])
-                                                                         )))
-                                            end))))).
+  ?FORALL({_DotToElement, Events, _Clocks, SystemRemoves, _LocalRemoves, Elements, Sets},
+          testcase(),
+          begin
+            Set = {{[{Id,N} || {Id,N} <- Events, N>0], []}, Elements},
+            {Repairs, {_Id, Clock, MergedElements}} = merge_sets(Sets),
+            RepairedSets = apply_repairs(Repairs, Sets),
+            RepairLengths = [length(Repair) || {_, Repair} <- Repairs],
+            aggregate(with_title("repaired elements"), RepairLengths,
+                      measure(clock_width, length(Events),
+                              measure(repair_length, length(Repairs),
+                                      measure(system_removes,length(SystemRemoves),
+                                              (%aggregate(with_title("# local removes"),
+                                                %         [length(Rs) || {_Id,Rs} <- LocalRemoves],
+                                                conjunction(
+                                                  [{Id, set_equals(Set, {SClock, SElements})} ||
+                                                    {Id, SClock, SElements} <- RepairedSets] ++
+                                                    [{merge, set_equals(Set, {Clock, MergedElements})}])
+                                              )))))
+          end).
 
 set_equals({Clock1, S1}, {Clock2, S2}) ->
     EventSet1 = bigset_clock:clock_to_set(Clock1),
@@ -368,14 +367,99 @@ set_equals({Clock1, S1}, {Clock2, S2}) ->
 
     conjunction([{Dot, not lists:member(Dot, Digest)} || Dot <- Diff] ++
                     [{elements_equal,
-                      ?WHENFAIL(io:format("System:: ~p~n /= ~n Repaired Set:: ~p~n", [S1, S2]),
-                                S1 == S2)}]).
+                      equals(S1, S2)}]).
+                      %% ?WHENFAIL(io:format("System:: ~p~n /= ~n Repaired Set:: ~p~n", [{Clock1,S1}, {Clock2,S2}]),
+                      %%           {Clock1,S1} == {Clock2,S2})}]).
 
 elements_to_digest(Elems) ->
     orddict:fold(fun(_E, Dots, Acc) ->
                          lists:merge(Dots, Acc) end,
                  [],
                  Elems).
+
+%% Custom shrinking
+testcase() ->
+      ?LET(DotToElement, function1(gen_element()),
+           ?LET(Events, bigset_clock:gen_all_system_events(),
+                ?LET({Clocks, SystemRemoves}, {bigset_clock:gen_clocks(Events), gen_removes(Events)},
+                     ?LET({LocalRemoves, Elements}, {gen_local_removes(SystemRemoves, Clocks),
+                                                     gen_elements({Events, []}, SystemRemoves, DotToElement)},
+                          ?LET(Sets, gen_sets2(Clocks, LocalRemoves, DotToElement),
+                               shrink_testcase({DotToElement,Events,Clocks,SystemRemoves,
+                                                 LocalRemoves,Elements,Sets})))))).
+
+shrink_testcase(TC={_DotToElement, Events, _Clocks, _SystemRemoves, _LocalRemoves, _Elements, _Sets}) ->
+  ?SHRINK(TC,
+          [shrink_testcase(purge_dot_testcase(Dot,TC))
+           || Dot <- all_dots(Events)]).
+
+all_dots(Events) ->
+  [{Id,I}
+   || {Id,N} <- Events,
+      I <- lists:seq(1,N)].
+
+purge_dot_testcase(Dot,{DotToElement,Events,Clocks,SystemRemoves,LocalRemoves,Elements,Sets}) ->
+  {purge_dot_function(Dot,DotToElement),
+   purge_dot_events(Dot,Events),
+   purge_dot_clocks(Dot,Clocks),
+   purge_dot_removes(Dot,SystemRemoves),
+   purge_dot_local_removes(Dot,LocalRemoves),
+   purge_dot_elements(Dot,Elements),
+   purge_dot_sets(Dot,Sets)}.
+
+purge_dot_function({Id,N},F) ->
+  fun({Id2,N2}) ->
+      F({Id2,if Id==Id2 andalso N2 >= N ->
+                 N2+1;
+                true ->
+                 N2
+             end})
+  end.
+
+purge_dot_events(Dot,Events) ->
+  [purge_dot_period(Dot,E) || E <- Events].
+
+purge_dot_clocks(Dot,Clocks) ->
+  [{Id,purge_dot_clock(Dot,Clock)} || {Id,Clock} <- Clocks].
+
+purge_dot_clock(Dot,{VC,DC}) ->
+  {[{Id,N} || {Id,N} <- purge_dot_events(Dot,VC), N>0],
+   purge_dot_dotcloud(Dot,DC)}.
+
+purge_dot_dotcloud(Dot,DC) ->
+  [purge_dot_dot(Dot,D) || D <- lists:delete(Dot,DC)].
+
+purge_dot_removes(Dot,Removes) ->
+  purge_dot_dotcloud(Dot,Removes).
+
+purge_dot_local_removes(Dot,LocalRemoves) ->
+  [{Id,purge_dot_removes(Dot,R)} || {Id,R} <- LocalRemoves].
+
+purge_dot_elements(Dot,Elements) ->
+  [{X,purge_dot_dotcloud(Dot,DC)} || {X,DC} <- Elements,
+                                  DC /= [Dot]].
+
+purge_dot_sets(Dot,Sets) ->
+  [{Id,purge_dot_clock(Dot,Clock),purge_dot_elements(Dot,Elements)}
+   || {Id,Clock,Elements} <- Sets].
+
+purge_dot_period({Id,I},{Id,N}) ->
+  {Id,if I =< N ->
+          N-1;
+         I > N ->
+          N
+      end};
+purge_dot_period(_,Period) ->
+  Period.
+
+purge_dot_dot({Id,I},{Id,J}) ->
+  {Id,if I < J ->
+          J-1;
+         I > J ->
+          J
+      end};
+purge_dot_dot(_,Dot) ->
+  Dot.
 
 prop_diverges() ->
     fails(?FORALL(Events, bigset_clock:gen_all_system_events(),
