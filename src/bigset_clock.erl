@@ -19,6 +19,7 @@
 -endif.
 
 %% lazy inefficient dot cloud of dict Actor->[count()]
+-type actor() :: riak_dt_vclock:actor().
 -type clock() :: {riak_dt_vclock:vclock(), [riak_dt:dot()]}.
 -type dot() :: riak_dt:dot().
 -type dotcloud() :: [{riak_dt_vclock:actor(), [pos_integer()]}].
@@ -39,8 +40,8 @@ fresh({Actor, Cnt}) ->
 %% therefore that `Actor' stores this clock durably after increment,
 %% see riak_kv#679 for some real world issues, and mitigations that
 %% can be added to this code.)
--spec increment(riak_dt_vclock:actor(), clock()) ->
-                       {riak_dt_vclock:dot(), clock()}.
+-spec increment(actor(), clock()) ->
+                       {dot(), clock()}.
 increment(Actor, {Clock, Seen}) ->
     Clock2 = riak_dt_vclock:increment(Actor, Clock),
     Cnt = riak_dt_vclock:get_counter(Actor, Clock2),
@@ -74,13 +75,13 @@ merge(Clocks) ->
 from_vv(Clock) ->
     {Clock, ?DICT:new()}.
 
-%% @doc given a `Dot :: riak_dt_vclock:dot()' and a `Clock::clock()',
+%% @doc given a `Dot :: riak_dt:dot()' and a `Clock::clock()',
 %% add the dot to the clock. If the dot is contiguous with events
 %% summerised by the clocks VV it will be added to the VV, if it is an
 %% exception (see DVV, or CVE papers) it will be added to the set of
 %% gapped dots. If adding this dot closes some gaps, the seen set is
 %% compressed onto the clock.
--spec add_dot(riak_dt_vclock:dot(), clock()) -> clock().
+-spec add_dot(dot(), clock()) -> clock().
 add_dot(Dot, {Clock, Seen}) ->
     Seen2 = add_dot_to_cloud(Dot, Seen),
     compress_seen(Clock, Seen2).
@@ -93,13 +94,13 @@ add_dot_to_cloud({Actor, Cnt}, Cloud) ->
                  [Cnt],
                  Cloud).
 
-%% @doc given a list of `riak_dt_vclock:dot()' and a `Clock::clock()',
+%% @doc given a list of `dot()' and a `Clock::clock()',
 %% add the dots from `Dots' to the clock. All dots contiguous with
 %% events summerised by the clocks VV it will be added to the VV, any
 %% exceptions (see DVV, or CVE papers) will be added to the set of
 %% gapped dots. If adding a dot closes some gaps, the seen set is
 %% compressed onto the clock.
-    -spec add_dots([riak_dt_vclock:dot()], clock()) -> clock().
+-spec add_dots([dot()], clock()) -> clock().
 add_dots(Dots, {Clock, Seen}) ->
     Seen2 = lists:foldl(fun add_dot_to_cloud/2,
                         Seen,
@@ -191,7 +192,7 @@ get_contiguous_counter(Actor, {Clock, _Dots}=C) ->
             Cnt
     end.
 
--spec contiguous_seen(clock(), riak_dt_vclock:dot()) -> boolean().
+-spec contiguous_seen(clock(), dot()) -> boolean().
 contiguous_seen({VV, _Seen}, Dot) ->
     riak_dt_vclock:descends(VV, [Dot]).
 
