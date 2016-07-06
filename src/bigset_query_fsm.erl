@@ -17,7 +17,7 @@
 
 %% gen_fsm callbacks
 -export([init/1, prepare/2,  validate/2, read/2,
-         await_set/2, reply/2, handle_event/3,
+         await_set/2, reply/2, repair/2, handle_event/3,
          handle_sync_event/4, handle_info/3, terminate/3, code_change/4]).
 
 -define(SERVER, ?MODULE).
@@ -32,16 +32,16 @@
                 results = [],
                 options=[] :: list(),
                 timer=undefined :: reference() | undefined,
-                reply = undefined
+                reply = undefined,
+                repair = [] :: repairs()
                }).
 
+-type partition() :: pos_integer().
 -type state() :: #state{}.
 -type result() :: {message(), partition(), from()}.
 -type message() :: not_found | {set, clock(), elements(), done}.
 -type from() :: {pid(), reference()}.
--type elements() :: [{Member :: binary(), [Dot :: riak_dt_vclock:dot()]}].
 -type clock() :: bigset_clock:clock().
--type partition() :: non_neg_integer().
 -type reqid() :: term().
 
 -define(DEFAULT_TIMEOUT, 60000).
@@ -97,10 +97,9 @@ validate(timeout, State) ->
 read(request_timeout, State) ->
     {next_state, reply, State#state{reply={error, timeout}}, 0};
 read(timeout, State) ->
-    #state{preflist=[N1, _N2, N3], set=Set, members=Members} = State,
+    #state{preflist=PL, set=Set, members=Members} = State,
     Req = ?CONTAINS_REQ{set=Set, members=Members},
-    bigset_vnode:contains([N1, N3], Req),
-
+    bigset_vnode:contains(PL, Req),
     {next_state, await_set, State}.
 
 -spec await_set(result() | request_timeout, state()) ->
@@ -108,18 +107,20 @@ read(timeout, State) ->
                        {next_state, await_set, state()}.
 await_set(request_timeout, State) ->
     {next_state, reply, State#state{reply={error, timeout}}, 0};
-await_set({Result, _Partition, _From}, State) ->
+await_set({Result, Partition, _From}, State) ->
     #state{results=Results0} = State,
-    Results = [Result | Results0],
+    Results = [{Partition, Result} | Results0],
     case length(Results) of
         2 ->
-            Reply = merge_results(Results),
-            {next_state, reply, State#state{reply=Reply, results=Results}, 0};
+            {Repairs, {_Id, Reply}} = merge_results(Results),
+            lager:info("repairs are ~p", [Repairs]),
+            {next_state, reply, State#state{repair=Repairs, reply=Reply, results=Results}, 0};
         _ ->
             {next_state, await_set, State#state{results=Results}}
     end.
 
--spec reply(timeout, State) -> {stop, normal, State}.
+-spec reply(timeout, #state{}) -> {stop, normal, #state{}} |
+                                  {next_state, repair, #state{}, 0}.
 reply(_, State=#state{reply=not_found}) ->
     #state{from=From, req_id=ReqId} = State,
     From ! {ReqId, not_found},
@@ -127,7 +128,28 @@ reply(_, State=#state{reply=not_found}) ->
 reply(_, State=#state{reply={set, _Clock, Elements, done}}) ->
     #state{from=From, req_id=ReqId} = State,
     From ! {ReqId, Elements},
+    lager:info("should be repair", []),
+    {next_state, repair, State, 0}.
+
+-spec repair(timeout, #state{}) -> {stop, normal, #state{}}.
+repair(timeout, State) ->
+    %% send each repair to the relevant node
+    #state{repair=Repairs, preflist=PL, set=Set} = State,
+    lager:info("sending ~p", [Repairs]),
+    [read_repair(Set, Repair, PL) || Repair <- Repairs],
     {stop, normal, State}.
+
+read_repair(_Set, {_Partition, []}, _PL) ->
+    ok;
+read_repair(Set, {Partition, Repairs}, PL) ->
+    lager:info("repairing ~p", [Partition]),
+    case lists:keyfind(Partition, 1, PL) of
+        false ->
+            ok;
+        Entry ->
+            lager:info("calling repair on ~p", [Partition]),
+            bigset_vnode:repair([Entry], ?REPAIR_REQ{set=Set, repairs=Repairs})
+    end.
 
 
 handle_event(_Event, _StateName, State) ->
@@ -150,99 +172,21 @@ code_change(_OldVsn, StateName, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-
--spec merge_results([message()]) -> not_found | {set, [{member(), dot_list()}]}.
+-spec merge_results([message()]) -> {repairs() ,
+                                     Result :: not_found | {set, [{member(), dot_list()}]}}.
 merge_results(Results) ->
-    lists:foldl(fun(not_found=_Result, not_found=_Acc) ->
-                        not_found;
-                   (not_found=_Result, {set, _Clock, _Elements, done}=Acc) ->
-                        Acc;
-                   ({set, _Clock, _Elements, done}=Res, not_found=_Acc) ->
-                        Res;
-                   ({set, Clock1, Elements1, done}, {set, Clock2, Elements2, done}) ->
-                        {Clock, Elements} = merge_set(Clock1, Elements1, Clock2, Elements2),
-                        {set, Clock, Elements, done}
+    lists:foldl(fun({_P1, not_found}=_Result, {_P2, not_found}=_Acc) ->
+                        {[], not_found};
+                   ({P1, not_found}=_Result, {_P2, {set, _Clock, Elements, done}}=Acc) ->
+                        {[{P1, Elements}], Acc};
+                   ({_P1, {set, _Clock, Elements, done}}=Res, {P2, not_found}=_Acc) ->
+                        {[{P2, Elements}], Res};
+                   ({P1, {set, Clock1, Elements1, done}}, {P2, {set, Clock2, Elements2, done}}) ->
+                        {Repairs, {Id, Clock, Elements}} = bigset_read_merge:merge_sets([{P1, Clock1, Elements1}, {P2, Clock2, Elements2}]),
+                        {Repairs, {Id, {set, Clock, Elements, done}}}
                 end,
-                not_found,
-                Results).
-
-%% @priv Just that same old orswot merge, again
--spec merge_set(bigset_clock:clock(), [{member(), dot_list()}],
-                bigset_clock:clock(), [{member(), dot_list()}]) ->
-                       [{member(), dot_list()}].
-merge_set(Clock1, Elements1, Clock2, Elements2) ->
-    {E1Keep, E2Unique} = orddict:fold(fun(Element, Dots1, {Keep, E2Unique}) ->
-                                              case orddict:find(Element, Elements2) of
-                                                  {ok, Dots2} ->
-                                                      %% In both sides, keep it, maybe
-                                                      SurvivingDots = merge_dots(Dots1, Dots2, Clock1, Clock2),
-                                                      {maybe_store_dots(Element, SurvivingDots, Keep),
-                                                       orddict:erase(Element, E2Unique)};
-                                                  error ->
-                                                      %% Only keep if not seen/removed by other clock
-                                                      SurvivingDots = filter_dots(Dots1, Clock2),
-                                                      Keep2 = maybe_store_dots(Element, SurvivingDots, Keep),
-                                                      {Keep2, E2Unique}
-                                              end
-                                      end,
-                                      {orddict:new(), Elements2},
-                                      Elements1),
-
-    %% Filter the unique elements left in elements2
-    Elements = orddict:fold(fun(Element, Dots, Keep) ->
-                                    SurvivingDots = filter_dots(Dots, Clock1),
-                                    maybe_store_dots(Element, SurvivingDots, Keep)
-                            end,
-                            E1Keep,
-                            E2Unique),
-    {bigset_clock:merge(Clock1, Clock2), Elements}.
-
-%% @priv returns `Dots' with all dots seen by `Clock' removed.
--spec filter_dots(dot_list(), bigset_clock:clock()) -> dot_list().
-filter_dots(Dots, Clock) ->
-    lists:filter(fun(Dot) ->
-                         not bigset_clock:seen(Dot, Clock)
-                 end,
-                 Dots).
-
-%% @priv return a `dot_list()' of the surviving dots from `Dots1' and
-%% `Dots2' where to survive means a dot is either: in both lists, or
-%% in only one list and is unseen by the opposite clock. The
-%% intersection of `Dots1' and `Dots2' plus the results of filtering
-%% the two remaining subsets against a clock.
--spec merge_dots(dot_list(), dot_list(), bigset_clock:clock(), bigset_clock:clock()) -> dot_list().
-merge_dots(Dots1, Dots2, Clock1, Clock2) ->
-    {Keep, Remaining} = lists:foldl(fun(Dot, {Keep, D2Unique}) ->
-                                            case lists:member(Dot, Dots2) of
-                                                true ->
-                                                    {[Dot | Keep], lists:delete(Dot, D2Unique)};
-                                                false ->
-                                                    {maybe_add_dot(Dot, Clock2, Keep), D2Unique}
-                                            end
-                                    end,
-                                    {[], Dots2},
-                                    Dots1),
-    lists:foldl(fun(Dot, Acc) ->
-                        maybe_add_dot(Dot, Clock1, Acc)
-                end,
-                Keep,
-                Remaining).
-
-%% @priv add `Dot' to `Acc' if it is _not_ seen by `Clock'. Return
-%% `Acc' updated (or not!)
--spec maybe_add_dot(bigset_clock:dot(), bigset_clock:clock(), dot_list()) -> dot_list().
-maybe_add_dot(Dot, Clock, Acc) ->
-    case bigset_clock:seen(Dot, Clock) of
-        true ->
-            Acc;
-        false ->
-            lists:umerge([Dot], Acc)
-    end.
-
-maybe_store_dots(_Elements, []=_Dots, Orddict) ->
-    Orddict;
-maybe_store_dots(Element, Dots, Orddict) ->
-    orddict:store(Element, Dots, Orddict).
+                hd(Results),
+                tl(Results)).
 
 schedule_timeout(infinity) ->
     undefined;

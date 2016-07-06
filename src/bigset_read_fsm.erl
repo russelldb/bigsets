@@ -17,7 +17,7 @@
 
 %% gen_fsm callbacks
 -export([init/1, prepare/2,  validate/2, read/2,
-         await_clocks/2, await_elements/2, reply/2, handle_event/3,
+         await_set/2, reply/2, handle_event/3,
          handle_sync_event/4, handle_info/3, terminate/3, code_change/4]).
 
 -define(SERVER, ?MODULE).
@@ -39,7 +39,6 @@
 -type message() :: not_found | {clock, clock()} |
                    done | {elements, elements()}.
 -type from() :: {pid(), reference()}.
--type elements() :: [{Member :: binary(), [Dot :: riak_dt_vclock:dot()]}].
 -type clock() :: bigset_clock:clock().
 -type partition() :: non_neg_integer().
 -type reqid() :: term().
@@ -56,7 +55,7 @@ start_link(Args=?READ_FSM_ARGS{}) ->
 %%%===================================================================
 %%% gen_fsm callbacks
 %%%===================================================================
--spec init(?READ_FSM_ARGS{}) -> {ok, prepare, #state{}, 0}.
+-spec init([?READ_FSM_ARGS{}]) -> {ok, prepare, #state{}, 0}.
 init([Args]) ->
     State = state_from_read_fsm_args(Args),
     {ok, prepare, State, 0}.
@@ -92,7 +91,7 @@ validate(timeout, State) ->
             {next_state, read, State, 0}
     end.
 
--spec read(timeout, state()) -> {next_state, await_clocks, state()}.
+-spec read(timeout, state()) -> {next_state, await_set, state()}.
 read(request_timeout, State) ->
     {next_state, reply, State#state{reply={error, timeout}}, 0};
 read(timeout, State) ->
@@ -100,115 +99,43 @@ read(timeout, State) ->
     #state{preflist=PL, set=Set} = State,
     Req = ?READ_REQ{set=Set},
     bigset_vnode:read(PL, Req),
-    {next_state, await_clocks, State}.
+    {next_state, await_set, State}.
 
--spec await_clocks(result(), state()) -> {next_state, reply, state(), 0} |
-                                         {next_state, await_clocks, state()} |
-                                         {next_state, await_elements, state()}.
-await_clocks(request_timeout, State) ->
+-spec await_set(result() | request_timeout, #state{}) -> {next_state, reply, #state{}, 0} |
+                                                         {next_state, await_set, #state{}}.
+await_set(request_timeout, State) ->
     {next_state, reply, State#state{reply={error, timeout}}, 0};
-await_clocks({{clock, Clock}, Partition, From}, State) ->
-    ack(From),
+await_set({Message=?READ_RESULT{done=Done, not_found=NotFound}, Partition, From}, State) ->
     #state{logic=Core} = State,
-    Core2 = bigset_read_core:clock(Partition, Clock, Core),
 
-    case bigset_read_core:r_clocks(Core2) of
+    case bigset_read_core:is_quorum_partition(Partition, Core) of
         true ->
-            Core3 = send_clock(Core2, State),
-            {next_state, await_elements, State#state{logic=Core3}};
+            maybe_ack(Done, NotFound, From),
+
+            {{Repairs, Result}, Core2} = bigset_read_core:handle_message(Partition, Message, Core),
+            maybe_send_results(Result, State),
+            maybe_send_repairs(Repairs, State),
+
+            case bigset_read_core:is_done(Core2) of
+                true ->
+                    {{FinalRepairs, FinalResult}, FinalCore} = bigset_read_core:finalise(Core2),
+                    maybe_send_results(FinalResult, State),
+                    maybe_send_repairs(FinalRepairs, State),
+
+                    {next_state, reply, State#state{reply=done, logic=FinalCore}, 0};
+                false ->
+                    {next_state, await_set, State#state{logic=Core2}}
+            end;
         false ->
-            {next_state, await_clocks, State#state{logic=Core2}}
-    end;
-await_clocks({{elements, Elements}, Partition, From}, State) ->
-    ack(From),
-    #state{logic=Core} = State,
-    {undefined, Core2} = bigset_read_core:elements(Partition, Elements, Core),
-    {next_state, await_clocks, State#state{logic=Core2}};
-await_clocks({done, Partition, _From}, State) ->
-    #state{logic=Core} = State,
-    Core2 = bigset_read_core:done(Partition, Core),
-    lager:debug("ac::: done ~p~n", [Partition]),
-    {next_state, await_clocks, State#state{logic=Core2}};
-await_clocks({not_found, Partition, _From}, State) ->
-    lager:debug("ac::: notfound  ~p~n", [Partition]),
-    #state{logic=Core} = State,
-    Core2 = bigset_read_core:not_found(Partition, Core),
-    %% @TODO(rdb|ugly) eugh, maybe read_core should return the state,
-    %% eh?
-    case {bigset_read_core:not_found(Core2),
-          bigset_read_core:r_clocks(Core2),
-          bigset_read_core:is_done(Core2)} of
-        {true, false, _} ->
-            {next_state, reply, State#state{reply={error, not_found}}, 0};
-        {false, false, _} ->
-            {next_state, await_clocks, State#state{logic=Core2}};
-        {false, true, false} ->
-            Core3 = send_clock(Core2, State),
-            {next_state, await_elements, State#state{logic=Core3}};
-        {false, true, true} ->
-            Core3 = send_clock(Core2, State),
-            FinalElements = bigset_read_core:finalise(Core3),
-            maybe_send_results(FinalElements, State),
-            Reply = done,
-            {next_state, reply, State#state{reply=Reply}, 0}
+            maybe_stop(Done, NotFound, From),
+            {next_state, await_set, State}
     end.
-
-send_clock(Core, State) ->
-    {_CtxClock, Core3} = bigset_read_core:get_clock(Core),
-    %%    CtxBin = bigset:to_bin(CtxClock),
-    send_reply({ok, {ctx, <<>>}}, State),
-    Core3.
-
--spec await_elements(result(), state()) ->
-                        {next_state, reply, state(), 0} |
-                        {next_state, await_elements, state()}.
-await_elements(request_timeout, State) ->
-    {next_state, reply, State#state{reply={error, timeout}}, 0};
-await_elements({not_found, _Partition, _From}, State) ->
-    %% quite literally do not care!
-    {next_state, await_elements, State};
-await_elements({{clock, _Clock}, _Partition, From}, State) ->
-    %% Too late to take part in R, stop folding, buddy!
-    stop_fold(From),
-    {next_state, await_elements, State};
-await_elements({{elements, Elements}, Partition, From}, State) ->
-    ack(From),
-    #state{logic=Core} = State,
-    {Send, Core2} = bigset_read_core:elements(Partition, Elements, Core),
-    maybe_send_results(Send, State),
-    State2 = State#state{logic=Core2},
-    {next_state, await_elements, State2};
-await_elements({done, Partition, _From}, State) ->
-    #state{logic=Core} = State,
-    Core2 = bigset_read_core:done(Partition, Core),
-    State2 = State#state{logic=Core2},
-    case bigset_read_core:is_done(Core2) of
-        true ->
-            FinalElements = bigset_read_core:finalise(Core2),
-            maybe_send_results(FinalElements, State),
-            Reply = done,
-            {next_state, reply, State2#state{reply=Reply}, 0};
-        false ->
-            {next_state, await_elements, State2}
-    end.
-
-maybe_send_results(undefined, _State) ->
-    ok;
-maybe_send_results([], _State) ->
-    ok;
-maybe_send_results(Results0, State) ->
-    %%Results = orddict:fetch_keys(Results0),
-    send_reply({ok, {elems, Results0}}, State).
-
-send_reply(Reply, State) ->
-    #state{from=From, req_id=ReqId} = State,
-    From ! {ReqId, Reply}.
 
 -spec reply(timeout, State) -> {stop, normal, State}.
 reply(_, State) ->
-    #state{from=From, req_id=ReqId, reply=Reply} = State,
+    #state{reply=Reply} = State,
     lager:debug("reply::: sending"),
-    From ! {ReqId, Reply},
+    send_to_client(Reply, State),
     {stop, normal, State}.
 
 handle_event(_Event, _StateName, State) ->
@@ -236,9 +163,56 @@ schedule_timeout(infinity) ->
 schedule_timeout(Timeout) ->
     erlang:send_after(Timeout, self(), request_timeout).
 
--spec ack(From::{pid(), reference()}) -> term().
+maybe_send_repairs([], _State) ->
+    ok;
+maybe_send_repairs(Repairs, State) ->
+    send_repairs(Repairs, State).
+
+send_repairs(Repairs, State) ->
+    %% send each repair to the relevant node
+    #state{preflist=PL, set=Set} = State,
+    [read_repair(Set, Repair, PL) || Repair <- Repairs],
+    ok.
+
+read_repair(_Set, {_Partition, []}, _PL) ->
+    ok;
+read_repair(Set, {Partition, Repairs}, PL) ->
+    lager:info("repairing ~p", [Partition]),
+    case lists:keyfind(Partition, 1, PL) of
+        false ->
+            ok;
+        Entry ->
+            lager:info("calling repair on ~p", [Partition]),
+            bigset_vnode:repair([Entry], ?REPAIR_REQ{set=Set, repairs=Repairs})
+    end.
+
+maybe_send_results(undefined, _State) ->
+    ok;
+maybe_send_results([], _State) ->
+    ok;
+maybe_send_results(Results0, State) ->
+    send_to_client({ok, {elems, Results0}}, State).
+
+send_to_client(Message, State) ->
+    #state{from=From, req_id=ReqId} = State,
+    From ! {ReqId, Message}.
+
+%% @private if the message is from a quorum member, ack it, if
+%% necessary
+maybe_ack(Done, NotFound, _From) when Done orelse NotFound ->
+    ok;
+maybe_ack(_Done, _NotFound, From) ->
+    ack(From).
+
+maybe_stop(Done, NotFound, _From) when Done orelse NotFound ->
+    ok;
+maybe_stop(_Done, _NotFound, From) ->
+    stop_fold(From).
+
+-spec ack(from()) -> {reference(), ok}.
 ack({Pid, Ref}) ->
     Pid ! {Ref, ok}.
 
+-spec stop_fold(from()) -> {reference(), stop_fold}.
 stop_fold({Pid, Ref}) ->
     Pid ! {Ref, stop_fold}.
