@@ -19,10 +19,10 @@
 -endif.
 
 %% lazy inefficient dot cloud of dict Actor->[count()]
--type actor() :: riak_dt_vclock:actor().
+-type actor() :: riak_dt:actor().
 -type clock() :: {riak_dt_vclock:vclock(), [riak_dt:dot()]}.
 -type dot() :: riak_dt:dot().
--type dotcloud() :: [{riak_dt_vclock:actor(), [pos_integer()]}].
+-type dotcloud() :: [{riak_dt:actor(), [pos_integer()]}].
 
 -define(DICT, orddict).
 
@@ -182,7 +182,7 @@ delete_dot({Actor, Cnt}, DotList, DotCloud) ->
 %% @doc get the counter for `Actor' where `counter' is the maximum
 %% _contiguous_ event sent by this clock (i.e. not including
 %% exceptions.)
--spec get_contiguous_counter(riak_dt_vclock:actor(), clock()) ->
+-spec get_contiguous_counter(actor(), clock()) ->
                                     pos_integer() | no_return().
 get_contiguous_counter(Actor, {Clock, _Dots}=C) ->
     case riak_dt_vclock:get_counter(Actor, Clock) of

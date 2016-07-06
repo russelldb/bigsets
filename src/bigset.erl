@@ -24,28 +24,6 @@ dev_client() ->
 make_client(Node) ->
     bigset_client:new(Node).
 
-add_read() ->
-    add_read(<<"rdb">>).
-
-add_read(E) ->
-    add_read(<<"m">>, E).
-
-add_read(S, E) ->
-    lager:debug("Adding to set~n"),
-    ok = bigset_client:update(S, [E]),
-    lager:debug("reading from set~n"),
-    Res = bigset_client:read(S, []),
-    lager:debug("Read result ~p~n", [Res]).
-
-add_all(Es) ->
-    add_all(<<"m">>, Es).
-
-add_all(S, Es) ->
-    ok = bigset_client:update(S, Es),
-    lager:debug("reading from set~n"),
-    Res = bigset_client:read(S, []),
-    lager:debug("Read result ~p~n", [Res]).
-
 make_bigset(Set, N) ->
     Words = read_words(N*2),
     Limit = length(Words),
@@ -80,19 +58,6 @@ make_batch(Set, N) ->
 make_batch(Set) ->
     Batch = [crypto:rand_bytes(100) || _N <- lists:seq(1, ?BATCH_SIZE)],
     ok = bigset_client:update(Set, Batch).
-
-add() ->
-    add(<<"rdb">>).
-
-add(E) ->
-    add(<<"m">>, E).
-
-add(S, E) ->
-    lager:debug("Adding to set~n"),
-    ok = bigset_client:update(S, [E]).
-
-stream_read() ->
-    stream_read(<<"m">>).
 
 stream_read(S) ->
     stream_read(S, bigset_client:new()).
@@ -140,8 +105,6 @@ bm_read(Set, N) ->
 
 
 %%% keys funs %%%%
-
-
 %% Key prefix is the common prefix of a key for the given set
 -spec key_prefix(Set :: binary()) -> Prefix :: binary().
 key_prefix(Set) when is_binary(Set) ->

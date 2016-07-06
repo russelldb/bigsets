@@ -2,7 +2,7 @@
 -type member() :: binary().
 -type actor() :: binary().
 -type counter() :: pos_integer().
--type key() :: binary().
+-type key() :: <<_:64,_:_*8>>.%%binary().
 -type decoded_key() :: clock_key() | element_key() | end_key().
 -type clock_key() :: {clock, set(), actor()}.
 -type end_key() :: {end_key, set()}.
