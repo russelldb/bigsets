@@ -27,7 +27,7 @@
 
 -record(state,
         {
-          r :: pos_integer(),
+          r = 1 :: pos_integer(),
           actors=orddict:new() :: [{pos_integer(), #actor{}}],
           clocks = 0 :: non_neg_integer(),
           not_founds = 0 :: non_neg_integer(),
@@ -35,45 +35,65 @@
           clock %% Merged clock
         }).
 
+-type state() :: #state{}.
+-type partition() :: non_neg_integer().
+
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
-new(R) ->
+new(R) when R > 0 ->
     #state{r=R}.
 
-%% handle_message(Partition, Message, Core) ->
-%%     case we_want_this_message(Partition, Message, Core) of
-%%         true ->
-%%          process_message(Partition, Message, Core);
-%%         false ->
-%%             get_result(Core)
-%%     end.
+%% @doc is the given `Partition' currently or potentially in the
+%% quorum for this `Core'. Potentially as a `Core' that is not yet at
+%% quorum will include this `Partition' if the next message processed
+%% is from it.
+-spec is_quorum_partition(partition(), state()) -> boolean().
+is_quorum_partition(Partition, Core) ->
+    case {quorum_reached(Core), quorum_member(Partition, Core)} of
+        {true, true} ->
+            true;
+        {false, _} ->
+            true;
+        {true, false} ->
+            false
+    end.
 
-%% we_want_this_message(Partition, Message, #state{clocks=Clocks, not_founds=NotFounds, r=R}) when Clocks + NotFounds >= R ->
-%%     is_actor(Partition, Core);
-%% we_want_this_message(Partition, Message, Core) ->
-%%     true.
+%% @doc does the read_core state have at least R actors, i.e. have we
+%% achieved a quorum of responses
+-spec quorum_reached(state()) -> boolean().
+quorum_reached(State) ->
+    #state{actors=Actors, r=R} = State,
+    length(Actors) >= R.
 
-%% is_actor(Partition, Core) ->
-%%     #state{actors=Actors} = State,
-%%     orddict:is_key(Partition, Actors).
+%% @doc is the given `Partition' part of the current quorum for the
+%% given `State'
+-spec quorum_member(partition(), state()) -> boolean().
+quorum_member(Partition, State) ->
+    #state{actors=Actors} = State,
+    orddict:is_key(Partition, Actors).
 
-%% process_message(Partition, ?READ_RESULT{not_found=true}, Core) ->
-%%     Actor = get_actor(Partition, Core),
-%%     Actor2 = set_not_found(Actor),
-%%     Core2=#state{not_founds=NF} = set_actor(Partition, Actor2, Core),
-%%     Core3 = Core2#state{not_founds=NF+1},
-%%     get_result(Core3);
-%% process_message(Partition, Message=?READ_RESULT{}, Core) ->
-%%     ?READ_RESULT{clock=Clock, elements=Elements, done=Done} = Message,
-%%     Core2 = clock(Partition, Clock, Core),
-%%     Core3 = done(Done, Partition, Core2),
-%%     elements(Partition, Elements, Core3).
+-spec handle_message(partition(), ?READ_RESULT{}, state()) ->
+                            {{repairs(), elements()}, state()}.
+handle_message(Partition, ?READ_RESULT{not_found=true}, Core) ->
+    Actor = get_actor(Partition, Core),
+    Actor2 = set_not_found(Actor),
+    Core2=#state{not_founds=NF} = set_actor(Partition, Actor2, Core),
+    Core3 = Core2#state{not_founds=NF+1},
+    maybe_merge_and_flush(Core3);
+handle_message(Partition, Message=?READ_RESULT{}, Core) ->
+    ?READ_RESULT{clock=Clock, elements=Elements, done=Done} = Message,
+    Core2 = maybe_clock(Partition, Clock, Core),
+    Core3 = maybe_done(Done, Partition, Core2),
+    elements(Partition, Elements, Core3).
 
 %% @doc call when a clock is received
-clock(_Partition, undefined, Core) ->
+maybe_clock(_Partition, undefined, Core) ->
     Core;
+maybe_clock(Partition, Clock, Core) ->
+    clock(Partition, Clock, Core).
+
 clock(Partition, Clock, Core) ->
     Actor = get_actor(Partition, Core),
     Actor2 = add_clock(Actor, Clock),
@@ -81,9 +101,12 @@ clock(Partition, Clock, Core) ->
     Core2#state{clocks=Clocks+1}.
 
 %% @doc maybe set a partition as done
-done(false, _Partition, Core) ->
+maybe_done(false, _Partition, Core) ->
     Core;
-done(true, Partition, Core) ->
+maybe_done(true, Partition, Core) ->
+    done(Partition, Core).
+
+done(Partition, Core) ->
     Actor = get_actor(Partition, Core),
     Actor2 = set_done(Actor),
     Core2=#state{done=Done}=set_actor(Partition, Actor2, Core),
@@ -144,23 +167,42 @@ maybe_merge_and_flush(Core) ->
 
     case mergable(Actors, undefined, []) of
         false ->
-            {undefined, Core};
+            {{[], undefined}, Core};
         {true, LeastLastElement, MergableActors} ->
             SplitFun = split_fun(LeastLastElement),
             %% of the actors that are mergable, split their lists
             %% fold instead so that you can merge+update the Core to return in one pass
-            {{Repairs, MergedActor}, NewActors} =lists:foldl(fun({Partition, Actor}, {{RepairAcc, MergedSet}, NewCore}) ->
+            {{Repairs, MergedActor}, NewActors} =lists:foldl(fun({Partition, Actor}, {{RepairAcc, MergedSet}, ActorsAcc}) ->
                                                           #actor{elements=Elements} = Actor,
                                                           {Merge, Keep} = lists:splitwith(SplitFun, Elements),
                                                           {
                                                             merge([{Partition, Actor#actor{elements=Merge}}], MergedSet, RepairAcc),
-                                                            orddict:store(Partition, Actor#actor{elements=Keep}, NewCore)
+                                                            orddict:store(Partition, Actor#actor{elements=Keep}, ActorsAcc)
                                                           }
                                                   end,
-                                                  {{undefined, []}, Actors},
+                                                  {{[], undefined}, Actors},
                                                   MergableActors),
-            {{Repairs, MergedActor#actor.elements}, Core#state{actors=NewActors}}
+            %% @TODO(rdb) probably a bad idea to copy `Elements' into
+            %% this structure for each not_found. Maybe a better
+            %% way. Consider revisiting the
+            %% "result-as-a-big-binary-blob" thing
+%%            Repairs2 = add_not_found_repairs(Repairs, MergedActor#actor.elements, NewActors),
+            {{Repairs, return_elements(MergedActor)}, Core#state{actors=NewActors}}
     end.
+
+return_elements(undefined) ->
+    [];
+return_elements(#actor{elements=E}) ->
+    E.
+
+add_not_found_repairs(Repairs, Elements, Actors) ->
+    lists:foldl(fun({Partition, #actor{not_found=true}}, RepairsAcc) ->
+                        [{Partition, Elements} | RepairsAcc];
+                   (_, RepairsAcc) ->
+                        RepairsAcc
+                end,
+                Repairs,
+                Actors).
 
 %% Consider just the element, not the dots
 split_fun(LeastLastElement) ->
@@ -230,13 +272,13 @@ last_element(<<Sz:32/integer, Rest/binary>>) ->
     E.
 
 %% @perform a CRDT orswot merge
-finalise(#state{actors=Actors}) ->
+finalise(State=#state{actors=Actors}) ->
     {true, _LLE, MergableActors} = mergable(Actors, undefined, []),
     case merge(MergableActors, undefined, []) of
         {Repairs, #actor{elements=Elements}} ->
-            {Repairs, Elements};
-        undefined ->
-            undefined
+            {{Repairs, Elements}, State};
+        {[], undefined}  ->
+            {{[], []}, State}
     end.
 
 %% @private assumes that all actors with a clock's clocks are being
@@ -252,7 +294,7 @@ merge_clocks([{_P, #actor{clock=Clock}} | Rest], Acc) ->
     merge_clocks(Rest, bigset_clock:merge(Clock, Acc)).
 
 merge([], Actor, Repairs) ->
-    {Actor, Repairs};
+    {Repairs, Actor};
 merge([{_Partition, Actor} | Rest], undefined, Repairs) ->
     merge(Rest, Actor, Repairs);
 merge([{_Partition, Actor} | Rest], Mergedest0, Repairs) ->
@@ -304,5 +346,24 @@ done_test() ->
     ?assertNot(is_done(#state{done=1, not_founds=0, r=2})),
     ?assertNot(is_done(#state{done=0, not_founds=0, r=2})),
     ?assertNot(is_done(#state{done=0, not_founds=1, r=2})).
+
+quorum_reached_test() ->
+    ?assertNot(quorum_reached(#state{})),
+
+    Actors = orddict:store(1, #actor{}, orddict:store(2, #actor{}, orddict:new())),
+    State = #state{r=2, actors=Actors},
+    ?assert(quorum_reached(State)),
+    State2 = #state{r=3, actors=Actors},
+    ?assertNot(quorum_reached(State2)),
+    State2 = #state{r=3, actors=Actors},
+    State3 = #state{r=2, actors= orddict:store(3, #actor{}, Actors)},
+    ?assert(quorum_reached(State3)).
+
+quorum_member_test() ->
+    Actors = orddict:store(1, #actor{}, orddict:store(2, #actor{}, orddict:new())),
+    State = #state{r=2, actors=Actors},
+    ?assert(quorum_member(1, State)),
+    ?assert(quorum_member(2, State)),
+    ?assertNot(quorum_member(3, State)).
 
 -endif.

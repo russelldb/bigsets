@@ -21,7 +21,7 @@
 -ifdef(TEST).
 -compile(export_all).
 -else.
--export([merge_sets/1]).
+-export([merge_sets/1, merge_sets/2]).
 -endif.
 
 -type partition() :: pos_integer() | [pos_integer()].

@@ -99,34 +99,36 @@ flush(Acc, Done) ->
     %% 2. continue fold, but do not send result until message is
     %% acked, seems to me this gives us time to fold while message is
     %% in flight, read, acknowledged, but still allows backpressure)
-    #fold_acc{elements=Elements, monitor=Monitor, partition=Partition,
+    #fold_acc{elements=Elements, monitor=Monitor,
               clock=Clock, clock_sent=ClockSent} = Acc,
 
     Message = message(ClockSent, Clock, Elements, Done),
 
-    Res = receive
-              {Monitor, ok} ->
+    Res = case ClockSent of
+              true ->
+                  receive
+                      {Monitor, ok} ->
+                          send(Message, Acc),
+                          Acc#fold_acc{size=0, elements=?EMPTY};
+                      {Monitor, stop_fold} ->
+                          close(Acc),
+                          throw(stop_fold);
+                      {'DOWN', Monitor, process, _Pid, _Reson} ->
+                          close(Acc),
+                          throw(receiver_down)
+                  end;
+              false ->
                   send(Message, Acc),
-                  Acc#fold_acc{size=0, elements=?EMPTY};
-              {Monitor, stop_fold} ->
-                  lager:debug("told to stop~p~n", [Partition]),
-                  close(Acc),
-                  throw(stop_fold);
-              {'DOWN', Monitor, process, _Pid, _Reson} ->
-                  lager:debug("got down~p~n", [Partition]),
-                  close(Acc),
-                  throw(receiver_down)
+                  Acc#fold_acc{size=0, elements=?EMPTY, clock_sent=true}
           end,
     Res.
 
 message(ClockSent, Clock, Elements, Done) ->
-    %% Results needed sorted
     done_message(Done,
                  element_message(Elements,
                                  clock_message(ClockSent, Clock, ?READ_RESULT{})
                                 )
                 ).
-
 
 clock_message(false, Clock, Message) ->
     Message?READ_RESULT{clock=Clock};
@@ -134,6 +136,7 @@ clock_message(true, _Clock, Message) ->
     Message.
 
 element_message(Elements, Message) ->
+    %% Results needed sorted
     Message?READ_RESULT{elements=lists:reverse(Elements)}.
 
 done_message(done, Message) ->
