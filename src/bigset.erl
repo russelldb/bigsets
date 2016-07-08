@@ -48,9 +48,10 @@ add_all(S, Es) ->
 
 make_bigset(Set, N) ->
     Words = read_words(N*2),
-    Limit = length(Words),
-    Res = [bigset_client:update(Set, [lists:nth(crypto:rand_uniform(1, Limit), Words)]) ||
-              _N <- lists:seq(1, N)],
+
+    Batches = make_batches(Words, N, []),
+    Res = [bigset_client:update(Set, Batch) ||
+              Batch <- Batches],
     case lists:all(fun(E) ->
                            E == ok end,
                    Res) of
@@ -61,6 +62,15 @@ make_bigset(Set, N) ->
     end.
 
 -define(BATCH_SIZE, 1000).
+
+make_batches(_Words, 0, Batches) ->
+    Batches;
+make_batches(Words, N, Batches) ->
+    BatchSize = min(N, ?BATCH_SIZE),
+    StartLimit = length(Words)-BatchSize,
+    Start = crypto:rand_uniform(1, StartLimit),
+    Batch = lists:sublist(Words, Start, BatchSize),
+    make_batches(Words, N-BatchSize, [Batch | Batches]).
 
 make_set(Set, N) when N < ?BATCH_SIZE ->
     Batch = [crypto:rand_bytes(100) || _N <- lists:seq(1, N)],
