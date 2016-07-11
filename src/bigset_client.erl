@@ -10,6 +10,13 @@
 -include("bigset.hrl").
 -include("bigset_trace.hrl").
 
+-ifdef(EQC).
+-include_lib("eqc/include/eqc.hrl").
+-endif.
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-endif.
+
 -export([
          new/0,
          new/1,
@@ -131,8 +138,8 @@ read(Set, Options, {?MODULE, Node}) ->
     Opts = case validate_read_options(Options) of
                valid ->
                    Options;
-               {invalid, Message, Options} ->
-                   {error, invalid_options, Message, Options}
+               {invalid_options, Message} ->
+                   throw({error, invalid_options, Message, Options})
            end,
     Me = self(),
     ReqId = mk_reqid(),
@@ -235,11 +242,37 @@ validate_read_options([], []) ->
     valid;
 validate_read_options([], Errs) ->
     {invalid_options, Errs};
-validate_read_options([{range_start, Start} | Opts], Errs) ->
-    {Errs2, Opts2} = validate_range_opts(Start, proplists:lookup(range_end, Opts), Errs),
-    validate_read_options(Opts2, Errs);
-validate_read_options([{range_end, End} | Opts], Errs) ->
-    {Errs2, Opts2} = validate_range_options(End, proplists:lookup(range_start, Opts), Errs),
-    validate_read_options(Opts2, Errs2).
+validate_read_options([{range_start, _}=Start | Opts], Errs) ->
+    Errs2 = validate_range_options(Start, proplists:lookup(range_end, Opts), Errs),
+    validate_read_options(Opts, Errs2);
+validate_read_options([{range_end, _}=End | Opts], Errs) ->
+    Errs2 = validate_range_options(proplists:lookup(range_start, Opts), End, Errs),
+    validate_read_options(Opts, Errs2).
 
+-spec validate_range_options(none | {range_start, binary()},
+                             none | {range_end, binary()},
+                             Errors :: list()) ->
+                                    {Errors :: list(),
+                                     RemainingOpts :: proplists:proplist()}.
+validate_range_options({range_start, Start}, none, Errs) when is_binary(Start) ->
+    Errs;
+validate_range_options(none, {range_end, End}, Errs) when is_binary(End) ->
+    Errs;
+validate_range_options({range_start, Start}, {range_end, End}, Errs) when is_binary(Start) andalso is_binary(End) andalso Start =< End ->
+    Errs;
+validate_range_options(Start, End, Errs) ->
+    [{invalid_range_options, Start, End} | Errs].
 
+%%% Tests
+
+-ifdef(TEST).
+
+validate_range_options_test() ->
+    ?assertEqual([], validate_range_options(none, {range_end, <<"a">>}, [])),
+    ?assertEqual([], validate_range_options({range_start, <<"a">>}, {range_end, <<"z">>}, [])),
+    ?assertEqual([], validate_range_options({range_start, <<"a">>}, none, [])),
+    ?assertMatch([_], validate_range_options({range_start, <<"z">>}, {range_end, <<"a">>}, [])),
+    ?assertMatch([_], validate_range_options({range_start, a}, {range_end, <<"z">>}, [])),
+    ?assertMatch([_], validate_range_options({range_start, <<"z">>}, {range_end, 10202}, [])).
+
+-endif.

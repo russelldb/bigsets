@@ -67,7 +67,7 @@
                                repairs :: repair_entries()
                               }).
 
--record(bigset_read_req_v1, {set}).
+-record(bigset_read_req_v1, {set, options}).
 
 -record(bigset_contains_req_v1, {set :: set(), %% The set
                                  members :: [member()] %%  elements to check membership

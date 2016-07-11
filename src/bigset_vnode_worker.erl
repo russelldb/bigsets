@@ -51,18 +51,17 @@ init_worker(VNodeIndex, Args, _Props) ->
 %% State} the latter sends `Reply' to `Sender' using
 %% riak_core_vnode:reply(Sender, Reply)
 %% No need for lots of indirection here, is there?
-handle_work({get, Id, DB, Set}, Sender, State) ->
+handle_work({get, Id, DB, Set, Opts}, Sender, State) ->
     #state{partition=Partition, batch_size=BatchSize} = State,
     %% clock is first key, this actors clock key is the first key we
     %% care about. Read all the way to last element
-    FirstKey = bigset:clock_key(Set, Id),
-    EndKey = bigset:end_key(Set),
+    ClockKey = bigset:clock_key(Set, Id),
+
     Buffer = bigset_fold_acc:new(Set, Sender, BatchSize, Partition, Id),
-    FoldOpts = [{start_key, FirstKey},
-                {end_key, EndKey},
-                %%{end_inclusive, true}, % set this to process the bigset's end key
-                {bigsets, true},
-                {vnode, Id} | ?RFOLD_OPTS],
+    FoldOpts0 = [{bigsets, true},
+                 {vnode, Id} | ?RFOLD_OPTS],
+
+    FoldOpts = add_end_key_opts(Set, Opts, maybe_add_bigset_start_key(Set, ClockKey, Opts, FoldOpts0)),
 
     try
         AccFinal =
@@ -203,3 +202,21 @@ add_dot(Element, Actor, Cnt, [{Element, DL} | Acc]) ->
     [{Element, lists:umerge([{Actor, Cnt}], DL)} | Acc];
 add_dot(Element, Actor, Cnt, Acc) ->
     [{Element, [{Actor, Cnt}]} | Acc].
+
+maybe_add_bigset_start_key(Set, ClockKey, Opts, FoldOpts) ->
+    case proplists:get_value(range_start, Opts) of
+        undefined ->
+            [{start_key, ClockKey} | FoldOpts];
+        Element ->
+            RangeStartKey = bigset:range_start_key(Set, Element),
+            [{start_inclusive, true}, {start_key, RangeStartKey}, {bigset_start_key, ClockKey} | FoldOpts]
+    end.
+
+add_end_key_opts(Set, Opts, FoldOpts) ->
+    case proplists:get_value(range_end, Opts) of
+        undefined ->
+            [{end_key, bigset:end_key(Set)} | FoldOpts];
+        Element ->
+            EndKey = bigset:insert_member_key(Set, Element, <<>>, 0),
+            [{end_key, EndKey}, {end_inclusive, true} | FoldOpts]
+    end.

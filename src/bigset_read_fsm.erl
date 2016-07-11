@@ -96,8 +96,8 @@ read(request_timeout, State) ->
     {next_state, reply, State#state{reply={error, timeout}}, 0};
 read(timeout, State) ->
     %% A read request
-    #state{preflist=PL, set=Set} = State,
-    Req = ?READ_REQ{set=Set},
+    #state{preflist=PL, set=Set, options=Options} = State,
+    Req = ?READ_REQ{set=Set, options=Options},
     bigset_vnode:read(PL, Req),
     {next_state, await_set, State}.
 

@@ -167,11 +167,11 @@ handle_command(?REPLICATE_REQ{}=Op,
 %%% Read
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-handle_command(?READ_REQ{set=Set}, Sender, State) ->
+handle_command(?READ_REQ{set=Set, options=Opts}, Sender, State) ->
     %% read is an async fold operation
     %% @see bigset_vnode_worker for that code.
     #state{db=DB, vnodeid=Id} = State,
-    {async, {get, Id, DB, Set}, Sender, State};
+    {async, {get, Id, DB, Set, Opts}, Sender, State};
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%% Contains Query
