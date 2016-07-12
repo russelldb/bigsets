@@ -208,7 +208,7 @@ maybe_add_bigset_start_key(Set, ClockKey, Opts, FoldOpts) ->
         undefined ->
             [{start_key, ClockKey} | FoldOpts];
         Element ->
-            RangeStartKey = bigset:range_start_key(Set, Element),
+            RangeStartKey = bigset:insert_member_key(Set, Element, <<>>, 0),
             [{start_inclusive, true}, {start_key, RangeStartKey}, {bigset_start_key, ClockKey} | FoldOpts]
     end.
 
