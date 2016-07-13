@@ -247,7 +247,19 @@ validate_read_options([{range_start, _}=Start | Opts], Errs) ->
     validate_read_options(Opts, Errs2);
 validate_read_options([{range_end, _}=End | Opts], Errs) ->
     Errs2 = validate_range_options(proplists:lookup(range_start, Opts), End, Errs),
-    validate_read_options(Opts, Errs2).
+    validate_read_options(Opts, Errs2);
+validate_read_options([{start_inclusive, Bool} | Opts], Errs) when is_boolean(Bool) ->
+    validate_read_options(Opts, Errs);
+validate_read_options([{start_inclusive, NotBool} | Opts], Errs) ->
+    validate_read_options(Opts, [{start_inclusive_not_boolean, NotBool} | Errs]);
+validate_read_options([start_inclusive | Opts], Errs) ->
+    validate_read_options(Opts, Errs);
+validate_read_options([{end_inclusive, Bool} | Opts], Errs) when is_boolean(Bool) ->
+    validate_read_options(Opts, Errs);
+validate_read_options([{end_inclusive, NotBool} | Opts], Errs) ->
+    validate_read_options(Opts, [{end_inclusive_not_boolean, NotBool} | Errs]);
+validate_read_options([end_inclusive | Opts], Errs) ->
+    validate_read_options(Opts, Errs).
 
 -spec validate_range_options(none | {range_start, binary()},
                              none | {range_end, binary()},

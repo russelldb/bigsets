@@ -249,14 +249,6 @@ dot_from_key(K) ->
     {element, _S, _E, Actor, Cnt} = decode_key(K),
     {Actor, Cnt}.
 
-range_start_key(Set, Element) ->
-    Pref = key_prefix(Set),
-    ElemLen = byte_size(Element),
-    <<Pref/binary,
-      $e, %% means an element
-      ElemLen:32/little-unsigned-integer,
-      Element:ElemLen/binary>>.
-
 %% @private encodes the element key so it is in order, on disk, with
 %% the other elements. Use the actor ID and counter (dot) too. This
 %% means at some extra storage, but makes for no reads before writes

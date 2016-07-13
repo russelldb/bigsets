@@ -61,7 +61,7 @@ handle_work({get, Id, DB, Set, Opts}, Sender, State) ->
     FoldOpts0 = [{bigsets, true},
                  {vnode, Id} | ?RFOLD_OPTS],
 
-    FoldOpts = add_end_key_opts(Set, Opts, maybe_add_bigset_start_key(Set, ClockKey, Opts, FoldOpts0)),
+    FoldOpts = add_range_end_opts(Set, Opts, add_range_start_opts(Set, ClockKey, Opts, FoldOpts0)),
 
     try
         AccFinal =
@@ -203,20 +203,41 @@ add_dot(Element, Actor, Cnt, [{Element, DL} | Acc]) ->
 add_dot(Element, Actor, Cnt, Acc) ->
     [{Element, [{Actor, Cnt}]} | Acc].
 
-maybe_add_bigset_start_key(Set, ClockKey, Opts, FoldOpts) ->
+add_range_start_opts(Set, ClockKey, Opts, FoldOpts) ->
     case proplists:get_value(range_start, Opts) of
         undefined ->
             [{start_key, ClockKey} | FoldOpts];
         Element ->
             RangeStartKey = bigset:insert_member_key(Set, Element, <<>>, 0),
-            [{start_inclusive, true}, {start_key, RangeStartKey}, {bigset_start_key, ClockKey} | FoldOpts]
+            %% the eleveldb fold code always needs the clock+tombstone
+            %% metadata, so we need two start keys, one for meta, one
+            %% for data. We use `bigset_start_key` for metadata.
+            maybe_add_start_inclusive(Opts, [{start_key, RangeStartKey}, {bigset_start_key, ClockKey} | FoldOpts])
     end.
 
-add_end_key_opts(Set, Opts, FoldOpts) ->
+add_range_end_opts(Set, Opts, FoldOpts) ->
     case proplists:get_value(range_end, Opts) of
         undefined ->
             [{end_key, bigset:end_key(Set)} | FoldOpts];
         Element ->
             EndKey = bigset:insert_member_key(Set, Element, <<>>, 0),
-            [{end_key, EndKey}, {end_inclusive, true} | FoldOpts]
+            maybe_add_end_inclusive(Opts, [{end_key, EndKey} | FoldOpts])
+    end.
+
+maybe_add_start_inclusive(Opts, FoldOpts) ->
+    case proplists:get_value(start_inclusive, Opts, false) of
+        true ->
+            [{start_inclusive, true} | FoldOpts];
+        false ->
+            %% for some reason this must explicitly be set
+            %% false. eleveldb defaults to true
+            [{start_inclusive, false} | FoldOpts]
+    end.
+
+maybe_add_end_inclusive(Opts, FoldOpts) ->
+    case proplists:get_value(end_inclusive, Opts, false) of
+        true ->
+            [{end_inclusive, true} | FoldOpts];
+        false ->
+            FoldOpts
     end.
