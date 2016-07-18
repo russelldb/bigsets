@@ -32,12 +32,17 @@
           clocks = 0 :: non_neg_integer(),
           not_founds = 0 :: non_neg_integer(),
           done = 0 :: non_neg_integer(),
-          clock %% Merged clock
+          clock, %% Merged clock
+          codec %% a dot encoder/decoder
         }).
 
 -type state() :: #state{}.
 -type partition() :: non_neg_integer().
 
+
+-ifdef(EQC).
+-include_lib("eqc/include/eqc.hrl").
+-endif.
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
@@ -159,11 +164,12 @@ is_done(_S) ->
 -spec maybe_merge_and_flush(#state{}) -> {{repairs(), [elements()]}, #state{}}.
 maybe_merge_and_flush(Core=#state{not_founds=NF, clocks=C, r=R}) when NF+C < R ->
     {{[], undefined}, Core};
-maybe_merge_and_flush(Core) ->
+maybe_merge_and_flush(Core0) ->
     %% need to be R before we proceed
     %% if any actor has a clock, but no values, and is not 'done' we
     %% can't proceed
-    #state{actors=Actors} = Core,
+    Core = maybe_merge_clocks(Core0),
+    #state{actors=Actors, codec=Codec} = Core,
 
     case mergable(Actors, undefined, []) of
         false ->
@@ -176,7 +182,7 @@ maybe_merge_and_flush(Core) ->
                                                           #actor{elements=Elements} = Actor,
                                                           {Merge, Keep} = lists:splitwith(SplitFun, Elements),
                                                           {
-                                                            merge([{Partition, Actor#actor{elements=Merge}}], MergedSet, RepairAcc),
+                                                            merge([{Partition, Actor#actor{elements=Merge}}], MergedSet, RepairAcc, Codec),
                                                             orddict:store(Partition, Actor#actor{elements=Keep}, ActorsAcc)
                                                           }
                                                   end,
@@ -189,6 +195,16 @@ maybe_merge_and_flush(Core) ->
 %%            Repairs2 = add_not_found_repairs(Repairs, MergedActor#actor.elements, NewActors),
             {{Repairs, return_elements(MergedActor)}, Core#state{actors=NewActors}}
     end.
+
+%% @private called when R is reached. Merges the clocks and gets a dot
+%% encoder.
+-spec maybe_merge_clocks(#state{}) -> #state{}.
+maybe_merge_clocks(Core=#state{clock=undefined}) ->
+    Clock = merge_clocks(Core),
+    Codec = bigset_ctx_codec:new(Clock),
+    Core#state{clock=Clock, codec=Codec};
+maybe_merge_clocks(Core) ->
+    Core.
 
 return_elements(undefined) ->
     [];
@@ -272,9 +288,9 @@ last_element(<<Sz:32/integer, Rest/binary>>) ->
     E.
 
 %% @perform a CRDT orswot merge
-finalise(State=#state{actors=Actors}) ->
+finalise(State=#state{actors=Actors, codec=Codec}) ->
     {true, _LLE, MergableActors} = mergable(Actors, undefined, []),
-    case merge(MergableActors, undefined, []) of
+    case merge(MergableActors, undefined, [], Codec) of
         {Repairs, #actor{elements=Elements}} ->
             {{Repairs, Elements}, State};
         {[], undefined}  ->
@@ -283,6 +299,7 @@ finalise(State=#state{actors=Actors}) ->
 
 %% @private assumes that all actors with a clock's clocks are being
 %% merged to a single clock
+-spec merge_clocks(#state{}) -> bigset_clock:clock().
 merge_clocks(#state{actors=Actors}) ->
     merge_clocks(Actors, bigset_clock:fresh()).
 
@@ -293,22 +310,23 @@ merge_clocks([{_P, #actor{clock=undefined}} | Rest], Acc) ->
 merge_clocks([{_P, #actor{clock=Clock}} | Rest], Acc) ->
     merge_clocks(Rest, bigset_clock:merge(Clock, Acc)).
 
-merge([], Actor, Repairs) ->
+merge([], Actor, Repairs, _Codec) ->
     {Repairs, Actor};
-merge([{_Partition, Actor} | Rest], undefined, Repairs) ->
-    merge(Rest, Actor, Repairs);
-merge([{_Partition, Actor} | Rest], Mergedest0, Repairs) ->
-    {Repairs2, Mergedest} = orswot_merge(Actor, Mergedest0, Repairs),
-    merge(Rest, Mergedest, Repairs2).
+merge([{_Partition, Actor} | Rest], undefined, Repairs, Codec) ->
+    merge(Rest, Actor, Repairs, Codec);
+merge([{_Partition, Actor} | Rest], Mergedest0, Repairs, Codec) ->
+    {Repairs2, Mergedest} = orswot_merge(Actor, Mergedest0, Repairs, Codec),
+    merge(Rest, Mergedest, Repairs2, Codec).
 
-orswot_merge(#actor{clock=C1, elements=E}, A=#actor{clock=C2, elements=E}, Repairs) ->
+orswot_merge(#actor{clock=C1, elements=E}, A=#actor{clock=C2, elements=E}, Repairs, _Codec) ->
     {Repairs, A#actor{clock=bigset_clock:merge(C1, C2)}};
-orswot_merge(A1, A2, Repairs) ->
+orswot_merge(A1, A2, Repairs, Codec) ->
     #actor{partition=P1, elements=E1, clock=C1} = A1,
     #actor{partition=P2, elements=E2, clock=C2} = A2,
     {Repairs2, {Id, Clock, Elements}} = bigset_read_merge:merge_sets([{P1, C1, E1},
-                                                               {P2, C2, E2}],
-                                                               Repairs),
+                                                                      {P2, C2, E2}],
+                                                                     Repairs,
+                                                                     Codec),
     {Repairs2, #actor{partition=Id, clock=Clock, elements=Elements}}.
 
 set_actor(Partition, Actor, State) ->

@@ -120,6 +120,7 @@ handle_dot(Element, {P1, Dot}, {P2, Clock}, Repairs, DotAcc) ->
         false ->
             %% P2 needs to add this dot
             {repair_add(P2, Element, Dot, Repairs),
+             %% @TODO(rdb) encode the dot some way here?
              lists:umerge([Dot], DotAcc)}
     end.
 
