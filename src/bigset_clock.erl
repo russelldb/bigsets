@@ -290,10 +290,100 @@ complement({AVV, ADC}=A, {BVV, BDC}) ->
                 [],
                 AActors).
 
+%% @doc Is this clock compact, i.e. no gaps/no dot-cloud entries
+-spec is_compact(clock()) -> boolean().
+is_compact({_, []}) ->
+    true;
+is_compact(_) ->
+    false.
+
 -ifdef(TEST).
 
-%% @TODO EQC of bigset_clock properties (at least
-%% descends/merge/dominates/equal)
+%% How big are clocks?
+clock_size_test() ->
+    Clock = fresh(),
+    BinClock = bigset:to_bin(Clock),
+    ?debugFmt("Fresh clock size is ~p bytes", [byte_size(BinClock)]),
+    Actors = [crypto:rand_bytes(24) || _ <- lists:seq(1, 10)],
+    Clock2 = increment_clock(Clock, Actors),
+    ?assert(is_compact(Clock2)),
+    ?debugFmt("10 actor clock with 24byte actors is ~p bytes", [byte_size(bigset:to_bin(Clock2))]),
+    Clock3 = increment_clock(Clock2, Actors, 10000),
+    ?assert(is_compact(Clock3)),
+    ?debugFmt("10 actor clock with 24byte actors and 10k events per actor is ~p bytes", [byte_size(bigset:to_bin(Clock3))]),
+    Clock4 = make_dotcloud_entries(Clock, lists:zip(Actors, lists:duplicate(length(Actors), {fencepost, [1000*1000]}))),
+    ?assertNot(is_compact(Clock4)),
+    ?debugFmt("10 actor clock with 24byte actors and fenceposted 1million dc is ~p bytes", [byte_size(term_to_binary(Clock4))]),
+    Clock5 = make_dotcloud_entries(Clock, lists:zip(Actors, lists:duplicate(length(Actors), {super_dense, [1000*1000]}))),
+    ?debugFmt("10 actor clock with 24byte actors and dense 1million dc is ~p bytes", [byte_size(term_to_binary(Clock5))]),
+    Clock6 = make_dotcloud_entries(Clock, lists:zip(Actors, lists:duplicate(length(Actors), {super_sparse, [1000*1000]}))),
+    ?debugFmt("10 actor clock with 24byte actors and sparse 1million-th event dc is ~p bytes", [byte_size(term_to_binary(Clock6))]),
+    %% just generate once, reusue per actor
+    RandDC = random(1000*1000, 1, 10),
+    Clock7 = make_dotcloud_entries(Clock, lists:zip(Actors, lists:duplicate(length(Actors), RandDC))),
+    ?debugFmt("10 actor clock with 24byte actors and  around 1million random events dc is ~p bytes", [byte_size(term_to_binary(Clock7))]).
+
+increment_clock(Clock, Actors) ->
+    increment_clock(Clock, Actors, 1).
+
+increment_clock(Clock, Actors, Times) ->
+    L = lists:seq(1, Times),
+    lists:foldl(fun(Actor, ClockAcc) ->
+                        increment_actor(Actor, ClockAcc, L)
+                end,
+                Clock,
+                Actors).
+
+make_dotcloud_entries(Clock, DCSpecs) ->
+    lists:foldl(fun({Actor, DCSpec}, ClockAcc) ->
+                        Events = spec_to_dotcloud(DCSpec),
+                        make_dotcloud_entry(ClockAcc, Actor, Events)
+                end,
+                Clock,
+                DCSpecs).
+
+make_dotcloud_entry({Base, Seen}, Actor, Events) ->
+    {Base, orddict:store(Actor, Events, Seen)}.
+
+increment_actor(Actor, Clock, Times) ->
+    lists:foldl(fun(_, ClockAcc) ->
+                        {_, C2} = increment(Actor, ClockAcc),
+                        C2
+                end,
+                Clock,
+                Times).
+
+spec_to_dotcloud({Fun, Args}) ->
+    erlang:apply(?MODULE, Fun, Args);
+spec_to_dotcloud(Events) when is_list(Events)  ->
+    Events.
+
+fencepost(Size) ->
+    fencepost(Size, 1).
+
+fencepost(Size, Base) ->
+    lists:seq(Base+2, Size*2, 2).
+
+super_dense(Size) ->
+    super_dense(Size, 1).
+
+super_dense(Size, Base) ->
+    lists:seq(Base+2, Size+2).
+
+super_sparse(MaxEvent) ->
+    super_sparse(MaxEvent, 1).
+
+super_sparse(MaxEvent, _Base) ->
+    [MaxEvent].
+
+random(Size) ->
+    random(Size, 1).
+
+random(Size, Base) ->
+    random(Size, Base, 3).
+
+random(Size, Base, Sparseness) ->
+    lists:usort([crypto:rand_uniform(Base+2, Size*Sparseness) || _ <- lists:seq(1, Size)]).
 
 descends_test() ->
     A = B = {[{a, 1}, {b, 1}, {c, 1}], []},
