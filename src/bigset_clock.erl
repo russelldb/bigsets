@@ -222,27 +222,6 @@ compress(Cnt, [Cntr | Rest]) when Cntr - Cnt == 1 ->
 compress(Cnt, Cnts) ->
     {Cnt, Cnts}.
 
-%% true if A descends B, false otherwise
--spec descends(clock(), clock()) -> boolean().
-descends({ClockA, _DotsA}=A, {ClockB, DotsB}) ->
-    riak_dt_vclock:descends(ClockA, ClockB)
-        andalso
-        (subtract_seen(A, orddict_to_proplist(DotsB)) == []).
-
-equal(A, B) ->
-    descends(A, B) andalso descends(B, A).
-
-dominates(A, B) ->
-    descends(A, B) andalso not descends(B, A).
-
-%% efficiency be damned!
-orddict_to_proplist(Dots) ->
-    orddict:fold(fun(K, V, Acc) ->
-                         Acc ++ [{K, C} || C <- V]
-                 end,
-                 [],
-                 Dots).
-
 %% @doc intersection is all the dots in A that are also in B. A is an
 %% orddict of {actor, [dot()]} as returned by `complement/2'
 -spec intersection(dotcloud(), clock()) -> clock().
