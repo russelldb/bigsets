@@ -9,7 +9,8 @@
 
 -export([new/1, set/2, to_list/1, get/2, member/2, set_all/2, unset/2, size/1, from_list/1, to_binary/1]).
 
--define(W, 64). %% why is the word size 27? Why not 24? or 128?
+%% what is the "right" word size?
+-define(W, 128).
 
 -type bit() :: 0 | 1.
 -type bit_array() :: array:array(bit()).
