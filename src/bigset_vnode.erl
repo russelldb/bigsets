@@ -15,25 +15,25 @@
 -endif.
 -include("bigset.hrl").
 
--export([start_vnode/1,
+-export([contains/2,
          coordinate/2,
-         replicate/2,
-         read/2,
-         repair/2,
-         contains/2,
-         init/1,
-         terminate/2,
-         handle_command/3,
-         is_empty/1,
          delete/1,
+         encode_handoff_item/2,
+         handle_command/3,
+         handle_coverage/4,
+         handle_exit/3,
          handle_handoff_command/3,
-         handoff_starting/2,
+         handle_handoff_data/2,
          handoff_cancelled/1,
          handoff_finished/2,
-         handle_handoff_data/2,
-         encode_handoff_item/2,
-         handle_coverage/4,
-         handle_exit/3]).
+         handoff_starting/2,
+         init/1,
+         is_empty/1,
+         read/2,
+         repair/2,
+         replicate/2,
+         start_vnode/1,
+         terminate/2]).
 
 -compile([export_all]).
 

@@ -7,6 +7,28 @@
 
 -module(bigset_clock).
 
+-behaviour(bigset_gen_clock).
+
+-export([add_dot/2,
+         add_dots/2,
+         all_nodes/1,
+         complement/2,
+         descends/2,
+         dominates/2,
+         equal/2,
+         fresh/0,
+         fresh/1,
+         get_dot/2,
+         increment/2,
+         intersection/2,
+         is_compact/1,
+         merge/1,
+         merge/2,
+         seen/2,
+         subtract_seen/2,
+         to_bin/1
+        ]).
+
 -compile(export_all).
 
 -export_type([clock/0, dot/0]).
@@ -16,6 +38,7 @@
 -endif.
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
+-export([make_dotcloud_entry/3]).
 -endif.
 
 %% lazy inefficient dot cloud of dict Actor->[count()]
@@ -25,6 +48,10 @@
 -type dotcloud() :: [{riak_dt_vclock:actor(), [pos_integer()]}].
 
 -define(DICT, orddict).
+
+-spec to_bin(clock()) -> binary().
+to_bin(Clock) ->
+    term_to_binary(Clock, [compressed]).
 
 -spec fresh() -> clock().
 fresh() ->
@@ -299,91 +326,17 @@ is_compact(_) ->
 
 -ifdef(TEST).
 
-%% How big are clocks?
-clock_size_test() ->
-    Clock = fresh(),
-    BinClock = bigset:to_bin(Clock),
-    ?debugFmt("Fresh clock size is ~p bytes", [byte_size(BinClock)]),
-    Actors = [crypto:rand_bytes(24) || _ <- lists:seq(1, 10)],
-    Clock2 = increment_clock(Clock, Actors),
-    ?assert(is_compact(Clock2)),
-    ?debugFmt("10 actor clock with 24byte actors is ~p bytes", [byte_size(bigset:to_bin(Clock2))]),
-    Clock3 = increment_clock(Clock2, Actors, 10000),
-    ?assert(is_compact(Clock3)),
-    ?debugFmt("10 actor clock with 24byte actors and 10k events per actor is ~p bytes", [byte_size(bigset:to_bin(Clock3))]),
-    Clock4 = make_dotcloud_entries(Clock, lists:zip(Actors, lists:duplicate(length(Actors), {fencepost, [1000*1000]}))),
-    ?assertNot(is_compact(Clock4)),
-    ?debugFmt("10 actor clock with 24byte actors and fenceposted 1million dc is ~p bytes", [byte_size(term_to_binary(Clock4))]),
-    Clock5 = make_dotcloud_entries(Clock, lists:zip(Actors, lists:duplicate(length(Actors), {super_dense, [1000*1000]}))),
-    ?debugFmt("10 actor clock with 24byte actors and dense 1million dc is ~p bytes", [byte_size(term_to_binary(Clock5))]),
-    Clock6 = make_dotcloud_entries(Clock, lists:zip(Actors, lists:duplicate(length(Actors), {super_sparse, [1000*1000]}))),
-    ?debugFmt("10 actor clock with 24byte actors and sparse 1million-th event dc is ~p bytes", [byte_size(term_to_binary(Clock6))]),
-    %% just generate once, reusue per actor
-    RandDC = random(1000*1000, 1, 10),
-    Clock7 = make_dotcloud_entries(Clock, lists:zip(Actors, lists:duplicate(length(Actors), RandDC))),
-    ?debugFmt("10 actor clock with 24byte actors and  around 1million random events dc is ~p bytes", [byte_size(term_to_binary(Clock7))]).
+%% API for comparing clock impls
 
-increment_clock(Clock, Actors) ->
-    increment_clock(Clock, Actors, 1).
-
-increment_clock(Clock, Actors, Times) ->
-    L = lists:seq(1, Times),
-    lists:foldl(fun(Actor, ClockAcc) ->
-                        increment_actor(Actor, ClockAcc, L)
-                end,
-                Clock,
-                Actors).
-
-make_dotcloud_entries(Clock, DCSpecs) ->
-    lists:foldl(fun({Actor, DCSpec}, ClockAcc) ->
-                        Events = spec_to_dotcloud(DCSpec),
-                        make_dotcloud_entry(ClockAcc, Actor, Events)
-                end,
-                Clock,
-                DCSpecs).
-
-make_dotcloud_entry({Base, Seen}, Actor, Events) ->
+%% @doc given a clock,actor and list of events, return a clock where
+%% the dotcloud for the actor contains the events
+-spec make_dotcloud_entry(clock(), actor(), [pos_integer()]) -> clock().
+make_dotcloud_entry({Base, Seen}=_Clock, Actor, Events) ->
     {Base, orddict:store(Actor, Events, Seen)}.
 
-increment_actor(Actor, Clock, Times) ->
-    lists:foldl(fun(_, ClockAcc) ->
-                        {_, C2} = increment(Actor, ClockAcc),
-                        C2
-                end,
-                Clock,
-                Times).
-
-spec_to_dotcloud({Fun, Args}) ->
-    erlang:apply(?MODULE, Fun, Args);
-spec_to_dotcloud(Events) when is_list(Events)  ->
-    Events.
-
-fencepost(Size) ->
-    fencepost(Size, 1).
-
-fencepost(Size, Base) ->
-    lists:seq(Base+2, Size*2, 2).
-
-super_dense(Size) ->
-    super_dense(Size, 1).
-
-super_dense(Size, Base) ->
-    lists:seq(Base+2, Size+2).
-
-super_sparse(MaxEvent) ->
-    super_sparse(MaxEvent, 1).
-
-super_sparse(MaxEvent, _Base) ->
-    [MaxEvent].
-
-random(Size) ->
-    random(Size, 1).
-
-random(Size, Base) ->
-    random(Size, Base, 3).
-
-random(Size, Base, Sparseness) ->
-    lists:usort([crypto:rand_uniform(Base+2, Size*Sparseness) || _ <- lists:seq(1, Size)]).
+%% How big are clocks?
+clock_size_test() ->
+    bigset_gen_clock:clock_size_test(?MODULE).
 
 descends_test() ->
     A = B = {[{a, 1}, {b, 1}, {c, 1}], []},
