@@ -18,6 +18,7 @@
          equal/2,
          fresh/0,
          fresh/1,
+         from_bin/1,
          get_dot/2,
          increment/2,
          intersection/2,
@@ -52,6 +53,10 @@
 -spec to_bin(clock()) -> binary().
 to_bin(Clock) ->
     term_to_binary(Clock, [compressed]).
+
+-spec from_bin(clock()) -> binary().
+from_bin(Bin) ->
+    binary_to_term(Bin).
 
 -spec fresh() -> clock().
 fresh() ->

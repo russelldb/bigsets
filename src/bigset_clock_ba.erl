@@ -18,6 +18,7 @@
          equal/2,
          fresh/0,
          fresh/1,
+         from_bin/1,
          get_dot/2,
          increment/2,
          intersection/2,
@@ -52,6 +53,10 @@
 -spec to_bin(clock()) -> binary().
 to_bin(Clock) ->
     term_to_binary(Clock, [compressed]).
+
+-spec from_bin(clock()) -> binary().
+from_bin(Bin) ->
+    binary_to_term(Bin).
 
 -spec fresh() -> clock().
 fresh() ->
@@ -118,7 +123,7 @@ add_dot_to_cloud({Actor, Cnt}, Cloud) ->
                  fun(Dots) ->
                          bigset_bitarray:set(Cnt, Dots)
                  end,
-                 [Cnt],
+                 bigset_bitarray:set(Cnt, bigset_bitarray:new(1000)),
                  Cloud).
 
 %% @doc given a list of `dot()' and a `Clock::clock()',
@@ -189,7 +194,7 @@ subtract_dot(Clock, Dot) ->
                                 [] ->
                                     DotCloud;
                                 _ ->
-                                    orddict:store(Actor, bigset_bitaray:set_all(NewDots, DotList), DotCloud)
+                                    orddict:store(Actor, bigset_bitarray:set_all(NewDots, DotList), DotCloud)
                             end,
                     {NewVV, NewDC};
                 _ ->
@@ -242,7 +247,7 @@ compress_seen(Clock, Seen) ->
                Seen).
 
 compress(Base, BitArray) ->
-    case bigset_bitarray:get(Base+1, BitArray) of
+    case bigset_bitarray:member(Base+1, BitArray) of
         true ->
             compress(Base+1, bigset_bitarray:unset(Base+1, BitArray));
         false ->

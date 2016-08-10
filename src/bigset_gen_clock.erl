@@ -12,7 +12,7 @@
 -endif.
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
--export([clock_size_test/1]).
+-export([clock_size_test/1, clock_speed_test/3, clock_speed_test/1]).
 -export([fencepost/1, super_dense/1, super_sparse/1, random/1]).
 -endif.
 
@@ -24,6 +24,10 @@
 %% @doc serialise the clock for storage/wire/etc
 -callback to_bin(clock()) ->
     binary().
+
+%% @doc de-serialise the clock from binary format
+-callback from_bin(clock()) ->
+    clock().
 
 %% @doc a new clock
 -callback fresh() -> clock().
@@ -114,6 +118,100 @@
 -ifdef(TEST).
 
 -callback make_dotcloud_entry(clock(), actor(), [pos_integer()]) -> clock().
+
+clock_speed_test(Mod) ->
+    clock_speed_test(Mod, random, 100*1000).
+
+%% How slow are clocks?
+clock_speed_test(Mod, DotGen, Size) ->
+    %% What do we do with clocks more than anything? Read,
+    %% deserialize, update, serialise, write.
+    Clock = Mod:fresh(),
+    Actors = [crypto:rand_bytes(24) || _ <- lists:seq(1, 10)],
+    Events = erlang:apply(?MODULE, DotGen, [Size]),
+    Mil = lists:seq(1, 1000),
+    {Times, Clock2} = lists:foldl(fun(_, {TAcc, CAcc}) ->
+                                          Actor = random_actor(Actors),
+                                          {T, {_, CAcc2}} = timer:tc( Mod, increment, [Actor, CAcc]),
+                                          {[T | TAcc], CAcc2}
+                                  end,
+                                  {[], Clock},
+                                  Mil),
+
+    timer_report("increment", Times),
+
+    {T2, BinClock} = lists:foldl(fun(_, {TAcc, _}) ->
+                                         {T, Bin} = timer:tc(Mod, to_bin, [Clock2]),
+                                         {[T | TAcc], Bin}
+                                 end,
+                                 {[], <<>>},
+                                 Mil),
+
+    timer_report("compact to bin", T2),
+
+    {T3, Clock2} = lists:foldl(fun(_, {TAcc, C}) ->
+                                         {T, C} = timer:tc(Mod, from_bin, [BinClock]),
+                                         {[T | TAcc], C}
+                                 end,
+                                 {[], Clock2},
+                                 Mil),
+
+    timer_report("compact from bin", T3),
+
+
+    {T4, Clock3} = lists:foldl(fun(E, {TAcc, CAcc}) ->
+                                       Actor = random_actor(Actors),
+                                       {T, CAcc2} = timer:tc(Mod, add_dot, [{Actor, E}, CAcc]),
+                                       {[T | TAcc], CAcc2}
+                               end,
+                               {[], Clock2},
+                               Events),
+    timer_report("add_dot", T4),
+
+    %% After that we see if some event is seen
+    T5 = lists:foldl(fun(E, TAcc) ->
+                             Actor = random_actor(Actors),
+                             {T, _} = timer:tc(Mod, seen, [{Actor, E}, Clock3]),
+                             [T | TAcc]
+                     end,
+                     [],
+                     Events),
+    timer_report("seen", T5),
+
+    %% let's time to/from bin with all those dots!
+    {T6, T7} = lists:foldl(fun(_, {ToAcc, FromAcc}) ->
+                             {To, Bin} = timer:tc(Mod, to_bin, [Clock3]),
+                             {From, Clock3} = timer:tc(Mod, from_bin, [Bin]),
+                             {[To | ToAcc], [From | FromAcc]}
+                                 end,
+                                 {[], []},
+                                 lists:seq(1, 100)),
+
+    timer_report("random dots to_bin", T6),
+    timer_report("random dots from_bin", T7),
+
+    %% Also, we merge (union)
+
+    %% Rarely we do subtract and intersect
+
+    ok.
+
+random_actor(L) ->
+    N = crypto:rand_uniform(1, length(L)+1),
+    lists:nth(N, L).
+
+timer_report(Title, Times) ->
+    Length = length(Times),
+    Min = lists:min(Times),
+    Max = lists:max(Times),
+    Med = lists:nth(round((Length / 2)), lists:sort(Times)),
+    Avg = round(lists:foldl(fun(X, Sum) -> X + Sum end, 0, Times) / Length),
+    io:format("~p~n", [Title]),
+    io:format("Range: ~b - ~b mics~n"
+          "Median: ~b mics~n"
+          "Average: ~b mics~n",
+          [Min, Max, Med, Avg]),
+    Med.
 
 %% How big are clocks?
 clock_size_test(Mod) ->

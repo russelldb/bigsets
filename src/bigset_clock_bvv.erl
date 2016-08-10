@@ -26,7 +26,8 @@
          merge/2,
          seen/2,
          subtract_seen/2,
-         to_bin/1
+         to_bin/1,
+         from_bin/1
         ]).
 
 
@@ -107,6 +108,9 @@ subtract_seen(_, _) ->
 
 to_bin(Clock) ->
     term_to_binary(Clock, [compressed]).
+
+from_bin(Bin) ->
+    binary_to_term(Bin).
 
 -ifdef(TEST).
 
