@@ -107,26 +107,22 @@ stream_receive_loop(ReqId, Pid, Monitor, {Cnt, Ctx}) ->
     receive
         {ReqId, done} ->
             erlang:demonitor(Monitor, [flush]),
-            lager:debug("done!.~n"),
             {ok, Ctx, Cnt};
         {ReqId, {error, Error}} ->
             erlang:demonitor(Monitor, [flush]),
-            lager:debug("error ~p~n", [Error]),
             {error, Error};
         {ReqId, {ok, {ctx, Res}}} ->
-            lager:debug("XX CTX XX:::~n ~p~n", [Res]),
             stream_receive_loop(ReqId, Pid, Monitor, {Cnt, Res});
         {ReqId, {ok, {elems, Res}}} ->
-            lager:debug("XX RESULT XX:::~n ~p~n", [length(Res)]),
-            stream_receive_loop(ReqId, Pid, Monitor, {Cnt+length(Res), Ctx})
+            stream_receive_loop(ReqId, Pid, Monitor, {Cnt+length(Res), Ctx});
+        Other -> lager:info("huh ~p", [Other])
      %%% @TODO(rdb|wut?) why does this message get fired first for remote node?
         %% {'DOWN', Monitor, process, Pid, Info} ->
         %%     lager:debug("Got DOWN message ~p~n", [Info]),
         %%     {error, down, Info}
     after 10000 ->
             erlang:demonitor(Monitor, [flush]),
-            lager:debug("Error, timeout~n"),
-            {error, timeout}
+            {error, stream, timeout}
     end.
 
 bm_read(Set, N) ->
