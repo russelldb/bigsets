@@ -28,8 +28,6 @@
           partition :: pos_integer(),
           actor :: binary(),
           set :: binary(),
-          key_prefix :: binary(),
-          prefix_len :: pos_integer(),
           sender :: riak_core:sender(),
           buffer_size :: pos_integer(),
           size=0 :: pos_integer(),
@@ -47,11 +45,8 @@ send(Message, Acc) ->
 
 new(Set, Sender, BufferSize, Partition, Actor) ->
     Monitor = riak_core_vnode:monitor(Sender),
-    Prefix = bigset:key_prefix(Set),
     #fold_acc{
        set=Set,
-       key_prefix=Prefix,
-       prefix_len= byte_size(Prefix),
        sender=Sender,
        monitor=Monitor,
        buffer_size=BufferSize-1,
@@ -65,8 +60,8 @@ fold({Key, Value}, Acc=#fold_acc{not_found=true}) ->
     #fold_acc{set=Set, actor=Actor} = Acc,
     %% @TODO(rdb|robustness) what if the clock key is missing and
     %% first_key finds something else from *this* Set?
-    case bigset:decode_key(Key) of
-        {clock, Set, Actor} ->
+    case bigset_keys:is_actor_clock_key(Set, Actor, Key) of
+        true ->
             %% Set clock
             Clock = bigset:from_bin(Value),
             Acc#fold_acc{not_found=false, clock=Clock};
@@ -74,10 +69,56 @@ fold({Key, Value}, Acc=#fold_acc{not_found=true}) ->
             throw({break, Acc})
     end;
 fold({Key, Val}, Acc=#fold_acc{not_found=false}) ->
-    %% an element key
-    #fold_acc{elements=E, size=S} = Acc,
-    maybe_flush(Acc#fold_acc{elements=[{Key, binary_to_term(Val)} | E],
-                             size=S+1}).
+    %% an element key? We've seen the clock (not_found=false)
+    #fold_acc{set=Set, actor=Me} = Acc,
+    case bigset_keys:decode_key(Key) of
+        {tombstone, Set, Me} ->
+            %% My set tombstone, I need this!
+            Acc#fold_acc{set_tombstone=bigset:from_bin(Val)};
+        {element, Set, Element, Actor, Cnt} ->
+            #fold_acc{set_tombstone=SetTombstone} = Acc,
+            case bigset_clock:seen(SetTombstone, {Acc, Cnt}) of
+                false ->
+                    add(Element, Actor, Cnt, Acc);
+                true ->
+                    %% a handing off vnode deleted this key, so it is
+                    %% as though we don't have it, just skip it, it
+                    %% will be compacted out next round
+                    Acc
+            end;
+        {_, Set, _} ->
+            %% other actor clock/tombstone key
+            Acc;
+        {end_key, _Set} ->
+            %% The end key
+            throw({break, Acc})
+    end.
+
+%% @TODO(rdb|refactor) abstract the accumulation logic for different
+%% behaviours (CC vs EC)
+add(Element, Actor, Cnt, Acc=#fold_acc{current_elem=Element}) ->
+    %% Same element, keep accumulating info
+    #fold_acc{current_dots=Dots} = Acc,
+    %% @TODO(rdb) consider binary <<Cnt, Actor>> as it needs no encoding
+    Acc#fold_acc{current_dots=[{Actor, Cnt} | Dots]};
+add(Element, Actor, Cnt, Acc=#fold_acc{current_elem=_}) ->
+    %% New element, maybe store the old one
+    Acc2 = store_element(Acc),
+    Acc3 = maybe_flush(Acc2),
+    Acc3#fold_acc{current_elem=Element,
+                  current_dots=[{Actor, Cnt}]}.
+
+%% @private add an element to the accumulator.
+store_element(Acc=#fold_acc{current_elem=undefined}) ->
+    Acc;
+store_element(Acc) ->
+    #fold_acc{current_elem=Elem,
+              current_dots=Dots,
+              elements=Elements,
+              size=Size} = Acc,
+
+    Acc#fold_acc{elements=[{Elem, Dots} | Elements],
+                 size=Size+1}.
 
 %% @private if the buffer is full, flush!
 maybe_flush(Acc=#fold_acc{size=Size, buffer_size=Size}) ->

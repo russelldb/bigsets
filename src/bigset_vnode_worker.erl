@@ -55,13 +55,11 @@ handle_work({get, Id, DB, Set}, Sender, State) ->
     #state{partition=Partition, batch_size=BatchSize} = State,
     %% clock is first key, this actors clock key is the first key we
     %% care about. Read all the way to last element
-    FirstKey = bigset:clock_key(Set, Id),
-    EndKey = bigset:end_key(Set),
+    FirstKey = bigset_keys:clock_key(Set, Id),
+    EndKey = bigset_keys:end_key(Set),
     Buffer = bigset_fold_acc:new(Set, Sender, BatchSize, Partition, Id),
     FoldOpts = [{start_key, FirstKey},
                 {end_key, EndKey},
-                %%{end_inclusive, true}, % set this to process the bigset's end key
-                {bigsets, true},
                 {vnode, Id} | ?RFOLD_OPTS],
 
     try

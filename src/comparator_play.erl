@@ -19,6 +19,8 @@
 
 start(default) ->
     start(?DEF_DATA_DIR, false);
+start(default2) ->
+    start(?BS_DATA_DIR, false);
 start(bigsets) ->
     start(?BS_DATA_DIR, true).
 
@@ -40,18 +42,29 @@ dump_db(Ref) ->
 dump_raw_fun() ->
     fun ?MODULE:dump_raw_fun/2.
 
-dump_raw_fun({K, V}, Acc) ->
-    io:format("Key: ~p~n-Val: ~p~n", [K, V]),
+dump_raw_fun({_K, V}, Acc) ->
+%%    io:format("Key: ~p~n-Val: ~p~n", [K, V]),
+    io:format("~p~n", [V]),
     Acc.
 
 stop(Ref) ->
     eleveldb:close(Ref).
 
 test() ->
-    BSRef = start(bigsets),
+    BSRef = start(default2),
     RegRef = start(default),
-    [store(Key, Val, Ref) || {Key, Val} <- key_vals(),
-                             Ref <- [BSRef, RegRef]],
+    io:format("storing keys~n", []),
+    [store(Key, Val, Ref) || {Key, Val} <- key_vals(bigset_keys),
+                             Ref <- [
+                                     %%BSRef,
+                                     RegRef
+                                    ]],
+
+    [store(Key, Val, Ref) || {Key, Val} <- key_vals(bigset),
+                             Ref <- [
+                                     BSRef
+                                    ]],
+
 
     io:format("dumping Def~n"),
     dump_db(RegRef),
@@ -59,12 +72,18 @@ test() ->
     io:format("dumping BS~n"),
     dump_db(BSRef),
 
-    [stop(Ref) || Ref <- [BSRef, RegRef]],
+    [stop(Ref) || Ref <- [
+                          BSRef,
+                          RegRef]],
+    [eleveldb:destroy(DataDir, []) || DataDir <- [?BS_DATA_DIR,
+                                                  ?DEF_DATA_DIR]].
+
+destroy() ->
     [eleveldb:destroy(DataDir, []) || DataDir <- [?BS_DATA_DIR,
                                                   ?DEF_DATA_DIR]].
 
 
-key_vals() ->
+key_vals(KeyMod) ->
     S1 = <<"set1">>,
     S2 = <<"z2">>,
     A1 = <<"actor1">>,
@@ -74,25 +93,20 @@ key_vals() ->
     E2 = <<"znt2">>,
     E0 = <<"0000__kjlkjkjj lngelement3">>,
 
-    [{bigset:clock_key(S1, A2), <<"clock key s1 a2">>},
-     {bigset:insert_member_key(S1, E1, A1, 5), <<" S1, E1, A1, 5 Add">>},
-     {bigset:insert_member_key(S1, E1, A1, 1), <<" S1, E1, A1, 1 Add">>},
-     {bigset:clock_key(S2, A2), <<"clock key s2 a2">>},
-     {bigset:end_key(S2), <<"end key s2">>},
-     {bigset:clock_key(S1, A1), <<"clock key s1 a1">>},
-     {bigset:end_key(S1), <<"end key s1">>},
-     {bigset:insert_member_key(S1, E2, A0, 13), <<" S1, E2, A0, 13 Add">>},
-     {bigset:remove_member_key(S1, E0, A2, 9), <<" S1, E0, A2, 9 rem">>},
-     {bigset:clock_key(S2, A0), <<"clock key s2 a0">>},
-     {bigset:insert_member_key(S1, E2, A1, 1), <<" S1, E2, A1, 1 Add">>},
-     {bigset:insert_member_key(S2, E2, A1, 1), <<" S2, E2, A1, 1 Add">>},
-     {bigset:insert_member_key(S1, E1, A0, 22), <<" S1, E1, A0, 22 Add">>},
-     {bigset:insert_member_key(S1, E0, A2, 9), <<" S1, E0, A2, 9 Add">>},
-     {bigset:insert_member_key(S2, E0, A2, 9), <<" S2, E0, A2, 9 Add">>},
-     {bigset:remove_member_key(S1, E0, A2, 8), <<" S1, E0, A2, 8 Rem">>},
-     {bigset:set_tombstone_key(S2, A1), <<"set tombstone key set 2 actor 1">>},
-     {bigset:set_tombstone_key(S1, A0), <<"set tombstone key set 1 actor 0">>},
-     {bigset:set_tombstone_key(S1, A2), <<"set tombstone key set 1 actor 2">>},
-     {bigset:clock_key(S1, A0), <<"clock key set1 actor 0">>}
+    [{KeyMod:clock_key(S1, A2), <<"clock key s1 a2">>},
+     {KeyMod:insert_member_key(S1, E1, A1, 5), <<" S1, E1, A1, 5">>},
+     {KeyMod:insert_member_key(S1, E1, A1, 1), <<" S1, E1, A1, 1">>},
+     {KeyMod:clock_key(S2, A2), <<"clock key s2 a2">>},
+     {KeyMod:end_key(S2), <<"end key s2">>},
+     {KeyMod:clock_key(S1, A1), <<"clock key s1 a1">>},
+     {KeyMod:end_key(S1), <<"end key s1">>},
+     {KeyMod:insert_member_key(S1, E2, A0, 13), <<" S1, E2, A0, 13">>},
+     {KeyMod:clock_key(S2, A0), <<"clock key s2 a0">>},
+     {KeyMod:insert_member_key(S1, E2, A1, 1), <<" S1, E2, A1, 1">>},
+     {KeyMod:insert_member_key(S2, E2, A1, 1), <<" S2, E2, A1, 1">>},
+     {KeyMod:insert_member_key(S1, E1, A0, 22), <<" S1, E1, A0, 22">>},
+     {KeyMod:insert_member_key(S1, E0, A2, 9), <<" S1, E0, A2, 9">>},
+     {KeyMod:insert_member_key(S2, E0, A2, 9), <<" S2, E0, A2, 9">>},
+     {KeyMod:clock_key(S1, A0), <<"clock key set1 actor 0">>}
     ].
 

@@ -6,9 +6,6 @@
 
 -ignore_xref([preflist/1, preflist_ann/1, dev_client/0]).
 
--type binary_key() :: binary().
--type key_tuple() :: clock_key() | end_key() | element_key().
-
 preflist(Set) ->
     Hash = riak_core_util:chash_key({bigset, Set}),
     riak_core_apl:get_apl(Hash, 3, bigset).
@@ -135,124 +132,6 @@ bm_read(Set, N) ->
      {avg, lists:sum(Times) div length(Times)}].
 
 
-%%% keys funs %%%%
-
-
-%% Key prefix is the common prefix of a key for the given set
--spec key_prefix(Set :: binary()) -> Prefix :: binary().
-key_prefix(Set) when is_binary(Set) ->
-    SetLen = byte_size(Set),
-    <<SetLen:32/little-unsigned-integer,
-      Set:SetLen/binary>>.
-
-%%% codec See docs on key scheme, use Actor name in clock key so
-%% AAE/replication of clocks is safe. Like a decomposed VV, an actor
-%% may only update it's own clock.
-clock_key(Set, Actor) ->
-    Pref = key_prefix(Set),
-    <<Pref/binary,
-      $c, %% means clock
-      Actor/binary>>.
-
-%%% codec See docs on key scheme, use Actor name in tombstone key
-%%% so AAE/replication of filter is safe. Like a decomposed VV, an
-%%% actor may only update it's own tombstone
-tombstone_key(Set, Actor) ->
-    Pref = key_prefix(Set),
-    <<Pref/binary,
-      $d, %% means set tombstone (d 'cos > than c and < e)
-      Actor/binary>>.
-
-end_key(Set) ->
-    %% an explicit end key that always sorts lowest
-    %% written _every write_??
-    Pref = key_prefix(Set),
-    <<Pref/binary,
-      $z %% means end key
-    >>.
-
-%% @doc is this key a clock key?
--spec is_clock_key(tuple()) -> boolean().
-is_clock_key({clock, _, _}) ->
-    true;
-is_clock_key(_) ->
-    false.
-
-%% @doc get the set name from either an encoded or decoded key
--spec get_set(binary() | tuple()) -> binary().
-get_set(<<SetLen:32/little-unsigned-integer, Rest/binary>>) ->
-    <<Set:SetLen/binary, _/binary>> = Rest,
-    Set;
-get_set(DecodedKey) when is_tuple(DecodedKey) ->
-    element(2, DecodedKey).
-
-%% @doc get the set from the key and return the rest of the key as a
-%% sub binary
--spec decode_set(binary()) -> {binary(), binary()}.
-decode_set(<<SetLen:32/little-unsigned-integer, Rest/binary>>) ->
-    <<Set:SetLen/binary, Key/binary>> = Rest,
-    {Set, Key}.
-
-%% @doc
--spec decode_key(Key :: binary()) -> {clock, set(), actor()} |
-                                     {element, set(), member(), actor(), counter()} |
-                                     {end_key, set()}.
-decode_key(<<SetLen:32/little-unsigned-integer, Bin/binary>>) ->
-    <<Set:SetLen/binary, Rest/binary>> = Bin,
-    decode_key(Rest, Set).
-
-decode_key(<<$c, Actor/binary>>, Set) ->
-    {clock, Set, Actor};
-decode_key(<<$d, Actor/binary>>, Set) ->
-    {set_tombstone, Set, Actor};
-decode_key(<<$e, Elem/binary>>, Set) ->
-    decode_element(Elem, Set);
-decode_key(<<$z>>, Set) ->
-    {end_key, Set}.
-
-decode_element(<<ElemLen:32/little-unsigned-integer, Rest/binary>>, Set) ->
-    <<Elem:ElemLen/binary,
-              ActorLen:32/little-unsigned-integer,
-              ActorEtc/binary>> = Rest,
-            <<Actor:ActorLen/binary,
-              Cnt:64/little-unsigned-integer>> = ActorEtc,
-    {element, Set, Elem, Actor, Cnt}.
-
-%% @doc the opposite of decode_key/1, will return a binary key for the
-%% decoded key tuples.
--spec encode_key(key_tuple()) -> binary_key().
-encode_key({clock, Set, Actor}) ->
-    clock_key(Set, Actor);
-encode_key({end_key, Set}) ->
-    end_key(Set);
-encode_key({element, Set, Element, Actor, Cnt}) ->
-    insert_member_key(Set, Element, Actor, Cnt).
-
-%% @doc dot_from_key extract a dot from key `K'. Returns a
-%% bisget_clock:dot().
--spec dot_from_key(Key :: binary()) -> bigset_clock:dot().
-dot_from_key(K) ->
-    {element, _S, _E, Actor, Cnt} = decode_key(K),
-    {Actor, Cnt}.
-
-%% @private encodes the element key so it is in order, on disk, with
-%% the other elements. Use the actor ID and counter (dot) too. This
-%% means at some extra storage, but makes for no reads before writes
-%% on replication/delta merge.
--spec insert_member_key(set(), member(), actor(), counter()) -> key().
-insert_member_key(Set, Elem, Actor, Cnt) ->
-    Pref = key_prefix(Set),
-    ActorLen = byte_size(Actor),
-    ElemLen = byte_size(Elem),
-    <<Pref/binary,
-      $e, %% means an element
-      ElemLen:32/little-unsigned-integer,
-      Elem:ElemLen/binary,
-      ActorLen:32/little-unsigned-integer,
-      Actor:ActorLen/binary,
-      Cnt:64/little-unsigned-integer
-    >>.
-
 %%% clock funs %%%
 
 %% @doc get the tombstone at `TombstoneKey' from leveldb instance
@@ -266,7 +145,7 @@ get_tombstone(TombstoneKey, DB) ->
 %% `DB'. Returns a `bigset_clock:clock()'
 -spec get_tombstone(set(), actor(), db()) -> bigset_clock:clock().
 get_tombstone(Set, Id, DB) ->
-    TombstoneKey = tombstone_key(Set, Id),
+    TombstoneKey = bigset_keys:tombstone_key(Set, Id),
     get_tombstone(TombstoneKey, DB).
 
 -spec get_clock(ClockKey::binary(), db()) -> {boolean(), bigset_clock:clock()}.
@@ -275,7 +154,7 @@ get_clock(ClockKey, DB) when is_binary(ClockKey)  ->
 
 -spec get_clock(set(), actor(), db()) -> {boolean(), bigset_clock:clock()}.
 get_clock(Set, Id, DB) ->
-    ClockKey = clock_key(Set, Id),
+    ClockKey = bigset_keys:clock_key(Set, Id),
     get_clock(ClockKey, DB).
 
 -spec clock(not_found | {ok, binary()}) -> {boolean(), bigset_clock:clock()}.
