@@ -377,7 +377,7 @@ elements_to_digest(Elems) ->
                  [],
                  Elems).
 
-%% Custom shrinking
+%% Custom shrinking by John Hughes of quviq
 testcase() ->
       ?LET(DotToElement, function1(gen_element()),
            ?LET(Events, bigset_clock:gen_all_system_events(),
