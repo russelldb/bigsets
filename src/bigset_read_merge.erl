@@ -481,7 +481,6 @@ gen_sets() ->
               ?LET(SystemRemoves, gen_removes(Events),
                    ?LET(LocalRemoves, gen_local_removes(SystemRemoves, Clocks),
                         ?LET(DotToElement, function1(gen_element()),
-%%                             ?LET(Elements, gen_elements({Events, []}, SystemRemoves, DotToElement),
                                   gen_sets2(Clocks, LocalRemoves, DotToElement)))))).
 
 
