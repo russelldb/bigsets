@@ -215,6 +215,24 @@ case "$1" in
         $NODETOOL rpc bigset_console ringready $@
         ;;
 
+     transfers)
+        if [ $# -ne 1 ]; then
+            echo "Usage: $SCRIPT transfers"
+            exit 1
+        fi
+        shift
+
+        # Make sure the local node IS running
+        RES=`$NODETOOL ping`
+        if [ "$RES" != "pong" ]; then
+            echo "Node is not running!"
+            exit 1
+        fi
+        shift
+
+        $NODETOOL rpc riak_core_console transfers "$@"
+        ;;
+
     member[_-]status)
         if [ $# -ne 1 ]; then
             echo "Usage: $SCRIPT $1"
@@ -287,7 +305,7 @@ case "$1" in
         cluster_admin "$@"
         ;;
     *)
-        echo "Usage: $SCRIPT { cluster | down | ringready | member-status | "
+        echo "Usage: $SCRIPT { cluster | down | transfers | ringready | member-status | "
         echo "                    ring-status | services | wait-for-service "
         exit 1
         ;;
