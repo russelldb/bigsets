@@ -55,7 +55,7 @@
 
 -include("bigset.hrl").
 
--export([
+-export([add_comparator_opt/1,
          clock_key/2,
          decode_key/1,
          decode_set/1,
@@ -82,6 +82,9 @@
 -endif.
 
 -define(NULL, $\0).
+
+add_comparator_opt(Opts) ->
+    Opts.
 
 %% @private common preamble for any set key. Magic byte and version
 %% header for `Set'

@@ -9,7 +9,8 @@
 
 -include("bigset.hrl").
 
--export([clock_key/2,
+-export([add_comparator_opt/1,
+         clock_key/2,
          tombstone_key/2,
          end_key/1,
          insert_member_key/4,
@@ -20,6 +21,8 @@
 
 -export([keys_mod/0]).
 
+-callback add_comparator_opt(proplists:proplist()) ->
+     proplists:proplist().
 -callback clock_key(set(), actor()) -> key().
 -callback tombstone_key(set(), actor()) -> key().
 -callback end_key(set()) -> key().
@@ -34,6 +37,9 @@
     {element, set(), element(), actor(), pos_integer()}.
 -callback decode_set(key()) ->
     set().
+
+add_comparator_opt(Opts) ->
+    ?BS_KEYS:add_comparator_opt(Opts).
 
 clock_key(Set, Actor) ->
     ?BS_KEYS:clock_key(Set, Actor).

@@ -107,10 +107,14 @@ repair(PrefList, Req=?REPAIR_REQ{}) ->
 init([Partition]) ->
     VnodeId = vnode_id(Partition),
     DataDir = integer_to_list(Partition),
-    Opts =  [{create_if_missing, true},
+
+    Opts0 =  [{create_if_missing, true},
              {write_buffer_size, 1024*1024},
              {max_open_files, 20},
              {vnode, VnodeId}],
+
+    Opts = bigset_keys:add_comparator_opt(Opts0),
+
     {ok, DB} = open_db(DataDir, Opts),
     %% @TODO(rdb|question) Maybe this pool should be BIIIIG for many gets
     PoolSize = app_helper:get_env(bigset, worker_pool_size, ?DEFAULT_WORKER_POOL),
@@ -658,8 +662,7 @@ handle_replication(Op, State) ->
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 handle_read_repair(Req, State) ->
     ?REPAIR_REQ{set=Set, repairs=Repairs} = Req,
-    #state{db=DB, vnodeid=Id, partition=Partition} = State,
-    lager:info("Read repair triggered ~p", [Partition]),
+    #state{db=DB, vnodeid=Id} = State,
 
     %% Read local clock
     ClockKey = bigset_keys:clock_key(Set, Id),

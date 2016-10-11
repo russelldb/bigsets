@@ -4,7 +4,9 @@
 
 -include("bigset.hrl").
 
--export([clock_key/2,
+-export([
+         add_comparator_opt/1,
+         clock_key/2,
          tombstone_key/2,
          end_key/1,
          insert_member_key/4,
@@ -12,6 +14,9 @@
          decode_key/1,
          decode_set/1
         ]).
+
+add_comparator_opt(Opts) ->
+    [{bigsets, true} | Opts].
 
 %% Key prefix is the common prefix of a key for the given set
 -spec key_prefix(Set :: binary()) -> Prefix :: binary().
