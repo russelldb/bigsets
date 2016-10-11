@@ -616,7 +616,7 @@ handle_coord_write(Op, State) ->
     %% Store elements in the set.
     #state{db=DB, partition=Partition, vnodeid=Id} = State,
     ClockKey = bigset_keys:clock_key(Set, Id),
-    {FirstWrite, Clock} = bigset_keys:get_clock(ClockKey, DB),
+    {FirstWrite, Clock} = bigset:get_clock(ClockKey, DB),
 
     CtxDecoder = ctx_decoder(Ctx),
 

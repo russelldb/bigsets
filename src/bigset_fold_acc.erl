@@ -77,13 +77,13 @@ fold({Key, Val}, Acc=#fold_acc{not_found=false}) ->
             Acc#fold_acc{set_tombstone=bigset:from_bin(Val)};
         {element, Set, Element, Actor, Cnt} ->
             #fold_acc{set_tombstone=SetTombstone} = Acc,
-            case bigset_clock:seen(SetTombstone, {Acc, Cnt}) of
+            case bigset_clock:seen({Actor, Cnt}, SetTombstone) of
                 false ->
                     add(Element, Actor, Cnt, Acc);
                 true ->
                     %% a handing off vnode deleted this key, so it is
                     %% as though we don't have it, just skip it, it
-                    %% will be compacted out next round
+                    %% will be compacted out one day, maybe
                     Acc
             end;
         {_, Set, _} ->

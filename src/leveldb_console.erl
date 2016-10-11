@@ -21,7 +21,7 @@ dump_sets(Set) ->
     [{Idx, dump_set(Set, Id, Ref)} || {Idx, Id, Ref} <- get_vnode_refs(Set)].
 
 dump_set(Set, Id, Ref) ->
-    FirstKey = bigset:clock_key(Set, Id),
+    FirstKey = bigset_keys:clock_key(Set, Id),
     FoldOpts = [{first_key, FirstKey} | ?FOLD_OPTS],
     FoldFun = fun dump_fun/2,
     Res =  try
@@ -33,11 +33,11 @@ dump_set(Set, Id, Ref) ->
 
 dump_fun({Key, Val}, []) ->
     %% First call, clock key
-    {clock, Set, _Actor} = bigset:decode_key(Key),
+    {clock, Set, _Actor} = bigset_keys:decode_key(Key),
     Clock = bigset:from_bin(Val),
     [{Set, clock, Clock}];
 dump_fun({Key, _Val}, Acc) ->
-    case bigset:decode_key(Key) of
+    case bigset_keys:decode_key(Key) of
         {clock, _, _} ->
             %% Done, break
             throw({break, Acc});

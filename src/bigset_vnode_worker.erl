@@ -158,7 +158,7 @@ fold_iterator(Iter) ->
 maybe_seek(_Set, [], Iter) ->
     {Iter, done};
 maybe_seek(Set, Members, Iter) ->
-    Key = bigset:insert_member_key(Set, hd(Members), <<>>, 0),
+    Key = bigset_keys:insert_member_key(Set, hd(Members), <<>>, 0),
     move_iterator(Iter, Key).
 
 %% @priv performs the `Action' on `Iter'. Common code for handling the
@@ -171,7 +171,7 @@ move_iterator(Iter, Action) ->
             {Iter, done};
         {ok, Key} ->
             try
-                {Iter, bigset:decode_key(Key)}
+                {Iter, ?BS_KEYS:decode_key(Key)}
             catch C:E ->
                     lager:info("asked to decode ~p", [Key]),
                     throw({C, E})
