@@ -172,8 +172,8 @@ code_change(_OldVsn, StateName, State, _Extra) ->
 -spec merge_results([message()]) -> {repairs() ,
                                      Result :: not_found | {set, [{member(), dot_list()}]}}.
 merge_results(Results) ->
-    lists:foldl(fun({_P1, not_found}=_Result, {_P2, not_found}=_Acc) ->
-                        {[], not_found};
+    lists:foldl(fun({P1, not_found}=_Result, {P2, not_found}=_Acc) ->
+                        {[], {[P1, P2], not_found}};
                    ({P1, not_found}=_Result, {_P2, {set, _Clock, Elements, done}}=Acc) ->
                         {[{P1, Elements}], Acc};
                    ({_P1, {set, _Clock, Elements, done}}=Res, {P2, not_found}=_Acc) ->
