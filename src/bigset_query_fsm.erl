@@ -113,7 +113,6 @@ await_set({Result, Partition, _From}, State) ->
     case length(Results) of
         2 ->
             {Repairs, {_Id, Reply}} = merge_results(Results),
-            lager:info("repairs are ~p", [Repairs]),
             {next_state, reply, State#state{repair=Repairs, reply=Reply, results=Results}, 0};
         _ ->
             {next_state, await_set, State#state{results=Results}}
@@ -128,14 +127,12 @@ reply(_, State=#state{reply=not_found}) ->
 reply(_, State=#state{reply={set, _Clock, Elements, done}}) ->
     #state{from=From, req_id=ReqId} = State,
     From ! {ReqId, Elements},
-    lager:info("should be repair", []),
     {next_state, repair, State, 0}.
 
 -spec repair(timeout, #state{}) -> {stop, normal, #state{}}.
 repair(timeout, State) ->
     %% send each repair to the relevant node
     #state{repair=Repairs, preflist=PL, set=Set} = State,
-    lager:info("sending ~p", [Repairs]),
     [read_repair(Set, Repair, PL) || Repair <- Repairs],
     {stop, normal, State}.
 
@@ -175,8 +172,8 @@ code_change(_OldVsn, StateName, State, _Extra) ->
 -spec merge_results([message()]) -> {repairs() ,
                                      Result :: not_found | {set, [{member(), dot_list()}]}}.
 merge_results(Results) ->
-    lists:foldl(fun({_P1, not_found}=_Result, {_P2, not_found}=_Acc) ->
-                        {[], not_found};
+    lists:foldl(fun({P1, not_found}=_Result, {P2, not_found}=_Acc) ->
+                        {[], {[P1, P2], not_found}};
                    ({P1, not_found}=_Result, {_P2, {set, _Clock, Elements, done}}=Acc) ->
                         {[{P1, Elements}], Acc};
                    ({_P1, {set, _Clock, Elements, done}}=Res, {P2, not_found}=_Acc) ->

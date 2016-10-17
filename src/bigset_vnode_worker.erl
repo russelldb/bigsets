@@ -56,12 +56,9 @@ handle_work({get, Id, DB, Set, Opts}, Sender, State) ->
     %% clock is first key, this actors clock key is the first key we
     %% care about. Read all the way to last element
     ClockKey = bigset:clock_key(Set, Id),
-
     Buffer = bigset_fold_acc:new(Set, Sender, BatchSize, Partition, Id),
-    FoldOpts0 = [{bigsets, true},
-                 {vnode, Id} | ?RFOLD_OPTS],
 
-    FoldOpts = add_range_end_opts(Set, Opts, add_range_start_opts(Set, ClockKey, Opts, FoldOpts0)),
+    FoldOpts = add_range_end_opts(Set, Opts, add_range_start_opts(Set, ClockKey, Opts, ?RFOLD_OPTS)),
 
     try
         AccFinal =
@@ -159,7 +156,7 @@ fold_iterator(Iter) ->
 maybe_seek(_Set, [], Iter) ->
     {Iter, done};
 maybe_seek(Set, Members, Iter) ->
-    Key = bigset:insert_member_key(Set, hd(Members), <<>>, 0),
+    Key = bigset_keys:insert_member_key(Set, hd(Members), <<>>, 0),
     move_iterator(Iter, Key).
 
 %% @priv performs the `Action' on `Iter'. Common code for handling the
@@ -172,7 +169,7 @@ move_iterator(Iter, Action) ->
             {Iter, done};
         {ok, Key} ->
             try
-                {Iter, bigset:decode_key(Key)}
+                {Iter, ?BS_KEYS:decode_key(Key)}
             catch C:E ->
                     lager:info("asked to decode ~p", [Key]),
                     throw({C, E})

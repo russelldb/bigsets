@@ -294,7 +294,7 @@ gen_bigset(System, Set) ->
 
 gen_dot_keys({Actor, Cnt}, Set) ->
     ?LET(Keys, [?LET(Elem, elements(?ELEMENTS),
-                     bigset:decode_key(bigset:insert_member_key(Set, Elem, Actor, Event))) ||
+                     bigset_keys:decode_key(bigset_keys:insert_member_key(Set, Elem, Actor, Event))) ||
                    Event <- lists:seq(1, Cnt)],
          lists:usort(Keys)).
          %% begin

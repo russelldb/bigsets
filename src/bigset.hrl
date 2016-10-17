@@ -94,3 +94,7 @@
 -define(READ_OPTS, [{fill_cache, true}]).
 -define(WRITE_OPTS, [{sync, false}]).
 -define(FOLD_OPTS, [{iterator_refresh, true}]).
+%% should be defined in rebar.config for now
+-ifndef(BS_KEYS).
+-define(BS_KEYS, bigset_keys_lens).
+-endif.

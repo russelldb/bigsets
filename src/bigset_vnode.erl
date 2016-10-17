@@ -107,11 +107,14 @@ repair(PrefList, Req=?REPAIR_REQ{}) ->
 init([Partition]) ->
     VnodeId = vnode_id(Partition),
     DataDir = integer_to_list(Partition),
-    Opts =  [{create_if_missing, true},
+
+    Opts0 =  [{create_if_missing, true},
              {write_buffer_size, 1024*1024},
              {max_open_files, 20},
-             {bigsets, true},
              {vnode, VnodeId}],
+
+    Opts = bigset_keys:add_comparator_opt(Opts0),
+
     {ok, DB} = open_db(DataDir, Opts),
     %% @TODO(rdb|question) Maybe this pool should be BIIIIG for many gets
     PoolSize = app_helper:get_env(bigset, worker_pool_size, ?DEFAULT_WORKER_POOL),
@@ -133,9 +136,9 @@ handle_command(dump_db, _Sender, State) ->
     #state{db=DB, partition=P} = State,
 
     FoldFun = fun({K, <<>>}, Acc) ->
-                      [bigset:decode_key(K) | Acc];
+                      [bigset_keys:decode_key(K) | Acc];
                  ({K, V}, Acc) ->
-                      [{bigset:decode_key(K), binary_to_term(V)} | Acc]
+                      [{bigset_keys:decode_key(K), binary_to_term(V)} | Acc]
               end,
     Acc =  eleveldb:fold(DB, FoldFun, [], [?FOLD_OPTS]),
     {reply, {ok, P, lists:reverse(Acc)}, State};
@@ -229,11 +232,11 @@ handle_handoff_data(Data, State) ->
 
     {Sender, Set, {Key, Value}} = decode_handoff_item(Data),
 
-    ClockKey = bigset:clock_key(Set, Id),
+    ClockKey = bigset_keys:clock_key(Set, Id),
     {FirstWrite, Clock} = bigset:get_clock(ClockKey, DB),
 
     {Writes, NewHoffState} =
-        case bigset:decode_key(Key) of
+        case bigset_keys:decode_key(Key) of
             {clock, Set, Id} ->
                 %% my clock, no-op
                 {[], HoffState};
@@ -260,7 +263,7 @@ handle_handoff_data(Data, State) ->
                          HoffState2}
                 end;
             {end_key, Set}  ->
-                TombstoneKey = bigset:tombstone_key(Set, Id),
+                TombstoneKey = bigset_keys:tombstone_key(Set, Id),
                 TS = bigset:get_tombstone(TombstoneKey, DB),
                 {C2, TS2, HoffState2} = bigset_handoff:end_key(Set,
                                                                Sender,
@@ -429,7 +432,7 @@ gen_inserts(Set, Inserts, Id, Clock, CtxDecoder) ->
                         {Element, InsertCtx} = element_ctx(Insert, CtxDecoder),
                         %% Generate a dot per insert
                         {{Id, Cnt}=_Dot, C2} = bigset_clock:increment(Id, C),
-                        ElemKey = bigset:insert_member_key(Set, Element, Id, Cnt),
+                        ElemKey = bigset_keys:insert_member_key(Set, Element, Id, Cnt),
                         {C3, Writes} = remove_seen(Set, Element, InsertCtx, C2, Writes0),
                         {
                           C3, %% New Clock
@@ -447,7 +450,7 @@ remove_seen(Set, Element, Dots, Clock, Acc) ->
     lists:foldl(fun({A,C}=Dot, {ClockAcc, DelKeys}) ->
                         case bigset_clock:seen(Dot, ClockAcc) of
                             true ->
-                                Key = bigset:insert_member_key(Set, Element, A, C),
+                                Key = bigset_keys:insert_member_key(Set, Element, A, C),
                                 {ClockAcc,
                                  [{delete, Key} | DelKeys]};
                             false ->
@@ -524,7 +527,7 @@ element_ctx(Element, undefined) ->
                             {bigset_clock:clock(), writes()}.
 replica_inserts(Clock0, Elements) ->
     F = fun({Key, Ctx}, {Clock, Writes0}) ->
-                {element, S, E, A, C} = bigset:decode_key(Key),
+                {element, S, E, A, C} = bigset_keys:decode_key(Key),
                 Dot = {A, C},
                 %% You must always tombstone the removed context of an
                 %% add. Just because the clock has seen the dot of an
@@ -599,7 +602,7 @@ open_db(DataDir, Opts, RetriesLeft, _) ->
 add_end_key(false, _Set, Writes) ->
     Writes;
 add_end_key(true, Set, Writes) ->
-    EndKey = bigset:end_key(Set),
+    EndKey = bigset_keys:end_key(Set),
     [{put, EndKey, <<>>} | Writes].
 
 %%%===================================================================
@@ -616,7 +619,7 @@ handle_coord_write(Op, State) ->
         ctx=Ctx} = Op,
     %% Store elements in the set.
     #state{db=DB, partition=Partition, vnodeid=Id} = State,
-    ClockKey = bigset:clock_key(Set, Id),
+    ClockKey = bigset_keys:clock_key(Set, Id),
     {FirstWrite, Clock} = bigset:get_clock(ClockKey, DB),
 
     CtxDecoder = ctx_decoder(Ctx),
@@ -644,7 +647,7 @@ handle_replication(Op, State) ->
     #state{db=DB, vnodeid=Id, partition=Partition} = State,
 
     %% Read local clock
-    ClockKey = bigset:clock_key(Set, Id),
+    ClockKey = bigset_keys:clock_key(Set, Id),
     {FirstWrite, Clock0} = bigset:get_clock(ClockKey, DB),
     {Clock, Inserts} = replica_inserts(Clock0, Ins),
     {Clock1, Deletes} = replica_removes(Set, Clock, Rems),
@@ -659,11 +662,10 @@ handle_replication(Op, State) ->
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 handle_read_repair(Req, State) ->
     ?REPAIR_REQ{set=Set, repairs=Repairs} = Req,
-    #state{db=DB, vnodeid=Id, partition=Partition} = State,
-    lager:info("Read repair triggered ~p", [Partition]),
+    #state{db=DB, vnodeid=Id} = State,
 
     %% Read local clock
-    ClockKey = bigset:clock_key(Set, Id),
+    ClockKey = bigset_keys:clock_key(Set, Id),
     {FirstWrite, Clock0} = bigset:get_clock(ClockKey, DB),
     {Clock, Writes0} = repair_writes(Set, Clock0, Repairs),
     BinClock = bigset:to_bin(Clock),
@@ -692,7 +694,7 @@ repair_adds(Set, Element, Dots, Clock, Acc) ->
                                 %% do nothing
                                 {Clock, Acc};
                             false ->
-                                Key = bigset:insert_member_key(Set, Element, Actor, Cnt),
+                                Key = bigset_keys:insert_member_key(Set, Element, Actor, Cnt),
                                 {bigset_clock:add_dot(Dot, ClockAcc),
                                  [{put, Key, <<>>} | WriteAcc]}
                         end
@@ -711,5 +713,5 @@ decode_handoff_item(<<KeyLen:32/integer, Rest/binary>>) ->
     <<IDLen:32/little-unsigned-integer, Key1/binary>> = Key0,
     <<Sender:IDLen/binary, Key/binary>> = Key1,
 
-    {Set, _SubKey} = bigset:decode_set(Key),
+    {Set, _SubKey} = bigset_keys:decode_set(Key),
     {Sender, Set, {Key, Value}}.
