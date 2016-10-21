@@ -11,6 +11,8 @@
 
 -compile([export_all]).
 
+-export_type([buffer/0]).
+
 -include("bigset_trace.hrl").
 -include("bigset.hrl").
 
@@ -36,8 +38,37 @@
           current_elem :: binary(),
           current_dots = ?EMPTY :: [bigset_clock:dot()],
           set_tombstone = bigset_clock:fresh() :: bigset_clock:clock(),
-          elements = ?EMPTY
+          elements = ?EMPTY,
+          %% let's hope this is consistent across repliacs, eh? Or
+          %% we'll be read_repair deleting some things
+          start_element,
+          end_element,
+          start_inclusive=true :: boolean(),
+          end_inclusive=true :: boolean()
         }).
+
+-type buffer() :: #fold_acc{}.
+
+%% @doc if the query does not fold over the metdata (e.g. range query
+%% that starts after the clock) then add it to the buffer.  Takes the
+%% `Buffer' and returns it with `Clock' and `Tombstone' added.
+-spec add_metadata(buffer(), bigset_clock:clock(), bigset_clock:clock()) -> buffer().
+add_metadata(Buffer=#fold_acc{}, Clock, Tombstone) ->
+    Buffer#fold_acc{set_tombstone=Tombstone, clock=Clock, not_found=false}.
+
+%% @doc since eleveldb is yet to support start_inclusive option, add
+%% it to the accumulator state and use it in the fold
+-spec set_range_start(buffer(), boolean(), binary() | undefined) -> buffer().
+set_range_start(Buffer=#fold_acc{}, StartInclusive, StartElement)
+  when is_boolean(StartInclusive) ->
+    Buffer#fold_acc{start_inclusive=StartInclusive, start_element=StartElement}.
+
+%% @doc since eleveldb is yet to support end_inclusive option, add it
+%% to the accumulator state and use it in the fold
+-spec set_range_end(buffer(), boolean(), binary() | undefined) -> buffer().
+set_range_end(Buffer=#fold_acc{}, EndInclusive, EndElement)
+  when is_boolean(EndInclusive) ->
+    Buffer#fold_acc{end_inclusive=EndInclusive, end_element=EndElement}.
 
 send(Message, Acc) ->
     #fold_acc{sender=Sender, me=Me, monitor=Mon, partition=Partition} = Acc,
@@ -77,15 +108,8 @@ fold({Key, Val}, Acc=#fold_acc{not_found=false}) ->
             Acc#fold_acc{set_tombstone=bigset:from_bin(Val)};
         {element, Set, Element, Actor, Cnt} ->
             #fold_acc{set_tombstone=SetTombstone} = Acc,
-            case bigset_clock:seen({Actor, Cnt}, SetTombstone) of
-                false ->
-                    add(Element, Actor, Cnt, Acc);
-                true ->
-                    %% a handing off vnode deleted this key, so it is
-                    %% as though we don't have it, just skip it, it
-                    %% will be compacted out one day, maybe
-                    Acc
-            end;
+            TsSeen = bigset_clock:seen({Actor, Cnt}, SetTombstone),
+            maybe_add_element(TsSeen, Element, Actor, Cnt, Acc);
         {_, Set, _} ->
             %% other actor clock/tombstone key
             Acc;
@@ -93,6 +117,26 @@ fold({Key, Val}, Acc=#fold_acc{not_found=false}) ->
             %% The end key
             throw({break, Acc})
     end.
+
+%% @priv decide if we should accumulate this element. Don't accumulate
+%% if:
+%% 1. it's been deleted (but not compacted.)
+%% 2. it's the start or end of a range query and not included
+maybe_add_element(_TsSeen=true, _Element, _Actor, _Cnt, Acc) ->
+    %% a handing off vnode deleted this key, so it is
+    %% as though we don't have it, just skip it, it
+    %% will be compacted out one day, maybe.
+    Acc;
+maybe_add_element(_TsSeen, Element, _Actor, _Cnt, Acc=#fold_acc{start_element=Element, start_inclusive=false}) ->
+    %% element matches start element and client said they don't want
+    %% the start of the range
+    Acc;
+maybe_add_element(_TsSeen, Element, _Actor, _Cnt, Acc= #fold_acc{end_element=Element, end_inclusive=false}) ->
+    %% element matches end of range and the client says they don't
+    %% want it
+    Acc;
+maybe_add_element(_TsSeen, Element, Actor, Cnt, Acc) ->
+    add(Element, Actor, Cnt, Acc).
 
 %% @TODO(rdb|refactor) abstract the accumulation logic for different
 %% behaviours (CC vs EC)
@@ -191,8 +235,9 @@ finalise(Acc=#fold_acc{not_found=true}) ->
     send(?READ_RESULT{not_found=true}, Acc),
     close(Acc);
 finalise(Acc0) ->
-    Acc = flush(Acc0, done),
-    close(Acc).
+    Acc = store_element(Acc0),
+    AccFinal = flush(Acc, done),
+    close(AccFinal).
 
 %% @private demonitor
 close(Acc) ->

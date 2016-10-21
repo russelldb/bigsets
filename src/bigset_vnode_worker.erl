@@ -55,20 +55,29 @@ handle_work({get, Id, DB, Set, Opts}, Sender, State) ->
     #state{partition=Partition, batch_size=BatchSize} = State,
     %% clock is first key, this actors clock key is the first key we
     %% care about. Read all the way to last element
-    ClockKey = bigset:clock_key(Set, Id),
-    Buffer = bigset_fold_acc:new(Set, Sender, BatchSize, Partition, Id),
+    ClockKey = bigset_keys:clock_key(Set, Id),
 
-    FoldOpts = add_range_end_opts(Set, Opts, add_range_start_opts(Set, ClockKey, Opts, ?RFOLD_OPTS)),
+    Buffer0 = bigset_fold_acc:new(Set, Sender, BatchSize, Partition, Id),
+
+    {DoQuery, Buffer} = case requires_metadata(Opts) of
+                 true ->
+                     {NotFound, Clock} = bigset:get_clock(ClockKey, DB),
+                     if NotFound -> {false, Buffer0};
+                        true ->
+                             Tombstone = bigset:get_tombstone(Set, Id, DB),
+                             {true, bigset_fold_acc:add_metadata(Buffer0, Clock, Tombstone)}
+                     end;
+                 false ->
+                     {true, Buffer0}
+             end,
+
+    FoldOpts = add_range_opts(Set, ClockKey, Opts),
+    Buffer2 = add_buffer_range_opts(Buffer, FoldOpts, Opts),
 
     try
-        AccFinal =
-            try
-                eleveldb:fold(DB, fun bigset_fold_acc:fold/2, Buffer, FoldOpts)
-            catch
-                {break, Acc} ->
-                    Acc
-            end,
-
+        AccFinal = if DoQuery -> perform_read(DB, Buffer2, FoldOpts);
+                      true -> Buffer
+                   end,
         bigset_fold_acc:finalise(AccFinal)
     catch
         throw:receiver_down -> ok;
@@ -200,41 +209,103 @@ add_dot(Element, Actor, Cnt, [{Element, DL} | Acc]) ->
 add_dot(Element, Actor, Cnt, Acc) ->
     [{Element, [{Actor, Cnt}]} | Acc].
 
+%% @priv in the case that we have a range start, since we can't
+%% control the iterator in a fold, we require that the set metadata is
+%% read and added to the buffer. If we could control the iterator in a
+%% fold we'd just fold the metadata and then seek to the range start.
+-spec requires_metadata(proplists:proplist()) -> boolean().
+requires_metadata(Opts) ->
+    has_range_start(Opts).
+
+-spec has_range_start(proplists:proplist()) -> boolean().
+has_range_start(Opts) ->
+    proplists:get_value(range_start, Opts) /= undefined.
+
+%% @doc add any range query information pulled from the `Opts'
+%% proplist to the default `?RFOLD_OPTS'. Returns a proplist of fold
+%% opts.
+-spec add_range_opts(set(), key(), proplists:proplist()) -> proplists:proplist().
+add_range_opts(Set, ClockKey, Opts) ->
+    add_range_end_opts(Set, Opts, add_range_start_opts(Set, ClockKey, Opts, ?RFOLD_OPTS)).
+
+
+%% @doc add range start options pulled from `Opts' to the supplied
+%% `FoldOpts'
+-spec add_range_start_opts(set(),
+                           key(),
+                           proplists:proplist(),
+                           proplists:proplist()) ->
+                                  proplists:proplist().
 add_range_start_opts(Set, ClockKey, Opts, FoldOpts) ->
     case proplists:get_value(range_start, Opts) of
         undefined ->
             [{start_key, ClockKey} | FoldOpts];
         Element ->
-            RangeStartKey = bigset:insert_member_key(Set, Element, <<>>, 0),
-            %% the eleveldb fold code always needs the clock+tombstone
-            %% metadata, so we need two start keys, one for meta, one
-            %% for data. We use `bigset_start_key` for metadata.
-            maybe_add_start_inclusive(Opts, [{start_key, RangeStartKey}, {bigset_start_key, ClockKey} | FoldOpts])
+            RangeStartKey = bigset_keys:insert_member_key(Set, Element, <<>>, 0),
+            maybe_add_start_inclusive(Opts, [{start_key, RangeStartKey} | FoldOpts])
     end.
 
+%% @doc add any range query options pulled from `Opt' to the
+%% `FoldOpts'
+-spec add_range_end_opts(set(), proplists:proplist(), proplists:proplist()) ->
+                                proplists:proplist().
 add_range_end_opts(Set, Opts, FoldOpts) ->
     case proplists:get_value(range_end, Opts) of
         undefined ->
-            [{end_key, bigset:end_key(Set)} | FoldOpts];
+            [{end_key, bigset_keys:end_key(Set)} | FoldOpts];
         Element ->
-            EndKey = bigset:insert_member_key(Set, Element, <<>>, 0),
+            %% Ensure that we _can_ include this key. The call to
+            %% insert_member_key/4 creates a key that actually sorts
+            %% lower than the element key requested as the range
+            %% end. We can't create a larger one without knowing the
+            %% largest actor and largest counter, so instead, we add a
+            %% byte on the end. If such a key _does_ exist, it will
+            %% not be returned (same reason we add the byte.)
+            BiggerElement = <<Element/binary, $0>>,
+            EndKey = bigset_keys:insert_member_key(Set, BiggerElement, <<>>, 0),
             maybe_add_end_inclusive(Opts, [{end_key, EndKey} | FoldOpts])
     end.
 
 maybe_add_start_inclusive(Opts, FoldOpts) ->
-    case proplists:get_value(start_inclusive, Opts, false) of
-        true ->
-            [{start_inclusive, true} | FoldOpts];
+    case proplists:get_value(start_inclusive, Opts) of
         false ->
-            %% for some reason this must explicitly be set
-            %% false. eleveldb defaults to true
-            [{start_inclusive, false} | FoldOpts]
+            [{start_inclusive, false} | FoldOpts];
+        _ ->
+            FoldOpts
     end.
 
 maybe_add_end_inclusive(Opts, FoldOpts) ->
-    case proplists:get_value(end_inclusive, Opts, false) of
-        true ->
-            [{end_inclusive, true} | FoldOpts];
+    case proplists:get_value(end_inclusive, Opts) of
         false ->
+            [{end_inclusive, false} | FoldOpts];
+        _ ->
             FoldOpts
     end.
+
+%% @prive NOTE: this is only here because eleveldb does not expose
+%% these options in the API. Paul Place _did_ add them, but only to
+%% bigset folds, which we no longer use since MvM suggested the
+%% keyformat change to not use the comparator. Until there is some C++
+%% love, this is how we do it.
+-spec add_buffer_range_opts(bigset_fold_acc:buffer(), proplists:proplist(), proplists:proplist()) ->
+                                   bigset_fold_acc:buffer().
+add_buffer_range_opts(Buffer, FoldOpts, Opts) ->
+    Buffer1 = bigset_fold_acc:set_range_start(Buffer,
+                                              proplists:get_value(start_inclusive, FoldOpts, true),
+                                              proplists:get_value(range_start, Opts)),
+    bigset_fold_acc:set_range_end(Buffer1,
+                                  proplists:get_value(end_inclusive, FoldOpts, true),
+                                  proplists:get_value(range_end, Opts)).
+
+%% @priv common fold call
+-spec perform_read(db(), bigset_fold_acc:buffer(), proplists:proplist()) ->
+                          bigset_fold_acc:buffer().
+perform_read(DB, Buffer, FoldOpts) ->
+    try
+        eleveldb:fold(DB, fun bigset_fold_acc:fold/2, Buffer, FoldOpts)
+    catch
+        {break, Acc} ->
+            Acc
+    end.
+
+

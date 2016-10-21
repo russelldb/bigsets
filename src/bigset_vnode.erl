@@ -713,5 +713,5 @@ decode_handoff_item(<<KeyLen:32/integer, Rest/binary>>) ->
     <<IDLen:32/little-unsigned-integer, Key1/binary>> = Key0,
     <<Sender:IDLen/binary, Key/binary>> = Key1,
 
-    {Set, _SubKey} = bigset_keys:decode_set(Key),
+    Set = bigset_keys:decode_set(Key),
     {Sender, Set, {Key, Value}}.
