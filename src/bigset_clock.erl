@@ -235,7 +235,8 @@ equal(A, B) ->
 dominates(A, B) ->
     descends(A, B) andalso not descends(B, A).
 
-%% efficiency be damned!
+%% Wow, what was I thinking, this explodes a dot cloud into a list of
+%% pairs {Actor, Cnt}. Efficiency be damned!
 orddict_to_proplist(Dots) ->
     orddict:fold(fun(K, V, Acc) ->
                          Acc ++ [{K, C} || C <- V]
@@ -445,6 +446,8 @@ eqc_check(Prop, File) ->
     CE = binary_to_term(Bytes),
     eqc:check(Prop, CE).
 
+%% checks that when all clocks are merged they are compact and
+%% represent all events in the system.
 prop_merge_clocks() ->
     ?FORALL(Events, gen_all_system_events(),
             ?FORALL(Clocks, gen_clocks(Events),
@@ -452,6 +455,48 @@ prop_merge_clocks() ->
                         Merged = bigset_clock:merge([Clock || {_Actor, Clock} <- Clocks]),
                         equals({Events, []}, Merged)
                     end)).
+
+%% checks that for any subset of clocks the union of them descends any
+%% one of them.
+prop_merge() ->
+    ?FORALL(Events, gen_all_system_events(),
+            ?FORALL(Clocks, gen_clocks(Events),
+                    ?FORALL(SubSet, sublist(Clocks),
+                            begin
+                                Merged = bigset_clock:merge([Clock || {_Actor, Clock} <- SubSet]),
+                                measure(num_clocks, length(Clocks),
+                                        measure(num_sub, length(SubSet),
+                                                lists:all(fun(E) -> E end, [descends(Merged, Clock) || {_Actor, Clock} <- SubSet])))
+                            end))).
+
+%% checks the general property or merge, that if clocks are concurrent
+%% the result dominates the pair, if equal the result is equal to
+%% both, and if there is a linial relationship, the result descends
+%% both.
+prop_merge2() ->
+    ?FORALL(Events, gen_all_system_events(),
+            ?FORALL(Clocks, gen_clocks(Events),
+                    ?FORALL({{_, Clock1}, {_, Clock2}}, {elements(Clocks), elements(Clocks)},
+                            begin
+                                Merged = merge(Clock1, Clock2),
+                                {Type, Prop} = case {descends(Clock1, Clock2),
+                                                     descends(Clock2, Clock1)} of
+                                                   {true, true} ->
+                                                       {equal, equal(Merged, Clock1) andalso
+                                                        equal(Merged, Clock2)};
+                                                   {false, false} ->
+                                                       {concurrent,
+                                                        dominates(Merged, Clock1) andalso
+                                                        dominates(Merged, Clock2)};
+                                                   _ ->
+                                                       {linial,
+                                                        descends(Merged, Clock1) andalso
+                                                        descends(Merged, Clock2)}
+                                               end,
+
+                                aggregate([Type], Prop)
+                            end))).
+
 
 prop_intersection() ->
     ?FORALL(Events, gen_all_system_events(),
