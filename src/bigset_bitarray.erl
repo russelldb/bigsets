@@ -35,8 +35,9 @@
 
 -export_type([bit_array/0]).
 
- %% @TODO What size is "best"?
+ %% @TODO What word size is "best"?
 -define(W, 128).
+-define(FULL_WORD, ((1 bsl ?W) -1)).
 
 -type bit() :: 0 | 1.
 -type bit_array() :: array:array(bit()).
@@ -49,6 +50,26 @@
 -spec new(integer()) -> bit_array().
 new(N) ->
      array:new([{size, (N-1) div ?W + 1}, {default, 0}, {fixed, false}]).
+
+%% @doc create a bitset from a range, inclusive
+-spec from_range(range()) -> bit_array().
+from_range({Lo, Hi}) when Lo > Hi ->
+    new(10);
+    %% create an add mask for each word contained in the range full
+    %% words are just (1 bsl ?W) -1.  part of a word is the bnot of
+    %% the range to unset a part used in subtract range.
+from_range({Lo, Hi}) when Lo =< Hi, (Lo div ?W) == (Hi div ?W) ->
+    %% range is all in same word
+    set_word_from_to(Lo, Hi, new(?W));
+from_range({Lo, Hi}) when Lo =< Hi, (Hi div ?W) - (Lo div ?W) == 1 ->
+    %% contiguous words
+    A2 = set_word_from(Lo, new(?W)),
+    set_word_to(Hi, A2);
+from_range({Lo, Hi}) when Lo =< Hi ->
+    %% some full words to be set
+    A2 = set_word_from(Lo, new(?W)),
+    A3 = set_word_to(Hi, A2),
+    set_range((Lo div ?W) +1, (Hi div ?W) -1, A3).
 
 -spec set(integer(), bit_array()) -> bit_array().
 set(I, A) ->
@@ -158,6 +179,14 @@ subtract(A, B) ->
                        array:new(),
                        A).
 
+%% @doc given a `range()' and a `bit_array()' returns a `bit_array()'
+%% of all the elements in `range()' that are not also in `B'. It's
+%% subtract(from_range(Range), B).
+-spec range_subtract(range(), bit_array()) -> bit_array().
+range_subtract(Range, B) ->
+    A = from_range(Range),
+    subtract(A, B).
+
 %% @doc return only the elements in `A' that are not in the range
 %% defined by `Range' inclusive.
 -spec subtract_range(bit_array(), range()) -> bit_array().
@@ -192,10 +221,29 @@ unset_word_from_to(Lo, Hi, A) ->
             %% end.
             unset_word_from(Lo, A);
         _ ->
-            %% we need remove from Lo to Hi
+            %% we need to remove from Lo to Hi
             Mask = range_mask(Lo, Hi),
-            %% remove everything from Hi to end, and start to Lo, and invert that
             apply_mask(Mask, Lo div ?W, A)
+    end.
+
+%% set a range that is within one word
+set_word_from_to(Lo, Hi, A) ->
+    case {word_start(Lo), word_end(Hi)} of
+        {true, true} ->
+            %% the range _is_ the word, so full word it
+            array:set(Lo div ?W, ?FULL_WORD, A);
+        {true, false} ->
+            %% Lo is the word start, add everything from start to
+            %% Hi
+            set_word_to(Hi, A);
+        {false, true} ->
+            %% Hi is the word end, add everything from Lo to the
+            %% end.
+            set_word_from(Lo, A);
+        _ ->
+            %% we need to add from Lo to Hi
+            Mask = bnot range_mask(Lo, Hi),
+            apply_smask(Mask, Lo div ?W, A)
     end.
 
 unset_word_to(Hi, A) ->
@@ -206,10 +254,27 @@ unset_word_from(Lo, A) ->
     Mask = from_mask(Lo),
     apply_mask(Mask, Lo div ?W, A).
 
+set_word_to(Hi, A) ->
+    Mask = (1 bsl ((Hi rem ?W) +1) -1),
+    apply_smask(Mask, Hi div ?W, A).
+
+set_word_from(Lo, A) ->
+    M = (1 bsl (?W - (Lo rem ?W))) -1,
+    Mask = M bsl (Lo rem ?W),
+    apply_smask(Mask, Lo div ?W, A).
+
+set_from_mask(Lo) ->
+    M = (1 bsl (?W - (Lo rem ?W))) -1,
+    M bsl (Lo rem ?W).
+
 apply_mask(Mask, Index, Array) ->
     Value0 = array:get(Index, Array),
-    %% Is this really how you do it??
     Value = Mask band Value0,
+    array:set(Index, Value, Array).
+
+apply_smask(Mask, Index, Array) ->
+    Value0 = array:get(Index, Array),
+    Value = Mask bor Value0,
     array:set(Index, Value, Array).
 
 %% clear all the bits in the word in the range Lo - Hi, inclusive
@@ -222,9 +287,8 @@ range_mask(Lo, Hi) ->
 from_mask(N) ->
      (1 bsl (N rem ?W)) - 1.
 
-%% clear all the bits in the word from N Down
+%% clear all the bits in the word up to N, inclusive
 to_mask(N) ->
-%%    -1 * (((1 bsl ((N rem ?W) +1)) - 1) -1).
     bnot (1 bsl  ((N rem ?W) +1)  - 1).
 
 %% Reset full words from Lo to Hi inclusive.
@@ -232,6 +296,12 @@ unset_range(Lo, Lo, A) ->
     array:reset(Lo, A);
 unset_range(Lo, Hi, A) ->
     unset_range(Lo+1, Hi, array:reset(Lo, A)).
+
+%% set full words from Lo to Hi inclusive.
+set_range(Lo, Lo, A) ->
+    array:set(Lo, ?FULL_WORD, A);
+set_range(Lo, Hi, A) ->
+    set_range(Lo+1, Hi, array:set(Lo, ?FULL_WORD, A)).
 
 
 %% TODO: if these are only used in dotclouds, then 2 is the word start
@@ -292,15 +362,18 @@ cnt(V, N, Acc) ->
 eqc_test_() ->
     {timeout, 60*8, [
                      {timeout, 60, ?_assertEqual(true,
-                                                 eqc:quickcheck(eqc:testing_time(Time, ?QC_OUT(Prop()))))} ||
+                                                         eqc:quickcheck(eqc:testing_time(Time, ?QC_OUT(Prop()))))} ||
                         {Time, Prop} <- [{30, fun prop_subtract_range/0},
-                                         {5, fun prop_from_mask/0},
-                                         {5, fun prop_to_mask/0},
-                                         {5, fun prop_range_mask/0},
+                                         {30, fun prop_range_subtract/0},
+                                         {5, fun prop_unset_from_mask/0},
+                                         {5, fun prop_unset_to_mask/0},
+                                         {5, fun prop_unset_range_mask/0},
                                          {10, fun prop_union/0},
                                          {10, fun prop_subset/0},
                                          {5, fun prop_list/0},
-                                         {10, fun prop_subtract/0}]
+                                         {10, fun prop_subtract/0},
+                                         {30, fun prop_from_range/0},
+                                         {5, fun prop_set_from_mask/0}]
                     ]}.
 
 
@@ -362,10 +435,21 @@ to_mask_test() ->
 -define(MAX_SET, 10000).
 %% EQC Props
 
-%% @doc property that tests that for any range `{Hi, Lo}' and any
+
+%% @doc property that tests that we can make a bitarry that contains
+%% the range `{Hi, Lo}'. A lot like from list if lists:seq(Lo, Hi).
+prop_from_range() ->
+    ?FORALL({Lo, Hi}=Range, random_range(),
+            begin
+                Expected = lists:seq(Lo, Hi),
+                BS = from_range(Range),
+                to_list(BS) == Expected
+            end).
+
+%% @doc property that tests that for any range `{Lo, Hi}' and any
 %% bitset, the returned bitset from `subtract_range' has removed all
-%% entries in the range as though `range' where a bitset of contiguous
-%% values.
+%% entries in the bitset as though `range' where a bitset of
+%% contiguous values. Bitset subtracts Range.
 prop_subtract_range() ->
     ?FORALL({Set, {Lo, Hi}=Range}, {gen_set(), gen_range()},
             begin
@@ -384,6 +468,30 @@ prop_subtract_range() ->
                                                measure(set_after, length(Expected),
                                                        measure(range, Hi-Lo,
                                                                equals(Expected, Actual)))))))
+            end).
+
+%% @doc property that tests that for any range `{Lo, Hi}' and any
+%% bitset, the returned bitset from `range_subtract' has removed all
+%% entries in the bister as though `range' where a bitset of
+%% contiguous values that subtracted the bitset.
+prop_range_subtract() ->
+    ?FORALL({Set, {Lo, Hi}=Range}, {gen_set(), gen_range()},
+            begin
+                BS = from_list(Set),
+                B = lists:seq(Lo, Hi),
+                Expected = ordsets:subtract(B, Set),
+                Actual = to_list(range_subtract(Range, BS)),
+                ?WHENFAIL(
+                   begin
+                       io:format("range ~p~n", [Range]),
+                       io:format("Set ~p~n", [Set]),
+                       print_difference(Expected, Actual)
+                   end,
+                   aggregate(with_title(bitset_removes_all), [[] == Expected],
+                             measure(set_before, length(B),
+                                     measure(set_after, length(Expected),
+                                             measure(range, Hi-Lo,
+                                                     equals(Expected, Actual))))))
             end).
 
 %% @private prettty print the rogue elements between expected and
@@ -432,7 +540,7 @@ random_range() ->
 
 %% @doc test that the `from_mask' resets all bits in a word greater
 %% than or equal to `From'
-prop_from_mask() ->
+prop_unset_from_mask() ->
     ?FORALL(Mult, choose(0, 100),
             ?FORALL({Offset, From}, {Mult*?W, choose(0, ?W-1)},
                     ?FORALL(Members, gen_members(Offset),
@@ -449,9 +557,34 @@ prop_from_mask() ->
                                         Expected ==  lists:reverse(expand(Value2, Offset, [])))
                             end))).
 
+%% @doc test that the `set_from_mask' sets all bits in a word greater
+%% than or equal to `From'
+prop_set_from_mask() ->
+    ?FORALL(From, choose(0, ?W-1),
+            ?FORALL(Members, gen_members(0),
+                    begin
+                        Value = lists:foldl(fun(I, Acc) ->
+                                                    Acc bor (1 bsl (I rem ?W))
+                                            end,
+                                            0,
+                                            Members),
+                        Mask =  set_from_mask(From),
+                        Value2 = Mask bor Value,
+                        Expected = lists:umerge(Members, lists:seq(From, ?W-1)),
+                        ?WHENFAIL(
+                           begin
+                               io:format("Value ~p~n",[Value]),
+                               io:format("From ~p~n", [From]),
+                               io:format("Entry ~p~n", [From]),
+                               io:format("Mask ~p~n", [Mask])
+                           end,
+                           measure(members, length(Members),
+                                   Expected ==  lists:reverse(expand(Value2, 0, []))))
+                    end)).
+
 %% @doc test that `to_mask' resets all bits in a word less than or
 %% equal to `To'
-prop_to_mask() ->
+prop_unset_to_mask() ->
     ?FORALL(Mult, choose(0, 100),
             ?FORALL({Offset, To}, {Mult*?W, choose(0, ?W-1)},
                     ?FORALL(Members, gen_members(Offset),
@@ -471,7 +604,7 @@ prop_to_mask() ->
 %% or equal to `Lo' and less than or equal to `Hi'. NOTE: that
 %% `range_mask' expects non-contiguous and non-word-boundary input
 %% (see subtract_range.)
-prop_range_mask() ->
+prop_unset_range_mask() ->
     ?FORALL(Mult, choose(0, 100),
             ?FORALL({Offset, Hi, Lo}, {Mult*?W, choose(1, ?W-2), choose(1, ?W-2)},
                     ?FORALL(Members, gen_members(Offset),
