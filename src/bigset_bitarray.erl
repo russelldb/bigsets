@@ -17,9 +17,12 @@
 
 -export([
          from_list/1,
+         from_range/1,
+         add_range/2,
          get/2,
          is_empty/1,
          is_subset/2,
+         intersection/2,
          member/2,
          union/2,
          new/1,
@@ -53,21 +56,27 @@ new(N) ->
 
 %% @doc create a bitset from a range, inclusive
 -spec from_range(range()) -> bit_array().
-from_range({Lo, Hi}) when Lo > Hi ->
-    new(10);
-    %% create an add mask for each word contained in the range full
-    %% words are just (1 bsl ?W) -1.  part of a word is the bnot of
-    %% the range to unset a part used in subtract range.
-from_range({Lo, Hi}) when Lo =< Hi, (Lo div ?W) == (Hi div ?W) ->
+from_range(Range) ->
+    add_range(Range, new(10)).
+
+
+%% @doc add a range to a bitset
+-spec add_range(range(), bit_array()) -> bit_array().
+add_range({Lo, Hi}, A) when Lo > Hi ->
+    A;
+%% create an add mask for each word contained in the range full
+%% words are just (1 bsl ?W) -1.  part of a word is the bnot of
+%% the range to unset a part used in subtract range.
+add_range({Lo, Hi}, A) when Lo =< Hi, (Lo div ?W) == (Hi div ?W) ->
     %% range is all in same word
-    set_word_from_to(Lo, Hi, new(?W));
-from_range({Lo, Hi}) when Lo =< Hi, (Hi div ?W) - (Lo div ?W) == 1 ->
+    set_word_from_to(Lo, Hi, A);
+add_range({Lo, Hi}, A) when Lo =< Hi, (Hi div ?W) - (Lo div ?W) == 1 ->
     %% contiguous words
-    A2 = set_word_from(Lo, new(?W)),
+    A2 = set_word_from(Lo, A),
     set_word_to(Hi, A2);
-from_range({Lo, Hi}) when Lo =< Hi ->
+add_range({Lo, Hi}, A) when Lo =< Hi ->
     %% some full words to be set
-    A2 = set_word_from(Lo, new(?W)),
+    A2 = set_word_from(Lo, A),
     A3 = set_word_to(Hi, A2),
     set_range((Lo div ?W) +1, (Hi div ?W) -1, A3).
 
@@ -149,6 +158,24 @@ union(A, B) ->
                        RemainingB,
                        MergedA).
 
+%% @doc intersection of two bit_arrays (TODO let's rename this to
+%% bitset, eh?). NOTE: also assumes same word size!
+-spec intersection(bit_array(), bit_array()) -> bit_array().
+intersection(A, B) ->
+    {SizeA , SizeB} = {array:sparse_size(A), array:sparse_size(B)},
+    NewSize = min(SizeA, SizeB),
+    %% fold the smallest
+    {LHS, RHS} = if SizeA =< SizeB -> {A, B};
+                    true -> {B, A} end,
+    Res = array:sparse_foldl(fun(I, V0, Acc) ->
+                                     W = array:get(I, RHS),
+                                     V = W band V0,
+                                     array:set(I, V, Acc)
+                             end,
+                             new(NewSize),
+                             LHS),
+    resize(Res).
+
 %% @doc return true if `A' is a subset of `B', false otherwise.
 -spec is_subset(bit_array(), bit_array()) -> boolean().
 is_subset(A, B) ->
@@ -184,6 +211,8 @@ subtract(A, B) ->
 %% subtract(from_range(Range), B).
 -spec range_subtract(range(), bit_array()) -> bit_array().
 range_subtract(Range, B) ->
+    %% @TODO for large contiguous ranges we can probably save the
+    %% resources of building actual entries.
     A = from_range(Range),
     subtract(A, B).
 
@@ -360,21 +389,24 @@ cnt(V, N, Acc) ->
                               io:format(user, Str, Args) end, P)).
 
 eqc_test_() ->
-    {timeout, 60*8, [
-                     {timeout, 60, ?_assertEqual(true,
-                                                         eqc:quickcheck(eqc:testing_time(Time, ?QC_OUT(Prop()))))} ||
-                        {Time, Prop} <- [{30, fun prop_subtract_range/0},
-                                         {30, fun prop_range_subtract/0},
-                                         {5, fun prop_unset_from_mask/0},
-                                         {5, fun prop_unset_to_mask/0},
-                                         {5, fun prop_unset_range_mask/0},
-                                         {10, fun prop_union/0},
-                                         {10, fun prop_subset/0},
-                                         {5, fun prop_list/0},
-                                         {10, fun prop_subtract/0},
-                                         {30, fun prop_from_range/0},
-                                         {5, fun prop_set_from_mask/0}]
-                    ]}.
+    TestList = [{10, fun prop_subset/0},
+                {10, fun prop_subtract/0},
+                {10, fun prop_union/0},
+                {10, fun prop_intersection/0},
+                {20, fun prop_add_range/0},
+                {30, fun prop_from_range/0},
+                {30, fun prop_range_subtract/0},
+                {30, fun prop_subtract_range/0},
+                {5, fun prop_list/0},
+                {5, fun prop_set_from_mask/0},
+                {5, fun prop_unset_from_mask/0},
+                {5, fun prop_unset_range_mask/0},
+                {5, fun prop_unset_to_mask/0}],
+
+        {timeout, 60*length(TestList), [
+                                        {timeout, 60, ?_assertEqual(true,
+                                                                    eqc:quickcheck(eqc:testing_time(Time, ?QC_OUT(Prop()))))} ||
+                                           {Time, Prop} <- TestList]}.
 
 
 set_test() ->
@@ -435,7 +467,6 @@ to_mask_test() ->
 -define(MAX_SET, 10000).
 %% EQC Props
 
-
 %% @doc property that tests that we can make a bitarry that contains
 %% the range `{Hi, Lo}'. A lot like from list if lists:seq(Lo, Hi).
 prop_from_range() ->
@@ -445,6 +476,19 @@ prop_from_range() ->
                 BS = from_range(Range),
                 to_list(BS) == Expected
             end).
+
+%% @doc property that tests that we can make a bitarry that contains
+%% the range `{Hi, Lo}'. A lot like from list if lists:seq(Lo, Hi).
+prop_add_range() ->
+    ?FORALL({Set, {Lo, Hi}=Range}, {gen_set(), random_range()},
+            begin
+                ToAdd = lists:seq(Lo, Hi),
+                Expected = lists:umerge(Set, ToAdd),
+                BS = from_list(Set),
+                Actual = add_range(Range, BS),
+                to_list(Actual) == Expected
+            end).
+
 
 %% @doc property that tests that for any range `{Lo, Hi}' and any
 %% bitset, the returned bitset from `subtract_range' has removed all
@@ -651,6 +695,26 @@ prop_union() ->
                                                                 L == Expected))))))
             end).
 
+%% @doc property that checks, whatever the pair of sets, a calling
+%% `intersection' returns a single set with only members from both
+%% sets.
+prop_intersection() ->
+    ?FORALL({SetA, SetB}, {gen_set(), gen_set()},
+            begin
+                BS1 = from_list(SetA),
+                BS2 = from_list(SetB),
+                I = intersection(BS1, BS2),
+                L = to_list(I),
+                Expected = ordsets:intersection(SetA, SetB),
+                measure(length_a, length(SetA),
+                        measure(length_b, length(SetB),
+                                measure(sparsity_a, sparsity(SetA),
+                                        measure(sparsity_b, sparsity(SetB),
+                                                measure(sparsity_i, sparsity(Expected),
+                                                        measure(length_i, length(Expected),
+                                                                L == Expected))))))
+            end).
+
 %% @doc property that checks that when `is_subset' is called with a
 %% pair of sets, true is returned only when the second argument is a
 %% subset (all it's members are also members) of the first.
@@ -707,7 +771,8 @@ gen_subset_pair() ->
     ?LET(Super, gen_set(), {sublist(Super), Super}).
 
 %% @private a rough measure of how sparse a set is. Take the max
-%% element and divide it by the size of the set.
+%% element and divide it by the size of the set. Bigger is more
+%% sparse.
 -spec sparsity(list()) -> pos_integer().
 sparsity([]) ->
     1;
