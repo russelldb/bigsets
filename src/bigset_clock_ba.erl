@@ -20,6 +20,7 @@
          fresh/1,
          from_bin/1,
          get_dot/2,
+         get_counter/2,
          increment/2,
          intersection/2,
          is_compact/1,
@@ -234,17 +235,10 @@ delete_dot({Actor, Cnt}, DotSet, DotCloud) ->
     end.
 
 %% @doc get the counter for `Actor' where `counter' is the maximum
-%% _contiguous_ event sent by this clock (i.e. not including
-%% exceptions.)
--spec get_contiguous_counter(riak_dt_vclock:actor(), clock()) ->
-                                    pos_integer() | no_return().
-get_contiguous_counter(Actor, {Clock, _Dots}=C) ->
-    case riak_dt_vclock:get_counter(Actor, Clock) of
-        0 ->
-            error({badarg, actor_not_in_clock}, [Actor, C]);
-        Cnt ->
-            Cnt
-    end.
+%% _contiguous_ event seen by this clock.
+-spec get_counter(actor(), clock()) -> non_neg_integer().
+get_counter(Actor, {Clock, _Dots}=_Clock) ->
+    riak_dt_vclock:get_counter(Actor, Clock).
 
 -spec contiguous_seen(clock(), dot()) -> boolean().
 contiguous_seen({VV, _Seen}, Dot) ->
@@ -272,7 +266,8 @@ compress_seen(Clock, Seen) ->
 
 %% @private worker for `compress_seen' above. Essentially pops the
 %% lowest element off the dot set and checks if it is contiguous with
-%% the base. Repeatedly.
+%% the base. Repeatedly. @TODO(optimise) there must be a better
+%% way. Maybe consider a word at a time?
 -spec compress(pos_integer(), dot_set()) -> {pos_integer(), dot_set()}.
 compress(Base, BitArray) ->
     Candidate = Base+1,
@@ -343,18 +338,89 @@ dominates(A, B) ->
     descends(A, B) andalso not descends(B, A).
 
 %% @doc intersection returns all the dots in A that are also in B. A
-%% is `dot_cloud()' as returned by `complement/2'
--spec intersection(dot_cloud(), clock()) -> clock().
-intersection(_DotCloud, _Clock) ->
-    ok.
+%% is tombstone clock as returned by `tombstone_from_digest/2'. The
+%% purpose of this function is to trim the tombstone to only include
+%% those events seen.
+-spec intersection(clock(), clock()) -> clock().
+intersection(A, B) ->
+    %% @TODO implement me
+    AllActors = lists:umerge(all_nodes(A), all_nodes(B)),
+    lists:foldl(fun(Actor, ClockAcc) ->
+                        ADC = fetch_dot_set(Actor, A),
+                        BDC = fetch_dot_set(Actor, B),
+                        {AC, BC} = {get_counter(Actor, A), get_counter(Actor, B)},
+                        DC = case {AC, BC} of
+                                 {AC, BC} when AC > BC ->
+                                     %% we need to intersect the diff
+                                     %% between AC and BC with BDC.
+                                     Range = {BC+1, AC},
+                                     bigset_bitarray:intersection(BDC, bigset_bitarray:add_range(Range, ADC));
+                                 {AC, BC} when BC > AC ->
+                                     %% we need to intersect the diff
+                                     %% between BC and AC with ADC
+                                     Range = {AC+1, BC},
+                                     bigset_bitarray:intersection(ADC, bigset_bitarray:add_range(Range, BDC));
+                                 {C, C} ->
+                                     %% just the dotsets, ma'am
+                                     bigset_bitarray:intersection(ADC, BDC)
+                             end,
+                        update_clock_acc(Actor, min(AC, DC), DC, ClockAcc)
+                end,
+                fresh(),
+                AllActors).
 
 %% @doc subtract. Return only the events in A that are not in B. NOTE:
 %% this is for comparing a set digest with a set clock, so the digest
-%% (B) is _always_ a subset of the clock (A).
--spec tombstone_from_digest(Digest::clock(), SetClock::clock()) -> dot_cloud().
+%% (B) is _always_ a subset of the clock (A). Returns only the events
+%% that are in A and not in B. Subtracts B from A. Like
+%% sets:subtract(A, B). The returned set of events (as a clock) are
+%% the things that were in A and have ben removed.
+-spec tombstone_from_digest(Digest::clock(), SetClock::clock()) -> Tombstone::clock().
 tombstone_from_digest(A, B) ->
-    %% @TODO: implement me
-    {A, B}.
+    %% work on each actor in A
+    {AVV, ADC} = A,
+    {BVV, BDC} = B,
+    AActors = all_nodes(A),
+    lists:foldl(fun(Actor, TombstoneAcc) ->
+                        BaseDiff0 = base_diff(Actor, AVV, BVV),
+                        BDotSet = fetch_dot_set(Actor, BDC),
+                        %% Subtract any dots from B's dotset that are
+                        %% in A's base and not in B's base.
+                        BaseDC = bigset_bitarray:range_subtract(BaseDiff0, BDotSet),
+                        %% Subtract anything from A's dotset that is in B's dotset
+                        TSDC = bigset_bitarray:subtract(fetch_dot_set(Actor, ADC),
+                                                         BDotSet),
+
+                        %% the clock A is already compacted, the
+                        %% BaseDC is made from the base of A therefore
+                        %% < min(ADC) it may contain '1', for example.
+                        {Base, DC0} = compress(0, BaseDC),
+                        %% DC0 must be disjoint from TSDC, and
+                        %% therefore cannot be compressed
+                        DC = bigset_bitarray:union(DC0, TSDC),
+                        update_clock_acc(Actor, Base, DC, TombstoneAcc)
+                end,
+                fresh(),
+                AActors).
+
+%% @private update the clock's entry for the actor base and dotset.
+-spec update_clock_acc(actor(), pos_integer(), dot_set(), clock()) -> clock().
+update_clock_acc(Actor, Base, DC, {Clock0, Seen0}) ->
+    Clock = riak_dt_vclock:set_counter(Actor, Base, Clock0),
+    Seen = ?DICT:store(Actor, DC, Seen0),
+    {Clock, Seen}.
+
+%% the tombstone bit array is the result of subtracting B bitarray
+%% from A. But B may have contained return the range of events missing
+%% from BVV that are in AVV for Actor. Called by
+%% tombstone_from_digest/2, with the same assumption A is a superset
+%% of B. Returns the counts for Actor from A and B in a tuple {BCnt,
+%% AmCnt}
+base_diff(Actor, AVV, BVV) ->
+    ACnt = riak_dt_vclock:get_counter(Actor, AVV),
+    BCnt = riak_dt_vclock:get_counter(Actor, BVV),
+    %% we know that A is a superset of B
+    {BCnt+1, ACnt}.
 
 %% @doc Is this clock compact, i.e. no gaps/no dot-cloud entries
 -spec is_compact(clock()) -> boolean().
