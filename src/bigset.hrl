@@ -96,5 +96,9 @@
 -define(FOLD_OPTS, [{iterator_refresh, true}]).
 %% should be defined in rebar.config for now
 -ifndef(BS_KEYS).
--define(BS_KEYS, bigset_keys_lens).
+-define(BS_KEYS, bigset_keys_nulls).
+-endif.
+%% should be defined in rebar.config for now
+-ifndef(BS_CLOCK).
+-define(BS_CLOCK, bigset_clock_ba).
 -endif.

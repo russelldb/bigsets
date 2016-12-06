@@ -88,7 +88,7 @@ end_key(Set, Sender, LocalClock, Tombstone, State) ->
     %% The events in the Sender's clock, not in Tracking Clock, that
     %% is all the dots that were not handed off by Sender, and
     %% therefore Sender saw but has removed
-    DelDots = bigset_clock:complement(SenderClock, Tracker),
+    DelDots = bigset_clock:tombstone_from_digest(SenderClock, Tracker),
 
     %% All the dots that Receiver had seen before hand off, but which
     %% the handing off node has deleted

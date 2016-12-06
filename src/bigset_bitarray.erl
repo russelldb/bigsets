@@ -33,7 +33,8 @@
          to_list/1,
          unset/2,
          subtract/2,
-         subtract_range/2
+         subtract_range/2,
+         range_subtract/2
         ]).
 
 -export_type([bit_array/0]).
@@ -58,7 +59,6 @@ new(N) ->
 -spec from_range(range()) -> bit_array().
 from_range(Range) ->
     add_range(Range, new(10)).
-
 
 %% @doc add a range to a bitset
 -spec add_range(range(), bit_array()) -> bit_array().
@@ -216,6 +216,78 @@ range_subtract(Range, B) ->
     A = from_range(Range),
     subtract(A, B).
 
+%% @doc given a pos_integer() `N', remove everything in the
+%% bit_array() `Array' that is less than, or equal to `N'. Also remove
+%% everything that is contiguous with `N'. Return the highest removed
+%% set bit, and the new bit_array. In clock terms we expect `N' to
+%% represent the highest base event seen by an actor.
+-spec compact_contiguous(pos_integer(), bit_array()) ->
+                                {pos_integer(), bit_array()}.
+compact_contiguous(N, Array) ->
+    %% this removes all up to N
+    BA = subtract_range(Array, {0, N}),
+    %% this removes all in sequence from N
+    unset_contiguous_with(N, BA).
+
+%% @private kind of "find first unset" but unsets all up to
+%% first-unset and returns value of first-unset-1. Clears all the set
+%% bits contiguous with `N'. Called when all bits up to, and including
+%% `N' have been unset.
+-spec unset_contiguous_with(pos_integer(), bit_array()) ->
+                              {pos_integer(), bit_array()}.
+unset_contiguous_with(N, BA) ->
+    %% TODO eqc never hits the "full word" option. Unit test?
+    try
+        array:sparse_foldl(fun(Index, ?FULL_WORD, {_M, Acc}) ->
+                                   {(Index*?W)+(?W-1), array:reset(Index, Acc)};
+                              (Index, _Value, {M, Acc}) when ((M+1) div ?W) < Index ->
+                                   throw({break, {M, Acc}});
+                              (Index, Value, {M, Acc})  ->
+                                   %% all bits up to and including N
+                                   %% are unset, this is not a fully
+                                   %% set word. Is bit at N+1 set? if
+                                   %% yes, check next bit, if you get
+                                   %% to end of word, unset word, and
+                                   %% fold on, if unset bit > N and
+                                   %% unset-bit =< word end then clear
+                                   %% up to unset-bit, return
+                                   %% unset-bit-index and array
+                                   %% (i.e. throw to break fold)
+                                   case find_first_zero_after_n(M+1, Value) of
+                                       {unset_to, X} ->
+                                           %% unset word to X and break,
+                                           %% we're done
+                                           throw({break, {X, unset_word_to(X, Acc)}});
+                                       unset_word ->
+                                           {(Index*?W)+(?W-1), array:reset(Index, Acc)}
+                                   end
+                           end,
+                           {N, BA},
+                           BA)
+    catch {break, Acc} ->
+            Acc
+    end.
+
+-spec find_first_zero_after_n(pos_integer(), non_neg_integer()) ->
+                                     {unset_to, pos_integer()} |
+                                     unset_word.
+find_first_zero_after_n(N, V) ->
+    BitIndex = N rem ?W,
+    V2 = (V bsr BitIndex),
+    case V2 band 1 of
+        0 ->
+            {unset_to, N-1};
+        1 ->
+            case BitIndex == ?W-1 of
+                true ->
+                    %% end of the word, exit, zero whole word
+                    unset_word;
+                false ->
+                    %% keep going through word
+                    find_first_zero_after_n(N+1, V)
+            end
+    end.
+
 %% @doc return only the elements in `A' that are not in the range
 %% defined by `Range' inclusive.
 -spec subtract_range(bit_array(), range()) -> bit_array().
@@ -356,6 +428,8 @@ resize(A) ->
 %% [1] expand(2#1101, 0, []) -> [3,2,0] expand(2#1101, 1, []) ->
 %% [4,3,1] expand(2#1101, 10, []) -> [13,12,10] expand(2#1101, 100,
 %% []) -> [103,102,100]
+-spec expand(Value :: pos_integer(), Offset::non_neg_integer(), list(non_neg_integer())) ->
+                    list(non_neg_integer()).
 expand(0, _, Acc) ->
     Acc;
 expand(V, N, Acc) ->
@@ -401,12 +475,14 @@ eqc_test_() ->
                 {5, fun prop_set_from_mask/0},
                 {5, fun prop_unset_from_mask/0},
                 {5, fun prop_unset_range_mask/0},
-                {5, fun prop_unset_to_mask/0}],
+                {5, fun prop_unset_to_mask/0},
+                {10, fun prop_find_first_zero_after/0},
+                {20, fun prop_compact_contiguous/0}],
 
-        {timeout, 60*length(TestList), [
-                                        {timeout, 60, ?_assertEqual(true,
-                                                                    eqc:quickcheck(eqc:testing_time(Time, ?QC_OUT(Prop()))))} ||
-                                           {Time, Prop} <- TestList]}.
+    {timeout, 60*length(TestList), [
+                                    {timeout, 60, ?_assertEqual(true,
+                                                                eqc:quickcheck(eqc:testing_time(Time, ?QC_OUT(Prop()))))} ||
+                                       {Time, Prop} <- TestList]}.
 
 
 set_test() ->
@@ -459,6 +535,17 @@ to_mask_test() ->
     Mask = to_mask(Offset+To),
     Value2 = Mask band Value,
     ?assertEqual(lists:seq(Offset+To+1, Offset+100), lists:reverse(expand(Value2, Offset, []))).
+
+find_first_zero_after_n_test() ->
+    V = lists:foldl(fun(I, Acc) ->
+                            Acc bor (1 bsl (I rem ?W))
+                    end,
+                    0,
+                    lists:seq(1, 50) ++ lists:seq(52, 102)),
+    ?assertEqual({unset_to, 50}, find_first_zero_after_n(1, V)),
+    ?assertEqual({unset_to, 102}, find_first_zero_after_n(52, V)),
+    ?assertEqual(unset_word, find_first_zero_after_n(100, ?FULL_WORD)).
+
 
 -endif.
 
@@ -671,6 +758,67 @@ prop_unset_range_mask() ->
                                         equals(Expected, lists:reverse(expand(Value2, Offset, [])))))
                             end))).
 
+%% @doc property for the "find first zero after" function.
+prop_find_first_zero_after() ->
+    %% We need a word, and an N
+    ?FORALL(N, choose(0, ?W-1),
+            ?FORALL(Set, ?LET(S, lists:seq(N+1, ?W-1), sublist(S)),
+                    begin
+                        V = lists:foldl(fun(I, Acc) ->
+                                                Acc bor (1 bsl (I rem ?W))
+                                        end,
+                                        0,
+                                        Set),
+                        Actual = find_first_zero_after_n(N, V),
+                        UnsetTo = lists:foldl(fun(E, Acc) ->
+                                                      if E == Acc ->
+                                                              E+1;
+                                                         true ->
+                                                              Acc
+                                                      end
+                                              end,
+                                              N,
+                                              Set),
+                        Expected = if (UnsetTo-1) == ?W-1 -> unset_word;
+                                      true -> {unset_to, UnsetTo-1}
+                                   end,
+                        ?WHENFAIL(
+                           begin
+                               io:format("N ~p~n", [N]),
+                               io:format("Set ~p~n", [Set]),
+                               io:format("Value ~p~n", [V])
+                           end,
+                        equals(Expected, Actual))
+                    end)).
+
+%% @doc property for `compact_contiguous' as used by
+%% bigset_clock_ba. Given a number N and bit array BA, returns M (the
+%% highest number contiguous to N), and a bitarray that is BA with all
+%% bits up and including M unset.
+prop_compact_contiguous() ->
+    ?FORALL({Set, N}, {gen_set(), choose(0, ?MAX_SET)},
+            begin
+                BS = from_list(Set),
+                {ActualN, ActualBS} = compact_contiguous(N, BS),
+                %% remove all less than or equal to N
+                Set2 = lists:dropwhile(fun(E) -> E =< N end, Set),
+                %% Remove all in sequence with N
+                {ExpectedN, ExpectedSet} = remove_contiguous(N+1, Set2),
+                ?WHENFAIL(
+                   begin
+                       io:format("Bit Array ~p~n", [BS]),
+                       io:format("Set ~p~n", [Set]),
+                       io:format("N ~p~n", [N]),
+                       io:format("Bit Array Compacted ~p~n", [ActualBS])
+                   end,
+                conjunction([{new_base, equals(ExpectedN, ActualN)},
+                             {new_set, equals(ExpectedSet, to_list(ActualBS))}]))
+            end).
+
+remove_contiguous(N, [N | Rest]) ->
+    remove_contiguous(N+1, Rest);
+remove_contiguous(N, Set) ->
+    {N-1, Set}.
 
 %% The members for a single word in the bitset
 gen_members(Offset) ->
@@ -757,6 +905,7 @@ prop_list() ->
                         measure(sparsity, sparsity(Set),
                                 (to_list(BA) == Set) andalso length(Set) == bigset_bitarray:size(BA)))
             end).
+
 
 %% Generate a set of pos_integer()
 -spec gen_set() -> [pos_integer()].

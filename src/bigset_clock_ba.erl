@@ -7,6 +7,8 @@
 
 -module(bigset_clock_ba).
 
+-behaviour(bigset_clock).
+
 -export([
          add_dot/2,
          add_dots/2,
@@ -31,12 +33,13 @@
          to_bin/1
         ]).
 
--compile(export_all).
-
 -export_type([clock/0, dot/0]).
 
 -ifdef(EQC).
 -include_lib("eqc/include/eqc.hrl").
+-compile(export_all).
+-export([clock_from_event_list/2, set_to_clock/1, to_version_vector/1]).
+
 -endif.
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -100,7 +103,7 @@ all_nodes({Clock, Dots}) ->
 merge({VV1, Seen1}, {VV2, Seen2}) ->
     VV = riak_dt_vclock:merge([VV1, VV2]),
     Seen = ?DICT:merge(fun(_Key, S1, S2) ->
-                               bigset_bitarray:merge(S1, S2)
+                               bigset_bitarray:union(S1, S2)
                        end,
                        Seen1,
                        Seen2),
@@ -113,11 +116,6 @@ merge(Clocks) ->
     lists:foldl(fun merge/2,
                 fresh(),
                 Clocks).
-
-%% @doc make a bigset clock from a version vector
--spec from_vv(riak_dt_vclock:vclock()) -> clock().
-from_vv(Clock) ->
-    {Clock, ?DICT:new()}.
 
 %% @doc given a `Dot :: riak_dt:dot()' and a `Clock::clock()', add the
 %% dot to the clock. If the dot is contiguous with events summerised
@@ -164,7 +162,7 @@ seen({Actor, Cnt}=Dot, {Clock, Seen}) ->
 fetch_dot_set(Actor, Seen) ->
     case ?DICT:find(Actor, Seen) of
         error ->
-            bigset_bitarray:new(1000);
+            bigset_bitarray:new(10);
         {ok, L} ->
             L
     end.
@@ -240,63 +238,59 @@ delete_dot({Actor, Cnt}, DotSet, DotCloud) ->
 get_counter(Actor, {Clock, _Dots}=_Clock) ->
     riak_dt_vclock:get_counter(Actor, Clock).
 
--spec contiguous_seen(clock(), dot()) -> boolean().
-contiguous_seen({VV, _Seen}, Dot) ->
-    riak_dt_vclock:descends(VV, [Dot]).
+compact({VV, Seen}) ->
+    compress_seen(VV, Seen).
 
 %% @private when events have been added to a clock, gaps may have
 %% closed. Check the dot_cloud entries and if gaps have closed shrink
 %% the dot_cloud.
 -spec compress_seen(clock(), dot_cloud()) -> clock().
 compress_seen(Clock, Seen) ->
-    ?DICT:fold(fun(Node, Cnts, {ClockAcc, SeenAcc}) ->
+    ?DICT:fold(fun(Node, Dotset, {ClockAcc, SeenAcc}) ->
                        Cnt = riak_dt_vclock:get_counter(Node, Clock),
-                       case compress(Cnt, Cnts) of
-                           {Cnt, Cnts} ->
-                               %% No change
-                               {ClockAcc, ?DICT:store(Node, Cnts, SeenAcc)};
-                           {Cnt2, Cnts2} ->
-                               Compressed = bigset_bitarray:resize(Cnts2),
-                               {riak_dt_vclock:merge([[{Node, Cnt2}], ClockAcc]),
-                                ?DICT:store(Node, Compressed, SeenAcc)}
-                       end
+                       {Cnt2, DS2} = compress(Cnt, Dotset),
+                       ClockAcc2 = if Cnt2 == 0 -> ClockAcc;
+                                      true -> riak_dt_vclock:merge([[{Node, Cnt2}], ClockAcc])
+                                   end,
+                       SeenAcc2 =  case bigset_bitarray:is_empty(DS2) of
+                                       false ->
+                                           ?DICT:store(Node, DS2, SeenAcc);
+                                       true ->
+                                           SeenAcc
+                                   end,
+                       {ClockAcc2, SeenAcc2}
                end,
                {Clock, ?DICT:new()},
                Seen).
 
-%% @private worker for `compress_seen' above. Essentially pops the
-%% lowest element off the dot set and checks if it is contiguous with
-%% the base. Repeatedly. @TODO(optimise) there must be a better
-%% way. Maybe consider a word at a time?
+%% @private worker for `compress_seen' above.
 -spec compress(pos_integer(), dot_set()) -> {pos_integer(), dot_set()}.
 compress(Base, BitArray) ->
-    Candidate = Base+1,
-    case bigset_bitarray:member(Candidate, BitArray) of
-        true ->
-            compress(Candidate, bigset_bitarray:unset(Candidate, BitArray));
-        false ->
-            {Base, BitArray}
-    end.
+    bigset_bitarray:compact_contiguous(Base, BitArray).
 
 %% @doc true if A descends B, false otherwise
 -spec descends(clock(), clock()) -> boolean().
-descends({ClockA, DCa}, {ClockB, DCb}) ->
-    riak_dt_vclock:descends(ClockA, ClockB)
+descends({VVa, _DCa}=ClockA, {VVb, DCb}) ->
+    riak_dt_vclock:descends(VVa, VVb)
         andalso
-        dotcloud_descends(DCa, DCb).
+        dotcloud_descends(ClockA, DCb).
 
-%% @private used by descends/2. returns true if `DCa' descends `DCb',
-%% false otherwise. NOTE: this depends on ?DICT==orddict
--spec dotcloud_descends(dot_cloud(), dot_cloud()) -> boolean().
-dotcloud_descends(DCa, DCb) ->
-    NodesA = ?DICT:fetch_keys(DCa),
+%% @private used by descends/2. returns true if `ClockA' descends
+%% `DCb', false otherwise. We consider the whole clock, as it is
+%% possible that `DCb' has some event [2] that is not present in `DCa'
+%% but is covered by `VVa'. For example if the entry for actor `X' on
+%% `A' is {X, 10} []. We're establishing if for each node in `DCa' the
+%% entry descends the dot-set for `DCb'
+-spec dotcloud_descends(clock(), dot_cloud()) -> boolean().
+dotcloud_descends(ClockA, DCb) ->
+    NodesA = all_nodes(ClockA),
     NodesB = ?DICT:fetch_keys(DCb),
     case lists:umerge(NodesA, NodesB) of
         NodesA ->
             %% do the work as the set of nodes in B is a subset of
             %% those in A, meaning it is at least possible A descends
             %% B
-            dotsets_descend(DCa, DCb);
+            dotsets_descend(ClockA, DCb);
         _ ->
             %% Nodes of B not a subset of nodes of A, can't possibly
             %% be descended by A.
@@ -304,17 +298,18 @@ dotcloud_descends(DCa, DCb) ->
     end.
 
 %% @private only called after `dotcloud_descends/2' when we know that
-%% the the set of nodes in DCb are a subset of those in DCa
-%% (i.e. every node in B is in A, so we only need compare those node's
-%% dot_sets.) If all `DCb''s node's dotsets are descended by there
-%% counter parts in `DCa' returns true, otherwise false.
--spec dotsets_descend(dot_cloud(), dot_cloud()) -> boolean().
-dotsets_descend(DCa, DCb) ->
-    %% Only called when the nodes in DCb are a subset of those in DCa,
+%% the the set of nodes in DCb are a subset of those in A (i.e. every
+%% node in B is in A, so we only need compare those node's dot_sets.)
+%% If all `DCb''s node's dotsets are descended by their entry in A
+%% returns true, otherwise false.
+-spec dotsets_descend(clock(), dot_cloud()) -> boolean().
+dotsets_descend({VVa, DCa}, DCb) ->
+    %% Only called when the nodes in DCb are a subset of those in ClockA,
     %% so we only need fold over that
     (catch ?DICT:fold(fun(Node, DotsetB, true) ->
-                              DotsetA = ?DICT:fetch(Node, DCa),
-                              dotset_descends(DotsetA, DotsetB);
+                              DotsetA = fetch_dot_set(Node, DCa),
+                              CounterA = riak_dt_vclock:get_counter(Node, VVa),
+                              dotset_descends(CounterA, DotsetA, DotsetB);
                          (_Node, _, false) ->
                               throw(false)
                       end,
@@ -323,10 +318,13 @@ dotsets_descend(DCa, DCb) ->
 
 %% @private returns true if `DotsetA :: dot_set()' descends `DotsetB
 %% :: dot_set()' or put another way, is B a subset of A.
--spec dotset_descends(dot_set(), dot_set()) ->
+-spec dotset_descends(non_neg_integer(), dot_set(), dot_set()) ->
                              boolean().
-dotset_descends(DotsetA, DotsetB) ->
-    bigset_bitarray:is_subset(DotsetB, DotsetA).
+dotset_descends(CntrA, DotsetA, DotsetB) ->
+    %% TODO: is it ok just to add the CntrA as a range?, or do we
+    %% subtract from DotsetB?
+    DotsetB2 = bigset_bitarray:subtract_range(DotsetB, {0, CntrA}),
+    bigset_bitarray:is_subset(DotsetB2, DotsetA).
 
 %% @doc are A and B the same logical clock? True if so.
 equal(A, B) ->
@@ -376,11 +374,11 @@ intersection(A, B) ->
 %% sets:subtract(A, B). The returned set of events (as a clock) are
 %% the things that were in A and have ben removed.
 -spec tombstone_from_digest(Digest::clock(), SetClock::clock()) -> Tombstone::clock().
-tombstone_from_digest(A, B) ->
+tombstone_from_digest(Clock, Digest) ->
     %% work on each actor in A
-    {AVV, ADC} = A,
-    {BVV, BDC} = B,
-    AActors = all_nodes(A),
+    {AVV, ADC} = Clock,
+    {BVV, BDC} = Digest,
+    AActors = all_nodes(Clock),
     lists:foldl(fun(Actor, TombstoneAcc) ->
                         BaseDiff0 = base_diff(Actor, AVV, BVV),
                         BDotSet = fetch_dot_set(Actor, BDC),
@@ -436,3 +434,62 @@ is_compact_dc([{_A, DC} | Rest]) ->
         false ->
             false
     end.
+
+-ifdef(TEST).
+
+compress_test() ->
+    Dotcloud = bigset_bitarray:from_list([8,9,10]),
+    ClockC = fresh({a, 15}), %% a clock that has seen all a's events to 15
+    ClockB = update_clock_acc(b, 10, Dotcloud, fresh()), %% a clock that has seen only a's events from 8,9,10
+    Merged = merge(ClockC, ClockB),
+    ?debugFmt("Merged is ~p~n", [Merged]),
+    ?assert(is_compact(Merged)).
+
+compress_fail_test() ->
+    %% A clock that should compact but won't with current impl
+    Dotcloud = bigset_bitarray:from_list([16,17,18]),
+    ClockC = fresh({a, 15}), %% a clock that has seen all a's events to 15
+    ClockB = update_clock_acc(b, 10, Dotcloud, fresh()), %% a clock that has seen only a's events from 16
+    Merged = merge(ClockC, ClockB),
+    ?debugFmt("Merged is ~p~n", [Merged]),
+    ?assert(is_compact(Merged)).
+
+-endif.
+
+
+-ifdef(EQC).
+
+%% @doc eqc only callback. Create a clock from an `Actor' and a list
+%% of events.
+-spec clock_from_event_list(actor(), list(pos_integer())) -> clock().
+clock_from_event_list(Actor, Events) ->
+    DotSet = bigset_bitarray:from_list(Events),
+    DC = ?DICT:store(Actor, DotSet, ?DICT:new()),
+    compress_seen(riak_dt_vclock:fresh(), DC).
+
+%% @doc eqc only callback. Generate a clock from a set of dots.
+-spec set_to_clock(list(dot())) -> clock().
+set_to_clock(Dots) ->
+    Seen = lists:foldl(fun({Actor, Event}, DC) ->
+                              ?DICT:update(Actor,
+                                           fun(BS) ->
+                                                   bigset_bitarray:set(Event, BS) end,
+                                           bigset_bitarray:new(100),
+                                           DC)
+                      end,
+                      ?DICT:new(),
+                      Dots),
+    compress_seen(riak_dt_vclock:fresh(), Seen).
+
+%% @doc eqc only callback. Get the VV portion of the clock, if compact
+-spec to_version_vector(clock()) -> riak_dt_vclock:vclock() | none().
+to_version_vector(Clock) ->
+    case is_compact(Clock) of
+        true ->
+            {VV, _DC} = Clock,
+            VV;
+        false ->
+            throw(e_notcompact_clock)
+    end.
+
+-endif.
