@@ -38,7 +38,10 @@
 -ifdef(EQC).
 -include_lib("eqc/include/eqc.hrl").
 -compile(export_all).
--export([clock_from_event_list/2, set_to_clock/1, to_version_vector/1]).
+-export([clock_from_event_list/2,
+         set_to_clock/1,
+         clock_to_set/1,
+         to_version_vector/1]).
 
 -endif.
 -ifdef(TEST).
@@ -158,7 +161,8 @@ seen({Actor, Cnt}=Dot, {Clock, Seen}) ->
      bigset_bitarray:member(Cnt, fetch_dot_set(Actor, Seen))).
 
 %% @private
--spec fetch_dot_set(actor(), dot_cloud()) -> dot_set().
+fetch_dot_set(Actor, {_VV, Seen}) ->
+    fetch_dot_set(Actor, Seen);
 fetch_dot_set(Actor, Seen) ->
     case ?DICT:find(Actor, Seen) of
         error ->
@@ -166,6 +170,7 @@ fetch_dot_set(Actor, Seen) ->
         {ok, L} ->
             L
     end.
+
 
 %% @doc Remove dots seen by `Clock' from `Dots'. Return a list of
 %% `dot()' unseen by `Clock'. Return `[]' if all dots seens.
@@ -341,7 +346,6 @@ dominates(A, B) ->
 %% those events seen.
 -spec intersection(clock(), clock()) -> clock().
 intersection(A, B) ->
-    %% @TODO implement me
     AllActors = lists:umerge(all_nodes(A), all_nodes(B)),
     lists:foldl(fun(Actor, ClockAcc) ->
                         ADC = fetch_dot_set(Actor, A),
@@ -362,7 +366,7 @@ intersection(A, B) ->
                                      %% just the dotsets, ma'am
                                      bigset_bitarray:intersection(ADC, BDC)
                              end,
-                        update_clock_acc(Actor, min(AC, DC), DC, ClockAcc)
+                        update_clock_acc(Actor, min(AC, BC), DC, ClockAcc)
                 end,
                 fresh(),
                 AllActors).
@@ -373,7 +377,7 @@ intersection(A, B) ->
 %% that are in A and not in B. Subtracts B from A. Like
 %% sets:subtract(A, B). The returned set of events (as a clock) are
 %% the things that were in A and have ben removed.
--spec tombstone_from_digest(Digest::clock(), SetClock::clock()) -> Tombstone::clock().
+-spec tombstone_from_digest(SetClock::clock(), Digest::clock()) -> Tombstone::clock().
 tombstone_from_digest(Clock, Digest) ->
     %% work on each actor in A
     {AVV, ADC} = Clock,
@@ -403,9 +407,14 @@ tombstone_from_digest(Clock, Digest) ->
 
 %% @private update the clock's entry for the actor base and dotset.
 -spec update_clock_acc(actor(), pos_integer(), dot_set(), clock()) -> clock().
-update_clock_acc(Actor, Base, DC, {Clock0, Seen0}) ->
+update_clock_acc(Actor, Base, Dotset, {Clock0, Seen0}) ->
     Clock = riak_dt_vclock:set_counter(Actor, Base, Clock0),
-    Seen = ?DICT:store(Actor, DC, Seen0),
+    Seen = case bigset_bitarray:is_empty(Dotset) of
+               true ->
+                   Seen0;
+               false ->
+                   ?DICT:store(Actor, Dotset, Seen0)
+           end,
     {Clock, Seen}.
 
 %% the tombstone bit array is the result of subtracting B bitarray
@@ -440,24 +449,39 @@ is_compact_dc([{_A, DC} | Rest]) ->
 compress_test() ->
     Dotcloud = bigset_bitarray:from_list([8,9,10]),
     ClockC = fresh({a, 15}), %% a clock that has seen all a's events to 15
-    ClockB = update_clock_acc(b, 10, Dotcloud, fresh()), %% a clock that has seen only a's events from 8,9,10
+    ClockB = update_clock_acc(a, 0, Dotcloud, fresh({b, 15})), %% a clock that has seen only a's events  8,9,10
     Merged = merge(ClockC, ClockB),
-    ?debugFmt("Merged is ~p~n", [Merged]),
-    ?assert(is_compact(Merged)).
+    ?assert(is_compact(Merged)),
 
-compress_fail_test() ->
-    %% A clock that should compact but won't with current impl
-    Dotcloud = bigset_bitarray:from_list([16,17,18]),
-    ClockC = fresh({a, 15}), %% a clock that has seen all a's events to 15
-    ClockB = update_clock_acc(b, 10, Dotcloud, fresh()), %% a clock that has seen only a's events from 16
-    Merged = merge(ClockC, ClockB),
-    ?debugFmt("Merged is ~p~n", [Merged]),
-    ?assert(is_compact(Merged)).
+    Dotcloud2 = bigset_bitarray:from_list([16,17,18]),
+    ClockC2 = fresh({a, 15}), %% a clock that has seen all a's events to 15
+    ClockB2 = update_clock_acc(a, 0, Dotcloud2, fresh({b, 10})), %% a clock that has seen only a's events from 16
+    Merged2 = merge(ClockC2, ClockB2),
+    ?assert(is_compact(Merged2)).
 
 -endif.
 
 
 -ifdef(EQC).
+
+-define(NUMTESTS, 1000).
+
+run(Prop) ->
+    run(Prop, ?NUMTESTS).
+
+run(Prop, Count) ->
+    eqc:quickcheck(eqc:numtests(Count, Prop)).
+
+eqc_check(Prop) ->
+    eqc:check(Prop).
+
+eqc_check(Prop, File) ->
+    {ok, Bytes} = file:read_file(File),
+    CE = binary_to_term(Bytes),
+    eqc:check(Prop, CE).
+
+eqc_test_() ->
+    bigset_clock:eqc_tests(?MODULE).
 
 %% @doc eqc only callback. Create a clock from an `Actor' and a list
 %% of events.
@@ -491,5 +515,20 @@ to_version_vector(Clock) ->
         false ->
             throw(e_notcompact_clock)
     end.
+
+%% @doc eqc only callback. Turn `Clock' into a list of `{Actor, Cnt}'
+%% pairs for _all events_
+-spec clock_to_set(clock()) -> list(dot()).
+clock_to_set({VV, DC}=Clock) ->
+    Nodes = all_nodes(Clock),
+    lists:foldl(fun(Node, Acc) ->
+                        Cntr = riak_dt_vclock:get_counter(Node, VV),
+                        DS = fetch_dot_set(Node, DC),
+                        Base = [{Node, Cnt} || Cnt <- lists:seq(1, Cntr)],
+                        Dots = [{Node, E} || E <- bigset_bitarray:to_list(DS)],
+                        lists:umerge([Base, Dots, Acc])
+                end,
+                [],
+                Nodes).
 
 -endif.

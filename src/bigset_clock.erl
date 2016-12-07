@@ -89,6 +89,9 @@
 -callback set_to_clock(list()) ->
     clock().
 
+-callback clock_to_set(clock()) ->
+    list().
+
 -callback clock_from_event_list(actor(), list(pos_integer())) ->
     clock().
 
@@ -147,69 +150,54 @@ tombstone_from_digest(Clock, Digest) ->
 
 -ifdef(EQC).
 
-%%% Behaviour EQC API funs
 
-is_compact(Clock) ->
-    ?BS_CLOCK:is_compact(Clock).
-
-to_version_vector(Clock) ->
-    ?BS_CLOCK:to_version_vector(Clock).
-
-clock_from_event_list(Actor, Events) ->
-    ?BS_CLOCK:clock_from_event_list(Actor, Events).
-
-
--define(NUMTESTS, 1000).
 -define(QC_OUT(P),
         eqc:on_output(fun(Str, Args) ->
                               io:format(user, Str, Args) end, P)).
 
-eqc_test_() ->
-    {timeout, 60, [
-                   ?_assertEqual(true, eqc:quickcheck(?QC_OUT(prop_merge_clocks()))),
-                   ?_assertEqual(true, eqc:quickcheck(?QC_OUT(prop_intersection()))),
-                   ?_assertEqual(true, eqc:quickcheck(?QC_OUT(prop_complement())))
-                  ]}.
+-define(NUMTESTS, 1000).
 
-run(Prop) ->
-    run(Prop, ?NUMTESTS).
+eqc_tests(Mod) ->
+    TestList = [{10, fun bigset_clock:prop_merge_clocks/1},
+                {10, fun bigset_clock:prop_merge/1},
+                {10, fun bigset_clock:prop_merge2/1},
+                {30, fun bigset_clock:prop_intersection/1},
+                {30, fun bigset_clock:prop_tombstone_from_digest/1},
+                {10, fun bigset_clock:prop_add_dot/1},
+                {10, fun bigset_clock:prop_seen/1},
+                 {5, fun bigset_clock:prop_increment/1}
+               ],
 
-run(Prop, Count) ->
-    eqc:quickcheck(eqc:numtests(Count, Prop)).
-
-eqc_check(Prop) ->
-    eqc:check(Prop).
-
-eqc_check(Prop, File) ->
-    {ok, Bytes} = file:read_file(File),
-    CE = binary_to_term(Bytes),
-    eqc:check(Prop, CE).
+    {timeout, 60*length(TestList), [
+                                    {timeout, 60, ?_assertEqual(true,
+                                                                eqc:quickcheck(eqc:testing_time(Time, ?QC_OUT(Prop(Mod)))))} ||
+                                       {Time, Prop} <- TestList]}.
 
 %% checks that when all clocks are merged they are compact and
 %% represent all events in the system.
-prop_merge_clocks() ->
+prop_merge_clocks(Mod) ->
     ?FORALL(Events, gen_all_system_events(),
-            ?FORALL(Clocks, gen_clocks(Events),
+            ?FORALL(Clocks, gen_clocks(Events, Mod),
                     begin
-                        Merged = merge([Clock || {_Actor, Clock} <- Clocks]),
+                        Merged = Mod:merge([Clock || {_Actor, Clock} <- Clocks]),
                         ?WHENFAIL(
                            begin
                                io:format("Clocks ~p~n", [Clocks]),
                                io:format("Events ~p~n", [Events]),
                                io:format("Merged ~p~n", [Merged])
                            end,
-                           conjunction([{compact, is_compact(Merged)},
-                                        {equal, equals(to_version_vector(Merged), Events)}]))
+                           conjunction([{compact, Mod:is_compact(Merged)},
+                                        {equal, equals(Mod:to_version_vector(Merged), Events)}]))
                     end)).
 
 %% checks that for any subset of clocks the union of them descends any
 %% one of them.
-prop_merge() ->
+prop_merge(Mod) ->
     ?FORALL(Events, gen_all_system_events(),
-            ?FORALL(Clocks, gen_clocks(Events),
+            ?FORALL(Clocks, gen_clocks(Events, Mod),
                     ?FORALL(SubSet, sublist(Clocks),
                             begin
-                                Merged = merge([Clock || {_Actor, Clock} <- SubSet]),
+                                Merged = Mod:merge([Clock || {_Actor, Clock} <- SubSet]),
                                 ?WHENFAIL(
                                    begin
                                        io:format("Subset of clocks are ~p~n", [SubSet]),
@@ -217,7 +205,7 @@ prop_merge() ->
                                    end,
                                 measure(num_clocks, length(Clocks),
                                         measure(num_sub, length(SubSet),
-                                                conjunction([{Actor, descends(Merged, Clock)}
+                                                conjunction([{Actor, Mod:descends(Merged, Clock)}
                                                              || {Actor, Clock} <- SubSet]))))
                             end))).
 
@@ -225,106 +213,137 @@ prop_merge() ->
 %% the result dominates the pair, if equal the result is equal to
 %% both, and if there is a linial relationship, the result descends
 %% both.
-prop_merge2() ->
+prop_merge2(Mod) ->
     ?FORALL(Events, gen_all_system_events(),
-            ?FORALL(Clocks, gen_clocks(Events),
+            ?FORALL(Clocks, gen_clocks(Events, Mod),
                     ?FORALL({{_, Clock1}, {_, Clock2}}, {elements(Clocks), elements(Clocks)},
                             begin
-                                Merged = merge(Clock1, Clock2),
-                                {Type, Prop} = case {descends(Clock1, Clock2),
-                                                     descends(Clock2, Clock1)} of
+                                Merged = Mod:merge(Clock1, Clock2),
+                                {Type, Prop} = case {Mod:descends(Clock1, Clock2),
+                                                     Mod:descends(Clock2, Clock1)} of
                                                    {true, true} ->
-                                                       {equal, equal(Merged, Clock1) andalso
-                                                        equal(Merged, Clock2)};
+                                                       {equal, Mod:equal(Merged, Clock1) andalso
+                                                        Mod:equal(Merged, Clock2)};
                                                    {false, false} ->
                                                        {concurrent,
-                                                        dominates(Merged, Clock1) andalso
-                                                        dominates(Merged, Clock2)};
+                                                        Mod:dominates(Merged, Clock1) andalso
+                                                        Mod:dominates(Merged, Clock2)};
                                                    _ ->
                                                        {linial,
-                                                        descends(Merged, Clock1) andalso
-                                                        descends(Merged, Clock2)}
+                                                        Mod:descends(Merged, Clock1) andalso
+                                                        Mod:descends(Merged, Clock2)}
                                                end,
 
                                 aggregate([Type], Prop)
                             end))).
 
-
-prop_intersection() ->
+%% @doc verifies that intersection behaves the same as ordset:intersection
+prop_intersection(Mod) ->
     ?FORALL(Events, gen_all_system_events(),
-            ?FORALL([{_, Clock1}, {_, Clock2} | _], gen_clocks(Events),
+            ?FORALL([{_, Clock1}, {_, Clock2} | _], gen_clocks(Events, Mod),
                     begin
-                        DC = clock_to_dotcloud(Clock1),
-                        Res = clock_to_set(intersection(DC, Clock2)),
-                        Set1 = clock_to_set(Clock1),
-                        Set2 = clock_to_set(Clock2),
+                        Res = Mod:clock_to_set(Mod:intersection(Clock1, Clock2)),
+                        Set1 = Mod:clock_to_set(Clock1),
+                        Set2 = Mod:clock_to_set(Clock2),
                         Expected = ordsets:intersection(Set1, Set2),
-                        equals(Expected, Res)
+                        ?WHENFAIL(
+                           begin
+                               io:format("Clock 1 ~p~n", [Clock1]),
+                               io:format("Clock 2 ~p~n", [Clock2]),
+                               io:format("intersection ~p~n", [Res])
+                           end,
+                           equals(Expected, Res))
                     end)).
 
-prop_complement() ->
+%% @doc verifies that a tombstone can be generated from a digest
+prop_tombstone_from_digest(Mod) ->
     ?FORALL(Events, gen_all_system_events(),
-            ?FORALL([{_, {_Base1, _DC1}=Clock1} | _], gen_clocks(Events),
-                    ?FORALL({_Base2, _DC}=Clock2, gen_sub_clock(Clock1),
+            ?FORALL([{_, {_Base1, _DC1}=Clock1} | _], gen_clocks(Events, Mod),
+                    ?FORALL({_Base2, _DC}=Clock2, gen_sub_clock(Clock1, Mod),
                             begin
-                                Res = dot_cloud_to_set(tombstone_from_digest(Clock1, Clock2)),
-                                Set1 = clock_to_set(Clock1),
-                                Set2 = clock_to_set(Clock2),
+                                Res = Mod:clock_to_set(Mod:tombstone_from_digest(Clock1, Clock2)),
+                                Set1 = Mod:clock_to_set(Clock1),
+                                Set2 = Mod:clock_to_set(Clock2),
                                 Expected = ordsets:subtract(Set1, Set2),
                                 %% @TODO(rdb) add check_distribution when we get off r16
-                                equals(Expected, Res)
+                                ?WHENFAIL(
+                                   begin
+                                       io:format("Set 1 ~p~n", [Set1]),
+                                       io:format("Set 2 ~p ~n", [Set2])
+                                   end,
+                                   equals(Expected, Res))
                             end))).
 
-clock_to_dotcloud({VV, DC}) ->
-    lists:foldl(fun({Act, Cnt}, Acc) ->
-                        [{Act, lists:umerge(lists:seq(1, Cnt), proplists:get_value(Act, DC, []))} | Acc]
-                end,
-                [Entry || {Act, _}=Entry <- DC,
-                          not lists:keymember(Act, 1, VV)],
-                VV).
+%% @doc a property that verifies when a dot is added to a clock, it is
+%% a member of the clocks set of seen events
+prop_add_dot(Mod) ->
+    ?FORALL(Events, gen_all_system_events(),
+            ?FORALL(Clocks, gen_clocks(Events, Mod),
+                    ?FORALL({_Actor, Clock}, elements(Clocks),
+                            ?FORALL(Dot, gen_dot(),
+                                    begin
+                                        Res = Mod:add_dot(Dot, Clock),
+                                        Before = Mod:clock_to_set(Clock),
+                                        After = Mod:clock_to_set(Res),
+                                        ?WHENFAIL(
+                                           begin
+                                               io:format("Dot ~p~n", [Dot]),
+                                               io:format("Clock ~p~n", [Clock])
+                                           end,
+                                           aggregate(with_title(re_add), [ordsets:is_element(Dot, Before)],
+                                                     ordsets:is_element(Dot, After)))
+                                    end)))).
 
-clock_to_set(Clock) ->
-    DC = clock_to_dotcloud(Clock),
-    dot_cloud_to_set(DC).
+%% @doc a property that verifies that the clock recognises an event as
+%% "seen" if it is in the set of events the clock contains.
+prop_seen(Mod) ->
+    ?FORALL(Events, gen_all_system_events(),
+            ?FORALL(Clocks, gen_clocks(Events, Mod),
+                    ?FORALL({_Actor, Clock}, elements(Clocks),
+                            ?FORALL(Dot, gen_dot(),
+                                    begin
+                                        Set = Mod:clock_to_set(Clock),
+                                        ?WHENFAIL(
+                                           begin
+                                               io:format("Dot ~p~n", [Dot]),
+                                               io:format("Clock ~p~n", [Clock])
+                                           end,
+                                           aggregate(with_title(seen), [ordsets:is_element(Dot, Set)],
+                                                     equals(ordsets:is_element(Dot, Set), Mod:seen(Dot, Clock))))
+                                    end)))).
 
-set_to_clock(Set) ->
-    ?BS_CLOCK:set_to_clock(Set).
+prop_increment(Mod) ->
+    ?FORALL(Events, gen_all_system_events(),
+            ?FORALL(Clocks, gen_clocks(Events, Mod),
+                    ?FORALL({Actor, Clock}, elements(Clocks),
+                            begin
+                                Before = proplists:get_value(Actor, Events),
+                                {{Actor, NewCntr}, Clock2} = Mod:increment(Actor, Clock),
+                                conjunction([{incremented, equals(Before+1, NewCntr)},
+                                             {new_cntr, equals(NewCntr, Mod:get_counter(Actor, Clock2))}])
+                            end))).
 
-set_to_dotcloud(Set) ->
-    ordsets:fold(fun({Act, Cnt}, Acc) ->
-                         orddict:update(Act, fun(L) ->
-                                                     lists:umerge(L, [Cnt]) end,
-                                        [Cnt],
-                                        Acc)
-                 end,
-                 orddict:new(),
-                 Set).
-
-dot_cloud_to_set(DC) ->
-    ordsets:from_list([{Act, Event} || {Act, Events} <- DC,
-                                     Event <- Events]).
-
-gen_clocks() ->
+gen_clocks(Mod) ->
     ?LET(Events, gen_all_system_events(),
-         gen_clocks(Events)).
+         gen_clocks(Events, Mod)).
 
-gen_clocks(Events) ->
-    [{Actor, gen_clock(Me, Events)} || {Actor, _}=Me <- Events].
+gen_clocks(Events, Mod) ->
+    [{Actor, gen_clock(Me, Events, Mod)} || {Actor, _}=Me <- Events].
 
-gen_clock(Me, Events) ->
+gen_clock(Me, Events, Mod) ->
     ?LET(ClockMembers, sublist(Events),
-         ?LET(Clocks, [bigset_clock:fresh(Me) | [gen_clock(Event) || Event <- ClockMembers,
+         ?LET(Clocks, [Mod:fresh(Me) | [gen_clock(Event, Mod) || Event <- ClockMembers,
                                     Event /= Me]],
-              bigset_clock:merge(Clocks))).
+              Mod:merge(Clocks))).
 
-gen_sub_clock(Clock) ->
-    Set = clock_to_set(Clock),
+gen_sub_clock(Clock, Mod) ->
+    Set = Mod:clock_to_set(Clock),
     ?LET(SubSet, sublist(ordsets:to_list(Set)),
-         set_to_clock(ordsets:from_list(SubSet))).
+         Mod:set_to_clock(ordsets:from_list(SubSet))).
 
-gen_clock({Actor, Max}) ->
+gen_clock({Actor, Max}, Mod) ->
     ?LET(Events, non_empty(sublist(lists:seq(1, Max))),
-         clock_from_event_list(Actor, Events)).
+         Mod:clock_from_event_list(Actor, Events)).
 
 %% @priv generates the single system wide version vector that
 %% describes all events at a moment in time. Imagine a snapshot of a
@@ -338,5 +357,8 @@ gen_all_system_events() ->
                                    list({actor(), pos_integer()}).
 gen_all_system_events(Actors) ->
      [{<<Actor>> , choose(1, 100)} || Actor <- lists:seq(1, Actors)].
+
+gen_dot() ->
+    ?LET(Actor, choose(1, 10), {<<Actor>>, choose(1, 100)}).
 
 -endif.
