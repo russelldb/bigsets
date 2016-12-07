@@ -243,9 +243,6 @@ delete_dot({Actor, Cnt}, DotSet, DotCloud) ->
 get_counter(Actor, {Clock, _Dots}=_Clock) ->
     riak_dt_vclock:get_counter(Actor, Clock).
 
-compact({VV, Seen}) ->
-    compress_seen(VV, Seen).
-
 %% @private when events have been added to a clock, gaps may have
 %% closed. Check the dot_cloud entries and if gaps have closed shrink
 %% the dot_cloud.

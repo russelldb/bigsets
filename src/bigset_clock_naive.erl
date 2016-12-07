@@ -18,6 +18,7 @@
          equal/2,
          fresh/0,
          fresh/1,
+         get_counter/2,
          get_dot/2,
          increment/2,
          intersection/2,
@@ -25,6 +26,7 @@
          merge/1,
          merge/2,
          seen/2,
+         subtract_seen/2,
          tombstone_from_digest/2
         ]).
 -compile(export_all).
@@ -206,6 +208,15 @@ delete_dot({Actor, Cnt}, DotList, DotCloud) ->
     end.
 
 %% @doc get the counter for `Actor' where `counter' is the maximum
+%% _contiguous_ event sent by this clock. Expected to be called by
+%% local actor.
+-spec get_counter(riak_dt_vclock:actor(), clock()) ->
+                                    non_neg_integer().
+get_counter(Actor, {Clock, _Dots}) ->
+    riak_dt_vclock:get_counter(Actor, Clock).
+
+
+%% @doc get the counter for `Actor' where `counter' is the maximum
 %% _contiguous_ event sent by this clock (i.e. not including
 %% exceptions.)
 -spec get_contiguous_counter(riak_dt_vclock:actor(), clock()) ->
@@ -289,6 +300,15 @@ intersection(ClockA, ClockB) ->
                                 [],
                                DC),
     compress_seen([], Intersection).
+
+
+clock_to_dotcloud({VV, DC}) ->
+    lists:foldl(fun({Act, Cnt}, Acc) ->
+                        [{Act, lists:umerge(lists:seq(1, Cnt), proplists:get_value(Act, DC, []))} | Acc]
+                end,
+                [Entry || {Act, _}=Entry <- DC,
+                          not lists:keymember(Act, 1, VV)],
+                VV).
 
 %% @doc complement like in sets, only here we're talking sets of
 %% events. Generates a dict that represents all the events in A that
@@ -478,15 +498,6 @@ eqc_check(Prop, File) ->
 
 eqc_test_() ->
     bigset_clock:eqc_tests(?MODULE).
-
-
-clock_to_dotcloud({VV, DC}) ->
-    lists:foldl(fun({Act, Cnt}, Acc) ->
-                        [{Act, lists:umerge(lists:seq(1, Cnt), proplists:get_value(Act, DC, []))} | Acc]
-                end,
-                [Entry || {Act, _}=Entry <- DC,
-                          not lists:keymember(Act, 1, VV)],
-                VV).
 
 clock_to_set(Clock) ->
     DC = clock_to_dotcloud(Clock),

@@ -122,7 +122,7 @@ delta_join({remove, Element, Ctx}, Bigset) ->
 
 receive_end_key(SenderClock, Tracker, Bigset) ->
     #bigset{clock=LocalClock, tombstone=Tombstone} = Bigset,
-    DelDots = bigset_clock:complement(SenderClock, Tracker),
+    DelDots = bigset_clock:tombstone_from_digest(SenderClock, Tracker),
     %% All the dots that Receiver had seen before hand off, but which
     %% the handing off node has deleted
     ToRemove = bigset_clock:intersection(DelDots, LocalClock),

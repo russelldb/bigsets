@@ -22,19 +22,22 @@
 -endif.
 
 -export([
+         add_dot/2,
+         all_nodes/1,
+         clock_mod/0,
+         descends/2,
+         dominates/2,
+         equal/2,
          fresh/0,
          fresh/1,
-         increment/2,
+         get_counter/2,
          get_dot/2,
-         all_nodes/1,
-         merge/2,
-         merge/1,
-         add_dot/2,
-         seen/2,
-         descends/2,
-         equal/2,
-         dominates/2,
+         increment/2,
          intersection/2,
+         merge/1,
+         merge/2,
+         seen/2,
+         subtract_seen/2,
          tombstone_from_digest/2
         ]).
 
@@ -49,6 +52,9 @@
 
 -callback increment(actor(), clock()) ->
     clock().
+
+-callback get_counter(actor(), clock()) ->
+    non_neg_integer().
 
 -callback get_dot(actor(), clock()) ->
     dot().
@@ -67,6 +73,9 @@
 
 -callback seen(dot(), clock()) ->
     boolean().
+
+-callback subtract_seen(clock(), list(dot())) ->
+    list(dot()).
 
 -callback descends(clock(), clock()) ->
     boolean().
@@ -115,6 +124,9 @@ fresh({Actor, Cnt}) ->
 increment(Actor, Clock) ->
     ?BS_CLOCK:increment(Actor, Clock).
 
+get_counter(Actor, Clock) ->
+    ?BS_CLOCK:get_counter(Actor, Clock).
+
 get_dot(Actor, Clock) ->
     ?BS_CLOCK:get_dot(Actor, Clock).
 
@@ -133,6 +145,9 @@ add_dot(Dot, Clock) ->
 seen(Dot, Clock) ->
     ?BS_CLOCK:seen(Dot, Clock).
 
+subtract_seen(Clock, Dots) ->
+    ?BS_CLOCK:subtract_seen(Clock, Dots).
+
 descends(A, B) ->
     ?BS_CLOCK:descends(A, B).
 
@@ -150,6 +165,8 @@ tombstone_from_digest(Clock, Digest) ->
 
 -ifdef(EQC).
 
+clock_to_set(Clock) ->
+    ?BS_CLOCK:clock_to_set(Clock).
 
 -define(QC_OUT(P),
         eqc:on_output(fun(Str, Args) ->
@@ -323,9 +340,12 @@ prop_increment(Mod) ->
                                              {new_cntr, equals(NewCntr, Mod:get_counter(Actor, Clock2))}])
                             end))).
 
-gen_clocks(Mod) ->
+gen_clocks() ->
     ?LET(Events, gen_all_system_events(),
-         gen_clocks(Events, Mod)).
+         gen_clocks(Events, ?BS_CLOCK)).
+
+gen_clocks(Events) ->
+    gen_clocks(Events, ?BS_CLOCK).
 
 gen_clocks(Events, Mod) ->
     [{Actor, gen_clock(Me, Events, Mod)} || {Actor, _}=Me <- Events].
