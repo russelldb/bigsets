@@ -203,7 +203,7 @@ subtract(A, B) ->
                                VComp = (VA band (bnot VB)),
                                array:set(I, VComp, Comp)
                        end,
-                       array:new(),
+                       new(10),
                        A).
 
 %% @doc given a `range()' and a `bit_array()' returns a `bit_array()'
