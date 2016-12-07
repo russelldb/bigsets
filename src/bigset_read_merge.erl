@@ -234,54 +234,6 @@ repair_remove_test() ->
     Actual = repair_remove(2, <<"e1">>, {a, 2}, []),
     ?assertEqual(Expected, Actual).
 
-%% just check that expected repairs come back, ideally this should be
-%% quickchecked!
-merge_test() ->
-    Clock1 = {[{a, 10}, {b, 3}, {d, 4}], %%base vv of clock1
-              [{b, [5,6]}, {c, [13]}, {d, [6,7]}]}, %% dot cloud 1
-    Set1 = {1, %% partition 1
-            Clock1,
-            [{<<"element1">>, [{a, 8}, {b, 5}]},
-             {<<"element3">>, [{a, 1}, {c, 13}]},
-             {<<"element4">>, [{a, 3}, {d, 1}]},
-             {<<"element6">>, [{a, 10}]}] %% elements 1
-           },
-
-    Clock2 = {[{a, 5}, {c, 16}, {b, 7}, {d, 2}], %%base vv of clock2
-              [{a, [8]}]}, %% dot cloud 2
-    Set2 = {2, %% partition 2
-            Clock2,
-            [{<<"element1">>, [{a, 8}, {b, 5}]},
-             {<<"element2">>, [{a, 4}, {d, 2}, {c, 15}]},
-             {<<"element4">>, [{a, 3}, {c, 5}]},
-             {<<"element5">>, [{c, 16}]}] %% elements 2
-           },
-
-    %% we expect a repair entry for both partitions
-    ExpectedRepairs =   [{1,[{<<"element2">>,{[{c,15}],[]}},
-                             {<<"element3">>,{[],[{a,1},{c,13}]}},
-                             {<<"element4">>,{[{c,5}],[{d,1}]}},
-                             {<<"element5">>,{[{c,16}],[]}}]},
-                         {2,
-                          [{<<"element2">>,{[],[{a,4},{d,2}]}},
-                           {<<"element6">>,{[{a,10}],[]}}]}],
-
-    ExpectedClock = bigset_clock:merge(Clock1, Clock2),
-    ExpectedElements = [{<<"element1">>, [{a, 8}, {b, 5}]}, %%both
-                        {<<"element2">>, [{c, 15}]}, %% one remaining dot from 2
-                        {<<"element4">>, [{a, 3}, {c, 5}]}, %% one remaining dot from 2 and 1 new one
-                        {<<"element5">>, [{c, 16}]}, %% in set 2
-                        {<<"element6">>, [{a, 10}]} %% in set 1
-                       ],
-
-    {Repairs, {Id, Clock, Elements}} = merge_sets([Set1, Set2]),
-
-    ?assertEqual([1,2], Id),
-    ?assertEqual(ExpectedRepairs, lists:sort(Repairs)),
-    ?assertEqual(ExpectedClock, Clock),
-    ?assertEqual(ExpectedElements, Elements).
-
-
 old_repair_to_new_repair(Repairs) ->
     lists:map(fun({P, A, R}) ->
                       {P, old_to_new(A, R)}
@@ -313,10 +265,17 @@ old_to_new(A, R) ->
         eqc:on_output(fun(Str, Args) ->
                               io:format(user, Str, Args) end, P)).
 
+
 eqc_test_() ->
-    {timeout, 60, [
-                   ?_assertEqual(true, eqc:quickcheck(eqc:testing_time(30, ?QC_OUT(prop_repair()))))
-                  ]}.
+    TestList = [
+                {10, fun prop_diverges/0},
+                {30, fun prop_repair/0}
+               ],
+
+    {timeout, 60*length(TestList), [
+                                    {timeout, 60, ?_assertEqual(true,
+                                                                eqc:quickcheck(eqc:testing_time(Time, ?QC_OUT(Prop()))))} ||
+                                       {Time, Prop} <- TestList]}.
 
 run() ->
     run(?NUMTESTS).

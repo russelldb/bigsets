@@ -16,25 +16,26 @@
 -endif.
 
 -export([
+         add_range/2,
+         compact_contiguous/2,
          from_list/1,
          from_range/1,
-         add_range/2,
          get/2,
+         intersection/2,
          is_empty/1,
          is_subset/2,
-         intersection/2,
          member/2,
-         union/2,
          new/1,
+         range_subtract/2,
          resize/1,
          set/2,
          set_all/2,
          size/1,
-         to_list/1,
-         unset/2,
          subtract/2,
          subtract_range/2,
-         range_subtract/2
+         to_list/1,
+         union/2,
+         unset/2
         ]).
 
 -export_type([bit_array/0]).
@@ -360,8 +361,7 @@ set_word_to(Hi, A) ->
     apply_smask(Mask, Hi div ?W, A).
 
 set_word_from(Lo, A) ->
-    M = (1 bsl (?W - (Lo rem ?W))) -1,
-    Mask = M bsl (Lo rem ?W),
+    Mask = set_from_mask(Lo),
     apply_smask(Mask, Lo div ?W, A).
 
 set_from_mask(Lo) ->
