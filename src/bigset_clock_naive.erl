@@ -12,7 +12,9 @@
 
 -export([
          add_dot/2,
+         add_dot/3,
          all_nodes/1,
+         compact/1,
          descends/2,
          dominates/2,
          equal/2,
@@ -110,9 +112,19 @@ from_vv(Clock) ->
 %% gapped dots. If adding this dot closes some gaps, the seen set is
 %% compressed onto the clock.
 -spec add_dot(dot(), clock()) -> clock().
-add_dot(Dot, {Clock, Seen}) ->
+add_dot(Dot, Clock) ->
+    add_dot(Dot, Clock, true).
+
+-spec add_dot(dot(), clock(), boolean()) -> clock().
+add_dot(Dot, {Clock, Seen}, Compact) ->
     Seen2 = add_dot_to_cloud(Dot, Seen),
-    compress_seen(Clock, Seen2).
+    if Compact ->  compress_seen(Clock, Seen2);
+       true -> {Clock, Seen2}
+    end.
+
+
+compact({Clock, Seen}) ->
+    compress_seen(Clock, Seen).
 
 add_dot_to_cloud({Actor, Cnt}, Cloud) ->
     ?DICT:update(Actor,

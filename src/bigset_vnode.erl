@@ -478,19 +478,20 @@ gen_inserts(Set, Inserts, Id, Clock, CtxDecoder) ->
 %% generate a delete key for it. Otherwise, add the dot to `Clock' so
 %% we never write that key.
 remove_seen(Set, Element, Dots, Clock, Acc) ->
-    lists:foldl(fun({A,C}=Dot, {ClockAcc, DelKeys}) ->
-                        case bigset_clock:seen(Dot, ClockAcc) of
-                            true ->
-                                Key = bigset_keys:insert_member_key(Set, Element, A, C),
-                                {ClockAcc,
-                                 [{delete, Key} | DelKeys]};
-                            false ->
-                                {bigset_clock:add_dot(Dot, ClockAcc),
-                                 DelKeys}
-                        end
-                end,
-                {Clock, Acc},
-                Dots).
+    {Clock2, Writes} = lists:foldl(fun({A,C}=Dot, {ClockAcc, DelKeys}) ->
+                                           case bigset_clock:seen(Dot, ClockAcc) of
+                                               true ->
+                                                   Key = bigset_keys:insert_member_key(Set, Element, A, C),
+                                                   {ClockAcc,
+                                                    [{delete, Key} | DelKeys]};
+                                               false ->
+                                                   {bigset_clock:add_dot(Dot, ClockAcc),
+                                                    DelKeys}
+                                           end
+                                   end,
+                                   {Clock, Acc},
+                                   Dots),
+    {bigset_clock:compact(Clock2), Writes}.
 
 %% @private gen_removes: Generate a list of `{delete, Key::binary()}'
 %% to be deleted by the remove. @TODO(rdb) Removes can be broadcast
@@ -574,11 +575,12 @@ replica_inserts(Clock0, Elements) ->
                         {Clock2, Writes};
                     false ->
                         %% Add the dot to the clock
-                        Clock3 = bigset_clock:add_dot(Dot, Clock2),
+                        Clock3 = bigset_clock:add_dot(Dot, Clock2, false),
                         {Clock3, [{put, Key, <<>>} | Writes]}
                 end
         end,
-    lists:foldl(F, {Clock0, []}, Elements).
+    {UpdatedClock, WritesFinal} = lists:foldl(F, {Clock0, []}, Elements),
+    {bigset_clock:compact(UpdatedClock), WritesFinal}.
 
 %% @private add the dots from `Rems' to the causal information. return
 %% the updated causal information.

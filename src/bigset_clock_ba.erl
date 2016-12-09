@@ -11,6 +11,8 @@
 
 -export([
          add_dot/2,
+         add_dot/3,
+         compact/1,
          add_dots/2,
          all_nodes/1,
          tombstone_from_digest/2,
@@ -130,6 +132,16 @@ merge(Clocks) ->
 add_dot(Dot, {Clock, Seen}) ->
     Seen2 = add_dot_to_cloud(Dot, Seen),
     compress_seen(Clock, Seen2).
+
+-spec add_dot(dot(), clock(), boolean()) -> clock().
+add_dot(Dot, {Clock, Seen}, Compact) ->
+    Seen2 = add_dot_to_cloud(Dot, Seen),
+    if Compact -> compress_seen(Clock, Seen2);
+       true -> {Clock, Seen2}
+    end.
+
+compact({Clock, Seen}) ->
+    compress_seen(Clock, Seen).
 
 %% @private
 -spec add_dot_to_cloud(dot(), dot_cloud()) -> dot_cloud().

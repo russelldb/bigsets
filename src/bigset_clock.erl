@@ -23,8 +23,10 @@
 
 -export([
          add_dot/2,
+         add_dot/3,
          all_nodes/1,
          clock_mod/0,
+         compact/1,
          descends/2,
          dominates/2,
          equal/2,
@@ -69,6 +71,12 @@
     clock().
 
 -callback add_dot(dot(), clock()) ->
+    clock().
+
+-callback add_dot(dot(), clock(), Compact::boolean()) ->
+    clock().
+
+-callback compact(clock()) ->
     clock().
 
 -callback seen(dot(), clock()) ->
@@ -141,6 +149,12 @@ merge(Clocks) ->
 
 add_dot(Dot, Clock) ->
     ?BS_CLOCK:add_dot(Dot, Clock).
+
+add_dot(Dot, Clock, Compact) ->
+    ?BS_CLOCK:add_dot(Dot, Clock, Compact).
+
+compact(Clock) ->
+    ?BS_CLOCK:compact(Clock).
 
 seen(Dot, Clock) ->
     ?BS_CLOCK:seen(Dot, Clock).
