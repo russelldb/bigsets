@@ -239,10 +239,10 @@ compact_contiguous(N, Array) ->
 unset_contiguous_with(N, BA) ->
     %% TODO eqc never hits the "full word" option. Unit test?
     try
-        array:sparse_foldl(fun(Index, ?FULL_WORD, {_M, Acc}) ->
-                                   {(Index*?W)+(?W-1), array:reset(Index, Acc)};
-                              (Index, _Value, {M, Acc}) when ((M+1) div ?W) < Index ->
+        array:sparse_foldl(fun(Index, _Value, {M, Acc}) when ((M+1) div ?W) < Index ->
                                    throw({break, {M, Acc}});
+                              (Index, ?FULL_WORD, {_M, Acc}) ->
+                                   {(Index*?W)+(?W-1), array:reset(Index, Acc)};
                               (Index, Value, {M, Acc})  ->
                                    %% all bits up to and including N
                                    %% are unset, this is not a fully

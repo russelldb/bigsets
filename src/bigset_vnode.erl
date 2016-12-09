@@ -78,6 +78,13 @@ dump_db(Set) ->
                                    {fsm, undefined, self()},
                                    bigset_vnode_master).
 
+dump_db(Set, Cmd) ->
+    PL = bigset:preflist(Set),
+    riak_core_vnode_master:command(PL,
+                                   {dump_db, Cmd},
+                                   {fsm, undefined, self()},
+                                   bigset_vnode_master).
+
 %% @doc handle the downstream replication operation
 replicate(PrefList, Req=?REPLICATE_REQ{}) ->
     riak_core_vnode_master:command(PrefList,
@@ -142,6 +149,30 @@ handle_command(dump_db, _Sender, State) ->
               end,
     Acc =  eleveldb:fold(DB, FoldFun, [], [?FOLD_OPTS]),
     {reply, {ok, P, lists:reverse(Acc)}, State};
+handle_command({dump_db,count}, _Sender, State) ->
+    #state{db=DB, partition=P} = State,
+
+    FoldFun = fun({_K, <<>>}, {C, Acc}) ->
+                      {C, Acc+1};
+                 ({_K, V}, {_, Acc}) ->
+                      {V, Acc}
+              end,
+    Acc =  eleveldb:fold(DB, FoldFun, {undefined, 0}, [?FOLD_OPTS]),
+    {reply, {ok, P, Acc}, State};
+handle_command({dump_db, dots}, _Sender, State) ->
+    #state{db=DB, partition=P} = State,
+
+    FoldFun = fun({K, <<>>}, {C, Acc}) ->
+                      case  bigset_keys:decode_key(K) of
+                          {element, _S, _E, A, Cnt} ->
+                              {C, [{A, Cnt} | Acc]};
+                          _ -> {C, Acc}
+                      end;
+                 ({K, V}, {_, Acc}) ->
+                      {{bigset_keys:decode_key(K), binary_to_term(V)}, Acc}
+              end,
+    Acc =  eleveldb:fold(DB, FoldFun, {undefined, []}, [?FOLD_OPTS]),
+    {reply, {ok, P, Acc}, State};
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%% Coordinate write
