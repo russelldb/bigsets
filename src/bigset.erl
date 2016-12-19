@@ -110,6 +110,24 @@ stream_read(S, Client) ->
     Monitor = erlang:monitor(process, Pid),
     stream_receive_loop(ReqId, Pid, Monitor, {0, undefined}).
 
+rem_stream_rec_loop(ReqId, Pid, Cnt) ->
+    if Cnt rem (1000*1000) == 0 -> io:format("progress ~p~n", [Cnt]);
+       true -> ok
+    end,
+    receive
+        {ReqId, done} ->
+            {ok, Cnt};
+        {ReqId, {error, Error}} ->
+            {error, {Error, Cnt}};
+        {ReqId, {ok, {elems, E}}}  ->
+            rem_stream_rec_loop(ReqId, Pid, Cnt+length(E));
+        Other ->
+            io:format("huh ~p~n", [Other]),
+            rem_stream_rec_loop(ReqId, Pid, Cnt)
+    after 60000 ->
+           {error, stream_timeout, Cnt}
+    end.
+
 stream_receive_loop(ReqId, Pid, Monitor, {Cnt, Ctx}) ->
     receive
         {ReqId, done} ->
