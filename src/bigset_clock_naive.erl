@@ -245,6 +245,7 @@ get_contiguous_counter(Actor, {Clock, _Dots}=C) ->
 contiguous_seen({VV, _Seen}, Dot) ->
     riak_dt_vclock:descends(VV, [Dot]).
 
+-spec compress_seen(clock(), dotcloud()) -> clock().
 compress_seen(Clock, Seen) ->
     ?DICT:fold(fun(Node, Cnts, {ClockAcc, SeenAcc}) ->
                         Cnt = riak_dt_vclock:get_counter(Node, Clock),

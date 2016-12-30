@@ -41,7 +41,6 @@
 -type result() :: {message(), partition(), from()}.
 -type message() :: not_found | {set, clock(), elements(), done}.
 -type from() :: {pid(), reference()}.
--type clock() :: bigset_clock:clock().
 -type reqid() :: term().
 
 -define(DEFAULT_TIMEOUT, 60000).

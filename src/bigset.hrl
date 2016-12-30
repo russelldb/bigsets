@@ -7,11 +7,12 @@
 -type clock_key() :: {clock, set(), actor()}.
 -type end_key() :: {end_key, set()}.
 -type element_key() :: {element, set(), member(), actor(), non_neg_integer()}.
--type dot() :: bigset_clock:dot().
+-type dot() :: ?BS_CLOCK:dot().
+-type clock() :: ?BS_CLOCK:clock().
 -type dot_list() :: [dot()].
 -type ctx() :: binary().
 -type add() :: {member(), ctx()} | member().
--type adds() :: {member(), ctx()}.
+-type adds() :: [add()].
 -type remove() :: {member(), ctx()} | member().
 -type removes() :: [remove()].
 -type db() :: eleveldb:db_ref().

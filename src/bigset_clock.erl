@@ -1,17 +1,12 @@
 %%% @author Russell Brown <russelldb@basho.com>
 %%% @copyright (C) 2016, Russell Brown
 %%% @doc
-%%% @TODO interface/behaviour
-%%% @TODO eqc generalise
-%%% @TODO types
 %%% @TODO docs
 %%% @end
 
 -module(bigset_clock).
 
 -include("bigset.hrl").
-
--export_type([clock/0, dot/0]).
 
 -ifdef(EQC).
 -include_lib("eqc/include/eqc.hrl").
@@ -44,8 +39,6 @@
         ]).
 
 
--type clock() :: bigset_clock_naive:clock() | bigset_clock_ba:clock().
-
 -callback fresh() ->
     clock().
 
@@ -53,7 +46,7 @@
     clock().
 
 -callback increment(actor(), clock()) ->
-    clock().
+    {dot(), clock()}.
 
 -callback get_counter(actor(), clock()) ->
     non_neg_integer().
@@ -89,7 +82,7 @@
     boolean().
 
 -callback equal(clock(), clock()) ->
-    clock().
+    boolean().
 
 -callback dominates(clock(), clock()) ->
     boolean().
@@ -123,6 +116,7 @@
 clock_mod() ->
     ?BS_CLOCK.
 
+-spec fresh() -> clock().
 fresh() ->
     ?BS_CLOCK:fresh().
 
@@ -141,9 +135,11 @@ get_dot(Actor, Clock) ->
 all_nodes(Clock) ->
     ?BS_CLOCK:all_nodes(Clock).
 
+-spec merge(clock(), clock()) -> clock().
 merge(Clock1, Clock2) ->
     ?BS_CLOCK:merge(Clock1, Clock2).
 
+-spec merge([clock()]) -> clock().
 merge(Clocks) ->
     ?BS_CLOCK:merge(Clocks).
 

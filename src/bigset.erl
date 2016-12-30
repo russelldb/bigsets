@@ -21,28 +21,6 @@ dev_client() ->
 make_client(Node) ->
     bigset_client:new(Node).
 
-add_read() ->
-    add_read(<<"rdb">>).
-
-add_read(E) ->
-    add_read(<<"m">>, E).
-
-add_read(S, E) ->
-    lager:debug("Adding to set~n"),
-    ok = bigset_client:update(S, [E]),
-    lager:debug("reading from set~n"),
-    Res = bigset_client:read(S, []),
-    lager:debug("Read result ~p~n", [Res]).
-
-add_all(Es) ->
-    add_all(<<"m">>, Es).
-
-add_all(S, Es) ->
-    ok = bigset_client:update(S, Es),
-    lager:debug("reading from set~n"),
-    Res = bigset_client:read(S, []),
-    lager:debug("Read result ~p~n", [Res]).
-
 make_bigset(Set, N) ->
     Words = read_words(N*2),
 
@@ -98,12 +76,11 @@ add(S, E) ->
     lager:debug("Adding to set~n"),
     ok = bigset_client:update(S, [E]).
 
-stream_read() ->
-    stream_read(<<"m">>).
-
+-spec stream_read(set()) -> term().
 stream_read(S) ->
     stream_read(S, bigset_client:new()).
 
+-spec stream_read(set(), bigset_client:client()) -> term().
 stream_read(S, Client) ->
     lager:debug("stream reading from set~n"),
     {ok, ReqId, Pid} = bigset_client:stream_read(S, [], Client),
@@ -164,28 +141,32 @@ bm_read(Set, N) ->
 
 %% @doc get the tombstone at `TombstoneKey' from leveldb instance
 %% `DB'. Returns a `bigset_clock:clock()'
--spec get_tombstone(TombstoneKey::binary(), db()) -> bigset_clock:clock().
+-spec get_tombstone(TombstoneKey::binary(), db()) ->
+                           clock().
 get_tombstone(TombstoneKey, DB) ->
     {_, TS} = get_clock(TombstoneKey, DB),
     TS.
 
 %% @doc get the actor `Id's tombstone for `Set' from leveldb instance
 %% `DB'. Returns a `bigset_clock:clock()'
--spec get_tombstone(set(), actor(), db()) -> bigset_clock:clock().
+-spec get_tombstone(Set::binary(), Id::binary(), db()) ->
+                           clock().
 get_tombstone(Set, Id, DB) ->
     TombstoneKey = bigset_keys:tombstone_key(Set, Id),
     get_tombstone(TombstoneKey, DB).
 
--spec get_clock(ClockKey::binary(), db()) -> {boolean(), bigset_clock:clock()}.
+-spec get_clock(ClockKey::binary(), db()) ->
+                       {boolean(), clock()}.
 get_clock(ClockKey, DB) when is_binary(ClockKey)  ->
     clock(eleveldb:get(DB, ClockKey, ?READ_OPTS)).
 
--spec get_clock(set(), actor(), db()) -> {boolean(), bigset_clock:clock()}.
+-spec get_clock(Set::binary(), Id::binary(), db()) ->
+                       {boolean(), clock()}.
 get_clock(Set, Id, DB) ->
     ClockKey = bigset_keys:clock_key(Set, Id),
     get_clock(ClockKey, DB).
 
--spec clock(not_found | {ok, binary()}) -> {boolean(), bigset_clock:clock()}.
+-spec clock(not_found | {ok, binary()}) -> {boolean(), clock()}.
 clock(not_found) ->
     %% @TODO(rdb|correct) -> is this _really_ OK, what if we _know_
     %% (how?) the set exists, a missing clock is bad. At least have
@@ -207,13 +188,13 @@ read_words(N) ->
     words_to_list(file:read_line(FD), FD, N, []).
 
 words_to_list(_, FD, 0, Acc) ->
-    file:close(FD),
+    ok = file:close(FD),
     lists:reverse(Acc);
 words_to_list(eof, FD, _N, Acc) ->
-    file:close(FD),
+    ok = file:close(FD),
     lists:reverse(Acc);
 words_to_list({error, Reason}, FD, _N, Acc) ->
-    file:close(FD),
+    ok = file:close(FD),
     io:format("Error ~p Got ~p words~n", [Reason, length(Acc)]),
     lists:reverse(Acc);
 words_to_list({ok, Word0}, FD, N ,Acc) ->

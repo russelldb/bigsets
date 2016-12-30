@@ -52,7 +52,8 @@ new(Node) ->
 
 
 -spec is_subset(set(), [member()]) ->
-                       [{member(), ctx()}].
+                       {ok, [{member(), ctx()}]} |
+                       {error, Reason::term()}.
 is_subset(Set, Members) ->
     is_subset(Set, Members, [], new()).
 
@@ -60,18 +61,20 @@ is_subset(Set, Members, Options, {?MODULE, Node}) ->
     Me = self(),
     ReqId = mk_reqid(),
     Request = ?QUERY_FSM_ARGS{req_id=ReqId,
-                             from=Me,
-                             set=Set,
-                             members=Members,
-                             options=Options},
+                              from=Me,
+                              set=Set,
+                              members=Members,
+                              options=Options},
 
-    case node() of
-        Node ->
-            bigset_query_fsm:start_link(Request);
-        _ ->
-            proc_lib:spawn_link(Node, bigset_query_fsm, start_link,
-                                [Request])
-    end,
+    ok = case node() of
+             Node ->
+                 {ok, _Pid} = bigset_query_fsm:start_link(Request),
+                 ok;
+             _ ->
+                 _Pid = proc_lib:spawn_link(Node, bigset_query_fsm, start_link,
+                                            [Request]),
+                 ok
+         end,
     Timeout = recv_timeout(Options),
     Res = wait_for_query(ReqId, Timeout),
     Res.
@@ -90,19 +93,19 @@ is_member(Set, Member) ->
 is_member(Set, Member, Options, {?MODULE, _Node}=This) ->
     is_subset(Set, [Member], Options, This).
 
--spec update(set(), adds()) ->
+-spec update(Set::binary(), adds()) ->
                     ok | {error, Reason :: term()}.
 update(Set, Adds) ->
     update(Set, Adds, [], [], new()).
 
 
--spec update(set(), adds(), client()) ->
+-spec update(Set::binary(), adds(), client()) ->
                     ok | {error, Reason :: term()}.
 update(Set, Adds, {?MODULE, _Node}=This) ->
     update(Set, Adds, [], [], This).
 
 %% @doc update a Set
--spec update(set(),
+-spec update(Set::binary(),
              adds(),
              removes(),
              Options :: proplists:proplist(),
@@ -113,12 +116,14 @@ update(Set, Adds, Removes, Options, {?MODULE, Node}) ->
     ReqId = mk_reqid(),
     Ctx = proplists:get_value(ctx, Options),
     Op = ?OP{set=Set, inserts=Adds, removes=Removes, ctx=Ctx},
-    case node() of
-        Node ->
-            bigset_write_fsm:start_link(ReqId, Me, Set, Op, Options);
-        _ ->
-            proc_lib:spawn_link(Node, bigset_write_fsm, start_link, [ReqId, Me, Set, Op, Options])
-    end,
+    ok = case node() of
+             Node ->
+                 {ok, _Pid} = bigset_write_fsm:start_link(ReqId, Me, Set, Op, Options),
+                 ok;
+             _ ->
+                 _Pid =proc_lib:spawn_link(Node, bigset_write_fsm, start_link, [ReqId, Me, Set, Op, Options]),
+                 ok
+         end,
     Timeout = recv_timeout(Options),
     wait_for_reqid(ReqId, Timeout).
 
@@ -147,10 +152,12 @@ read(Set, Options, {?MODULE, Node}) ->
 
     case node() of
         Node ->
-            bigset_read_fsm:start_link(Request);
+            {ok, _Pid} = bigset_read_fsm:start_link(Request),
+            ok;
         _ ->
-            proc_lib:spawn_link(Node, bigset_read_fsm, start_link,
-                                [Request])
+            _Pid = proc_lib:spawn_link(Node, bigset_read_fsm, start_link,
+                                       [Request]),
+            ok
     end,
     Timeout = recv_timeout(Options),
     Res = wait_for_read(ReqId, Timeout),
@@ -264,8 +271,7 @@ validate_read_options([end_inclusive | Opts], Errs) ->
 -spec validate_range_options(none | {range_start, binary()},
                              none | {range_end, binary()},
                              Errors :: list()) ->
-                                    {Errors :: list(),
-                                     RemainingOpts :: proplists:proplist()}.
+                                    Errors :: list().
 validate_range_options({range_start, Start}, none, Errs) when is_binary(Start) ->
     Errs;
 validate_range_options(none, {range_end, End}, Errs) when is_binary(End) ->

@@ -44,9 +44,12 @@
 -define(W, 128).
 -define(FULL_WORD, ((1 bsl ?W) -1)).
 
+-record(bit_array, {word_size=?W,
+                    array :: array:array(bit())}).
+
 -type bit() :: 0 | 1.
--type bit_array() :: array:array(bit()).
--type range() :: {pos_integer(), pos_integer()}.
+-type bit_array() :: #bit_array{}.
+-type range() :: {non_neg_integer(), non_neg_integer()}.
 
 %%%===================================================================
 %%% bitarray
@@ -54,7 +57,8 @@
 
 -spec new(integer()) -> bit_array().
 new(N) ->
-     array:new([{size, (N-1) div ?W + 1}, {default, 0}, {fixed, false}]).
+    A = array:new([{size, (N-1) div ?W + 1}, {default, 0}, {fixed, false}]),
+    #bit_array{array=A}.
 
 %% @doc create a bitset from a range, inclusive
 -spec from_range(range()) -> bit_array().
@@ -82,54 +86,60 @@ add_range({Lo, Hi}, A) when Lo =< Hi ->
     set_range((Lo div ?W) +1, (Hi div ?W) -1, A3).
 
 -spec set(integer(), bit_array()) -> bit_array().
-set(I, A) ->
-    AI = I div ?W,
+set(I, BA) ->
+    #bit_array{word_size=W, array=A} = BA,
+    AI = I div W,
     V = array:get(AI, A),
-    V1 = V bor (1 bsl (I rem ?W)),
-    array:set(AI, V1, A).
+    V1 = V bor (1 bsl (I rem W)),
+    BA#bit_array{array=array:set(AI, V1, A)}.
 
 -spec unset(pos_integer(), bit_array()) -> bit_array().
-unset(I, A) ->
-    AI = I div ?W,
+unset(I, BA) ->
+    #bit_array{word_size=W, array=A} = BA,
+    AI = I div W,
     V = array:get(AI, A),
     V1 = V band (bnot (1 bsl (I rem ?W))),
-    array:set(AI, V1, A).
+    BA#bit_array{array=array:set(AI, V1, A)}.
 
 -spec set_all([pos_integer()], bit_array()) -> bit_array().
-set_all(Ints, A) ->
+set_all(Ints, BA) ->
     lists:foldl(fun(I, Acc) ->
                         set(I, Acc)
                 end,
-                A,
+                BA,
                 Ints).
 
 -spec get(integer(), bit_array()) -> boolean().
-get(I, A) ->
-    AI = I div ?W,
+get(I, BA) ->
+    #bit_array{word_size=W, array=A} = BA,
+    AI = I div W,
     V = array:get(AI, A),
-    V band (1 bsl (I rem ?W)) =/= 0.
+    V band (1 bsl (I rem W)) =/= 0.
 
--spec size(bit_array()) -> pos_integer().
-size(A) ->
+-spec size(bit_array()) -> non_neg_integer().
+size(BA) ->
+    #bit_array{word_size=W, array=A} = BA,
     array:sparse_foldl(fun(I, V, Acc) ->
-                              cnt(V, I * ?W, Acc)
+                              cnt(V, I * W, Acc)
                       end,
                       0,
                       A).
 
 -spec is_empty(bit_array()) -> boolean().
-is_empty(A) ->
+is_empty(BA) ->
+    #bit_array{array=A} = BA,
     array:sparse_size(A) == 0.
 
 -spec member(pos_integer(), bit_array()) -> boolean().
-member(I, A) ->
-    get(I, A).
+member(I, BA) ->
+    get(I, BA).
 
 -spec to_list(bit_array()) -> [integer()].
-to_list(A) ->
+to_list(BA) ->
+    #bit_array{word_size=W, array=A} = BA,
     lists:reverse(
       array:sparse_foldl(fun(I, V, Acc) ->
-                                 expand(V, I * ?W, Acc)
+                                 expand(V, I * W, Acc)
                          end, [], A)).
 
 from_list([]) ->
@@ -141,41 +151,47 @@ from_list(L) ->
 %% @doc union two bit_arrays into a single bit_array. Set
 %% union. NOTE: this assumes the same word size!
 -spec union(bit_array(), bit_array()) -> bit_array().
-union(A, B) ->
+union(BA1, BA2) ->
+    #bit_array{word_size=W, array=A} = BA1,
+    #bit_array{word_size=W, array=B} = BA2,
     NewSize = max(array:sparse_size(A), array:sparse_size(B)),
     %% Assume same size words
     {MergedA, RemainingB0} = array:sparse_foldl(fun(I, VA, {MergedA, RemainingB}) ->
-                                                       VB = array:get(I, B),
-                                                       MergedV = VA bor VB,
-                                                       {array:set(I, MergedV, MergedA),
-                                                        array:reset(I, RemainingB)}
-                                               end,
-                                               {new(NewSize), B},
-                                               A),
+                                                        VB = array:get(I, B),
+                                                        MergedV = VA bor VB,
+                                                        {array:set(I, MergedV, MergedA),
+                                                         array:reset(I, RemainingB)}
+                                                end,
+                                                {new(NewSize), B},
+                                                A),
     RemainingB = array:resize(RemainingB0),
-    array:sparse_foldl(fun(I, VB, Acc) ->
-                               array:set(I, VB, Acc)
-                       end,
-                       RemainingB,
-                       MergedA).
+    U = array:sparse_foldl(fun(I, VB, Acc) ->
+                                   array:set(I, VB, Acc)
+                           end,
+                           RemainingB,
+                           MergedA),
+    #bit_array{word_size=W, array=U}.
 
 %% @doc intersection of two bit_arrays (TODO let's rename this to
 %% bitset, eh?). NOTE: also assumes same word size!
 -spec intersection(bit_array(), bit_array()) -> bit_array().
-intersection(A, B) ->
+intersection(BA1, BA2) ->
+    #bit_array{word_size=W, array=A} = BA1,
+    #bit_array{word_size=W, array=B} = BA2,
     {SizeA , SizeB} = {array:sparse_size(A), array:sparse_size(B)},
     NewSize = min(SizeA, SizeB),
     %% fold the smallest
     {LHS, RHS} = if SizeA =< SizeB -> {A, B};
                     true -> {B, A} end,
     Res = array:sparse_foldl(fun(I, V0, Acc) ->
-                                     W = array:get(I, RHS),
-                                     V = W band V0,
+                                     Word = array:get(I, RHS),
+                                     V = Word band V0,
                                      array:set(I, V, Acc)
                              end,
                              new(NewSize),
                              LHS),
-    resize(Res).
+    Intersection = resize(Res),
+    #bit_array{word_size=?W, array=Intersection}.
 
 %% @doc return true if `A' is a subset of `B', false otherwise.
 -spec is_subset(bit_array(), bit_array()) -> boolean().
@@ -222,8 +238,8 @@ range_subtract(Range, B) ->
 %% everything that is contiguous with `N'. Return the highest removed
 %% set bit, and the new bit_array. In clock terms we expect `N' to
 %% represent the highest base event seen by an actor.
--spec compact_contiguous(pos_integer(), bit_array()) ->
-                                {pos_integer(), bit_array()}.
+-spec compact_contiguous(non_neg_integer(), bit_array()) ->
+                                {non_neg_integer(), bit_array()}.
 compact_contiguous(N, Array) ->
     %% this removes all up to N
     BA = subtract_range(Array, {0, N}),
