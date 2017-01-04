@@ -42,120 +42,220 @@
 
  %% @TODO What word size is "best"?
 -define(W, 128).
--define(FULL_WORD, ((1 bsl ?W) -1)).
+-define(FULL_WORD(W), ((1 bsl W) -1)).
+-define(FULL_WORD, ?FULL_WORD(?W)).
 
 -record(bit_array, {word_size=?W,
                     array :: array:array(bit())}).
 
 -type bit() :: 0 | 1.
+-type array() :: array:array(bit()).
 -type bit_array() :: #bit_array{}.
 -type range() :: {non_neg_integer(), non_neg_integer()}.
 
 %%%===================================================================
-%%% bitarray
+%%% bitarray API
 %%%===================================================================
 
+%%--------------------------------------------------------------------
+%% @doc
+%% create a new `bit_array()' with `N' slots. The word size will be
+%% the default, set in the macro `?W'.
+%% @end
+%%--------------------------------------------------------------------
 -spec new(integer()) -> bit_array().
 new(N) ->
-    A = array:new([{size, (N-1) div ?W + 1}, {default, 0}, {fixed, false}]),
-    #bit_array{array=A}.
+    A = array:new([{size, N}, {default, 0}, {fixed, false}]),
+    #bit_array{word_size=?W, array=A}.
 
-%% @doc create a bitset from a range, inclusive
+%%--------------------------------------------------------------------
+%% @doc
+%% create a bitset from a `Range'=`{Low, High}', inclusive. Returned
+%% bit_array will have the macro `?W' default word size
+%% @end
+%%--------------------------------------------------------------------
 -spec from_range(range()) -> bit_array().
-from_range(Range) ->
-    add_range(Range, new(10)).
+from_range({Low, Hi}=Range)->
+    Slots = (Hi - Low) div ?W,
+    add_range(Range, new(Slots)).
 
-%% @doc add a range to a bitset
+%%--------------------------------------------------------------------
+%% @doc
+%% Add the range `{Low, High}' to the bit_array `A'. Return the new
+%% bit_array.
+%% @end
+%%--------------------------------------------------------------------
 -spec add_range(range(), bit_array()) -> bit_array().
 add_range({Lo, Hi}, A) when Lo > Hi ->
     A;
 %% create an add mask for each word contained in the range full
-%% words are just (1 bsl ?W) -1.  part of a word is the bnot of
+%% words are just (1 bsl W) -1.  part of a word is the bnot of
 %% the range to unset a part used in subtract range.
-add_range({Lo, Hi}, A) when Lo =< Hi, (Lo div ?W) == (Hi div ?W) ->
+add_range({Lo, Hi}, BA=#bit_array{word_size=W, array=A})
+  when Lo =< Hi, (Lo div W) == (Hi div W) ->
     %% range is all in same word
-    set_word_from_to(Lo, Hi, A);
-add_range({Lo, Hi}, A) when Lo =< Hi, (Hi div ?W) - (Lo div ?W) == 1 ->
+    A2 = set_word_from_to(Lo, Hi, A, W),
+    BA#bit_array{array=A2};
+add_range({Lo, Hi}, BA=#bit_array{array=A, word_size=W})
+  when Lo =< Hi, (Hi div W) - (Lo div W) == 1 ->
     %% contiguous words
-    A2 = set_word_from(Lo, A),
-    set_word_to(Hi, A2);
-add_range({Lo, Hi}, A) when Lo =< Hi ->
+    A2 = set_word_from(Lo, A, W),
+    A3 = set_word_to(Hi, A2, W),
+    BA#bit_array{array=A3};
+add_range({Lo, Hi}, BA) when Lo =< Hi ->
     %% some full words to be set
-    A2 = set_word_from(Lo, A),
-    A3 = set_word_to(Hi, A2),
-    set_range((Lo div ?W) +1, (Hi div ?W) -1, A3).
+    #bit_array{word_size=W, array=A} = BA,
+    A2 = set_word_from(Lo, A, W),
+    A3 = set_word_to(Hi, A2, W),
+    A4 = set_range((Lo div W) +1, (Hi div W) -1, A3, W),
+    BA#bit_array{array=A4}.
 
+%%--------------------------------------------------------------------
+%% @doc
+%% Add the range `{Low, High}' to the bit_array `A'. Return the new
+%% bit_array.
+%% @end
+%%--------------------------------------------------------------------
+%% @doc return only the elements in `A' that are not in the range
+%% defined by `Range' inclusive.
+-spec subtract_range(bit_array(), range()) -> bit_array().
+subtract_range(BA=#bit_array{word_size=W, array=A}, {Lo, Hi})
+  when Lo =< Hi, (Lo div W) == (Hi div W) ->
+    %% range is all in same word
+    A2 = unset_word_from_to(Lo, Hi, A, W),
+    BA#bit_array{array=A2};
+subtract_range(BA=#bit_array{word_size=W, array=A}, {Lo, Hi})
+  when Lo =< Hi, (Hi div W) - (Lo div W) == 1 ->
+    %% contiguous words
+    A2 = unset_word_from(Lo, A, W),
+    A3 = unset_word_to(Hi, A2, W),
+    BA#bit_array{array=A3};
+subtract_range(BA=#bit_array{word_size=W, array=A}, {Lo, Hi})
+  when Lo =< Hi ->
+    %% some full words to be unset
+    A2 = unset_word_from(Lo, A, W),
+    A3 = unset_word_to(Hi, A2, W),
+    A4 = unset_range((Lo div W) +1, (Hi div W) -1, A3),
+    BA=#bit_array{array=A4};
+subtract_range(_Range, BA) ->
+    %% If Lo > Hi there is no range to subtract
+    BA.
+
+%%--------------------------------------------------------------------
+%% @doc
+%% set the bit at `I' in bit_array `BA' and return the new bit_array.
+%% @end
+%%--------------------------------------------------------------------
 -spec set(integer(), bit_array()) -> bit_array().
-set(I, BA) ->
+set(I, BA=#bit_array{}) ->
     #bit_array{word_size=W, array=A} = BA,
-    AI = I div W,
-    V = array:get(AI, A),
-    V1 = V bor (1 bsl (I rem W)),
-    BA#bit_array{array=array:set(AI, V1, A)}.
+    A2 = set(I, A, W),
+    BA#bit_array{array=A2}.
 
+%%--------------------------------------------------------------------
+%% @doc
+%% unset the bit at `I' in bit_array `BA' and return the new bit_array.
+%% @end
+%%--------------------------------------------------------------------
 -spec unset(pos_integer(), bit_array()) -> bit_array().
-unset(I, BA) ->
+unset(I, BA=#bit_array{}) ->
     #bit_array{word_size=W, array=A} = BA,
-    AI = I div W,
-    V = array:get(AI, A),
-    V1 = V band (bnot (1 bsl (I rem ?W))),
-    BA#bit_array{array=array:set(AI, V1, A)}.
+    A2 = unset(I, A, W),
+    BA#bit_array{array=A2}.
 
+%%--------------------------------------------------------------------
+%% @doc
+%% set the bits from the list of integers `Ints' in bit_array `BA' and
+%% return the new bit_array.
+%% @end
+%%--------------------------------------------------------------------
 -spec set_all([pos_integer()], bit_array()) -> bit_array().
-set_all(Ints, BA) ->
-    lists:foldl(fun(I, Acc) ->
-                        set(I, Acc)
-                end,
-                BA,
-                Ints).
+set_all(Ints, BA=#bit_array{}) ->
+    #bit_array{word_size=W, array=A} = BA,
+    A2 = lists:foldl(fun(I, Acc) ->
+                             set(I, Acc, W)
+                     end,
+                     A,
+                     Ints),
+    BA#bit_array{array=A2}.
 
+%%--------------------------------------------------------------------
+%% @doc
+%% Is the bit at `I' set in the bit_array `BA', returns true if so,
+%% false otherwise.
+%% @end
+%%--------------------------------------------------------------------
 -spec get(integer(), bit_array()) -> boolean().
-get(I, BA) ->
+get(I, BA=#bit_array{}) ->
     #bit_array{word_size=W, array=A} = BA,
-    AI = I div W,
-    V = array:get(AI, A),
-    V band (1 bsl (I rem W)) =/= 0.
+    get(I, A, W).
 
+%%--------------------------------------------------------------------
+%% @doc
+%% How many bits are set in the array. The bit set cardinality.
+%% @end
+%%--------------------------------------------------------------------
 -spec size(bit_array()) -> non_neg_integer().
-size(BA) ->
+size(BA=#bit_array{}) ->
     #bit_array{word_size=W, array=A} = BA,
-    array:sparse_foldl(fun(I, V, Acc) ->
-                              cnt(V, I * W, Acc)
-                      end,
-                      0,
-                      A).
+    size(A, W).
 
+%%--------------------------------------------------------------------
+%% @doc
+%% returns true if no bits are set, false otherwise.
+%% @end
+%%--------------------------------------------------------------------
 -spec is_empty(bit_array()) -> boolean().
-is_empty(BA) ->
+is_empty(BA=#bit_array{}) ->
     #bit_array{array=A} = BA,
     array:sparse_size(A) == 0.
 
+%%--------------------------------------------------------------------
+%% @doc
+%% synonym of `get/2' @see get/2
+%% @end
+%%--------------------------------------------------------------------
 -spec member(pos_integer(), bit_array()) -> boolean().
 member(I, BA) ->
     get(I, BA).
 
+%%--------------------------------------------------------------------
+%% @doc
+%% create a list of integers that represents all set bits in the
+%% bit_array `BA'
+%% @end
+%%--------------------------------------------------------------------
 -spec to_list(bit_array()) -> [integer()].
-to_list(BA) ->
+to_list(BA=#bit_array{}) ->
     #bit_array{word_size=W, array=A} = BA,
     lists:reverse(
       array:sparse_foldl(fun(I, V, Acc) ->
                                  expand(V, I * W, Acc)
                          end, [], A)).
 
+%%--------------------------------------------------------------------
+%% @doc
+%% create a new bit_array populate with the values in the given list
+%% of integers. Returns a bit_array with default word size.
+%% @end
+%%--------------------------------------------------------------------
+-spec from_list(list(non_neg_integer())) -> bit_array().
 from_list([]) ->
     new(10);
 from_list(L) ->
     set_all(L, new(lists:max(L))).
 
-
-%% @doc union two bit_arrays into a single bit_array. Set
-%% union. NOTE: this assumes the same word size!
+%%--------------------------------------------------------------------
+%% @doc
+%% union two bit_arrays into a single bit_array. Set union. NOTE: this
+%% requires both arrays have the same word size!
+%% @end
+%%--------------------------------------------------------------------
 -spec union(bit_array(), bit_array()) -> bit_array().
-union(BA1, BA2) ->
-    #bit_array{word_size=W, array=A} = BA1,
-    #bit_array{word_size=W, array=B} = BA2,
+union(BA1=#bit_array{word_size=W}, BA2=#bit_array{word_size=W}) ->
+    #bit_array{array=A} = BA1,
+    #bit_array{array=B} = BA2,
     NewSize = max(array:sparse_size(A), array:sparse_size(B)),
-    %% Assume same size words
     {MergedA, RemainingB0} = array:sparse_foldl(fun(I, VA, {MergedA, RemainingB}) ->
                                                         VB = array:get(I, B),
                                                         MergedV = VA bor VB,
@@ -172,12 +272,17 @@ union(BA1, BA2) ->
                            MergedA),
     #bit_array{word_size=W, array=U}.
 
-%% @doc intersection of two bit_arrays (TODO let's rename this to
-%% bitset, eh?). NOTE: also assumes same word size!
+%%--------------------------------------------------------------------
+%% @doc
+%% returns the intersection two bit_arrays as a single bit_array. Set
+%% intersection. NOTE: this requires both array have the same word
+%% size!
+%% @end
+%%--------------------------------------------------------------------
 -spec intersection(bit_array(), bit_array()) -> bit_array().
-intersection(BA1, BA2) ->
-    #bit_array{word_size=W, array=A} = BA1,
-    #bit_array{word_size=W, array=B} = BA2,
+intersection(BA1=#bit_array{word_size=W}, BA2=#bit_array{word_size=W}) ->
+    #bit_array{array=A} = BA1,
+    #bit_array{array=B} = BA2,
     {SizeA , SizeB} = {array:sparse_size(A), array:sparse_size(B)},
     NewSize = min(SizeA, SizeB),
     %% fold the smallest
@@ -191,14 +296,22 @@ intersection(BA1, BA2) ->
                              new(NewSize),
                              LHS),
     Intersection = resize(Res),
-    #bit_array{word_size=?W, array=Intersection}.
+    #bit_array{word_size=W, array=Intersection}.
 
-%% @doc return true if `A' is a subset of `B', false otherwise.
+%%--------------------------------------------------------------------
+%% @doc
+%% is_subset returns true if the bit_array `BA1' is a subset of the
+%% bit_array `BA2'. NOTE: this requires both array have the same word
+%% size!
+%% @end
+%%--------------------------------------------------------------------
 -spec is_subset(bit_array(), bit_array()) -> boolean().
-is_subset(A, B) ->
+is_subset(BA1=#bit_array{word_size=W}, BA2=#bit_array{word_size=W}) ->
     %% Assumes same word size. A ⊂ B = A ∪ B == B, right?  Fold over
     %% the words, and as soon as the union of any pair of words is not
     %% == to word, throw. We fold over A
+    #bit_array{array=A} = BA1,
+    #bit_array{array=B} = BA2,
     (catch array:sparse_foldl(fun(I, VA, true) ->
                                       VB = array:get(I, B),
                                       if (VA bor VB) == VB ->
@@ -210,236 +323,270 @@ is_subset(A, B) ->
                               true,
                               A)).
 
-%% @doc return only the elements in `A' that are not also elements of
-%% `B'.
+%%--------------------------------------------------------------------
+%% @doc
+%% subtract returns a bit_array containing only the elements in `BA1'
+%% that are not also elements of `BA2'. NOTE: this requires both array
+%% have the same word size!
+%% @end
+%%--------------------------------------------------------------------
 -spec subtract(bit_array(), bit_array()) -> bit_array().
-subtract(A, B) ->
-    %% Assumes same word size.
-    array:sparse_foldl(fun(I, VA, Comp) ->
-                               VB = array:get(I, B),
-                               VComp = (VA band (bnot VB)),
-                               array:set(I, VComp, Comp)
-                       end,
-                       new(10),
-                       A).
+subtract(BA1=#bit_array{word_size=W}, BA2=#bit_array{word_size=W}) ->
+    #bit_array{array=A} = BA1,
+    #bit_array{array=B} = BA2,
 
-%% @doc given a `range()' and a `bit_array()' returns a `bit_array()'
-%% of all the elements in `range()' that are not also in `B'. It's
-%% subtract(from_range(Range), B).
+    NewArray = array:sparse_foldl(fun(I, VA, Comp) ->
+                                          VB = array:get(I, B),
+                                          VComp = (VA band (bnot VB)),
+                                          array:set(I, VComp, Comp)
+                                  end,
+                                  new(10),
+                                  A),
+    #bit_array{word_size=W, array=NewArray}.
+
+%%--------------------------------------------------------------------
+%% @doc
+%% range_subtract given a `range()' and a `bit_array()' returns a
+%% `bit_array()' of all the elements in `range()' that are not also in
+%% `B'. It's subtract(from_range(Range), B). NOTE: returned array has
+%% `B's word size.
+%% @end
+%%--------------------------------------------------------------------
 -spec range_subtract(range(), bit_array()) -> bit_array().
-range_subtract(Range, B) ->
+range_subtract(Range, B=#bit_array{word_size=W}) ->
     %% @TODO for large contiguous ranges we can probably save the
     %% resources of building actual entries.
-    A = from_range(Range),
+    A = from_range(Range, W),
     subtract(A, B).
 
-%% @doc given a pos_integer() `N', remove everything in the
-%% bit_array() `Array' that is less than, or equal to `N'. Also remove
-%% everything that is contiguous with `N'. Return the highest removed
-%% set bit, and the new bit_array. In clock terms we expect `N' to
+%%--------------------------------------------------------------------
+%% @doc
+%% given a pos_integer() `N', remove everything in the bit_array()
+%% `Array' that is less than, or equal to `N'. Also remove everything
+%% that is contiguous with `N'. Return the highest removed set bit,
+%% and the new bit_array. In logical clock terms we expect `N' to
 %% represent the highest base event seen by an actor.
+%% @end
+%%--------------------------------------------------------------------
 -spec compact_contiguous(non_neg_integer(), bit_array()) ->
                                 {non_neg_integer(), bit_array()}.
-compact_contiguous(N, Array) ->
+compact_contiguous(N, Array=#bit_array{}) ->
     %% this removes all up to N
-    BA = subtract_range(Array, {0, N}),
+    BA=#bit_array{array=A, word_size=W} = subtract_range(Array, {0, N}),
     %% this removes all in sequence from N
-    unset_contiguous_with(N, BA).
+    {NewBase, NewArray} = unset_contiguous_with(N, A, W),
+    {NewBase, BA#bit_array{array=NewArray}}.
 
-%% @private kind of "find first unset" but unsets all up to
-%% first-unset and returns value of first-unset-1. Clears all the set
-%% bits contiguous with `N'. Called when all bits up to, and including
-%% `N' have been unset.
--spec unset_contiguous_with(pos_integer(), bit_array()) ->
-                              {pos_integer(), bit_array()}.
-unset_contiguous_with(N, BA) ->
-    %% TODO eqc never hits the "full word" option. Unit test?
-    try
-        array:sparse_foldl(fun(Index, _Value, {M, Acc}) when ((M+1) div ?W) < Index ->
-                                   throw({break, {M, Acc}});
-                              (Index, ?FULL_WORD, {_M, Acc}) ->
-                                   {(Index*?W)+(?W-1), array:reset(Index, Acc)};
-                              (Index, Value, {M, Acc})  ->
-                                   %% all bits up to and including N
-                                   %% are unset, this is not a fully
-                                   %% set word. Is bit at N+1 set? if
-                                   %% yes, check next bit, if you get
-                                   %% to end of word, unset word, and
-                                   %% fold on, if unset bit > N and
-                                   %% unset-bit =< word end then clear
-                                   %% up to unset-bit, return
-                                   %% unset-bit-index and array
-                                   %% (i.e. throw to break fold)
-                                   case find_first_zero_after_n(M+1, Value) of
-                                       {unset_to, X} ->
-                                           %% unset word to X and break,
-                                           %% we're done
-                                           throw({break, {X, unset_word_to(X, Acc)}});
-                                       unset_word ->
-                                           {(Index*?W)+(?W-1), array:reset(Index, Acc)}
-                                   end
-                           end,
-                           {N, BA},
-                           BA)
-    catch {break, Acc} ->
-            Acc
-    end.
+%%--------------------------------------------------------------------
+%% @doc
+%% resize ensures that unset values are no longer accessible, and take
+%% up no space. returns the bit_array resized.
+%% @end
+%%--------------------------------------------------------------------
+-spec resize(bit_array()) -> bit_array().
+resize(BA=#bit_array{array=A}) ->
+    BA#bit_array{array=array:resize(A)}.
 
--spec find_first_zero_after_n(pos_integer(), non_neg_integer()) ->
-                                     {unset_to, pos_integer()} |
-                                     unset_word.
-find_first_zero_after_n(N, V) ->
-    BitIndex = N rem ?W,
-    V2 = (V bsr BitIndex),
-    case V2 band 1 of
-        0 ->
-            {unset_to, N-1};
-        1 ->
-            case BitIndex == ?W-1 of
-                true ->
-                    %% end of the word, exit, zero whole word
-                    unset_word;
-                false ->
-                    %% keep going through word
-                    find_first_zero_after_n(N+1, V)
-            end
-    end.
+%%%===================================================================
+%%% Internal functions
+%%%===================================================================
 
-%% @doc return only the elements in `A' that are not in the range
-%% defined by `Range' inclusive.
--spec subtract_range(bit_array(), range()) -> bit_array().
-subtract_range(A, {Lo, Hi}) when Lo =< Hi, (Lo div ?W) == (Hi div ?W) ->
-    %% range is all in same word
-    unset_word_from_to(Lo, Hi, A);
-subtract_range(A, {Lo, Hi}) when Lo =< Hi, (Hi div ?W) - (Lo div ?W) == 1 ->
-    %% contiguous words
-    A2 = unset_word_from(Lo, A),
-    unset_word_to(Hi, A2);
-subtract_range(A, {Lo, Hi}) when Lo =< Hi ->
-    %% some full words to be unset
-    A2 = unset_word_from(Lo, A),
-    A3 = unset_word_to(Hi, A2),
-    unset_range((Lo div ?W) +1, (Hi div ?W) -1, A3);
-subtract_range(_Range, BS) ->
-    %% If Lo > Hi there is no range to subtract
-    BS.
+%% @private set a bit in the array.
+-spec set(integer(), array(), pos_integer()) -> array().
+set(I, A, W) ->
+    AI = I div W,
+    V = array:get(AI, A),
+    V1 = V bor (1 bsl (I rem W)),
+    array:set(AI, V1, A).
 
-%% remove a range that is within one word
-unset_word_from_to(Lo, Hi, A) ->
-    case {word_start(Lo), word_end(Hi)} of
-        {true, true} ->
-            %% the range _is_ the word, so reset it
-            array:reset(Lo div ?W, A);
-        {true, false} ->
-            %% Lo is the word start, remove everything from start to
-            %% Hi
-            unset_word_to(Hi, A);
-        {false, true} ->
-            %% Hi is the word end, remove everything from Lo to the
-            %% end.
-            unset_word_from(Lo, A);
-        _ ->
-            %% we need to remove from Lo to Hi
-            Mask = range_mask(Lo, Hi),
-            apply_mask(Mask, Lo div ?W, A)
-    end.
+%% @private unset a bit in the array
+-spec unset(integer(), array(), pos_integer()) -> array().
+unset(I, A, W) ->
+    AI = I div W,
+    V = array:get(AI, A),
+    V1 = V band (bnot (1 bsl (I rem W))),
+    array:set(AI, V1, A).
 
-%% set a range that is within one word
-set_word_from_to(Lo, Hi, A) ->
-    case {word_start(Lo), word_end(Hi)} of
+%% @private is bit `I' set?
+-spec get(integer(), array(), pos_integer()) -> boolean().
+get(I, A, W) ->
+    AI = I div W,
+    V = array:get(AI, A),
+    V band (1 bsl (I rem W)) =/= 0.
+
+%% @private cardinality of the bit set
+-spec size(array(), pos_integer()) -> non_neg_integer().
+size(A, W) ->
+    array:sparse_foldl(fun(I, V, Acc) ->
+                               cnt(V, I * W, Acc)
+                       end,
+                       0,
+                       A).
+
+%% @private set a range that is within one word
+-spec set_word_from_to(non_neg_integer(), non_neg_integer(), array(), pos_integer()) ->
+                              array().
+set_word_from_to(Lo, Hi, A, W) ->
+    case {word_start(Lo, W), word_end(Hi, W)} of
         {true, true} ->
             %% the range _is_ the word, so full word it
-            array:set(Lo div ?W, ?FULL_WORD, A);
+            array:set(Lo div W, ?FULL_WORD(W), A);
         {true, false} ->
             %% Lo is the word start, add everything from start to
             %% Hi
-            set_word_to(Hi, A);
+            set_word_to(Hi, A, W);
         {false, true} ->
             %% Hi is the word end, add everything from Lo to the
             %% end.
-            set_word_from(Lo, A);
+            set_word_from(Lo, A, W);
         _ ->
             %% we need to add from Lo to Hi
-            Mask = bnot range_mask(Lo, Hi),
-            apply_smask(Mask, Lo div ?W, A)
+            Mask = bnot range_mask(Lo, Hi, W),
+            apply_smask(Mask, Lo div W, A)
     end.
 
-unset_word_to(Hi, A) ->
-    Mask = to_mask(Hi),
-    apply_mask(Mask, Hi div ?W, A).
+%% @private set all bits from 0 to `Hi'
+-spec set_word_to(non_neg_integer(), array(), pos_integer()) ->
+                         array().
+set_word_to(Hi, A, W) ->
+    Mask = (1 bsl ((Hi rem W) +1) -1),
+    apply_smask(Mask, Hi div W, A).
 
-unset_word_from(Lo, A) ->
-    Mask = from_mask(Lo),
-    apply_mask(Mask, Lo div ?W, A).
+%% @private set all bits from `Lo' to `W'-1 (i.e. the end of the
+%% word.)
+-spec set_word_from(non_neg_integer(), array(), pos_integer()) ->
+                           array().
+set_word_from(Lo, A, W) ->
+    Mask = set_from_mask(Lo, W),
+    apply_smask(Mask, Lo div W, A).
 
-set_word_to(Hi, A) ->
-    Mask = (1 bsl ((Hi rem ?W) +1) -1),
-    apply_smask(Mask, Hi div ?W, A).
+%% @private set the entries in array `A' to full words from Lo to Hi
+%% inclusive. Return new array.
+-spec set_range(non_neg_integer(), non_neg_integer(), array(), pos_integer()) ->
+                       array().
+set_range(Lo, Lo, A, W) ->
+    array:set(Lo, ?FULL_WORD(W), A);
+set_range(Lo, Hi, A, W) ->
+    set_range(Lo+1, Hi, array:set(Lo, ?FULL_WORD(W), A), W).
 
-set_word_from(Lo, A) ->
-    Mask = set_from_mask(Lo),
-    apply_smask(Mask, Lo div ?W, A).
-
-set_from_mask(Lo) ->
-    M = (1 bsl (?W - (Lo rem ?W))) -1,
-    M bsl (Lo rem ?W).
-
-apply_mask(Mask, Index, Array) ->
-    Value0 = array:get(Index, Array),
-    Value = Mask band Value0,
-    array:set(Index, Value, Array).
-
+%% @private bor bitmask `Mask' onto the entry at `Index' in `Array',
+%% return the new `Array' with the updated entry.
+-spec apply_smask(non_neg_integer(), non_neg_integer(), array()) ->
+                         array().
 apply_smask(Mask, Index, Array) ->
     Value0 = array:get(Index, Array),
     Value = Mask bor Value0,
     array:set(Index, Value, Array).
 
-%% clear all the bits in the word in the range Lo - Hi, inclusive
-range_mask(Lo, Hi) ->
-    ToMask = to_mask(Lo-1), %% can't be < 0, see unset_word_from_to
-    FromMask = from_mask(Hi+1), %% can't be > ?W, see unset_word_from_to
+%% @private band bitmask `Mask' onto the entry at `Index' in `Array',
+%% return the new `Array' with the updated entry.
+-spec apply_mask(non_neg_integer(), non_neg_integer(), array()) ->
+                         array().
+apply_mask(Mask, Index, Array) ->
+    Value0 = array:get(Index, Array),
+    Value = Mask band Value0,
+    array:set(Index, Value, Array).
+
+%% @private from_range: create a bitset from `range()' with word size
+%% `W'
+-spec from_range(range(), pos_integer()) -> bit_array().
+from_range({Low, High}=Range, W) ->
+    Slots = (High - Low) div W,
+    add_range(Range, new(Slots)).
+
+%% @private
+%% remove a range that is within one word
+-spec unset_word_from_to(pos_integer(), pos_integer(), array(), pos_integer()) ->
+                                array().
+unset_word_from_to(Lo, Hi, A, W) ->
+    case {word_start(Lo, W), word_end(Hi, W)} of
+        {true, true} ->
+            %% the range _is_ the word, so reset it
+            array:reset(Lo div W, A);
+        {true, false} ->
+            %% Lo is the word start, remove everything from start to
+            %% Hi
+            unset_word_to(Hi, A, W);
+        {false, true} ->
+            %% Hi is the word end, remove everything from Lo to the
+            %% end.
+            unset_word_from(Lo, A, W);
+        _ ->
+            %% we need to remove from Lo to Hi
+            Mask = range_mask(Lo, Hi, W),
+            apply_mask(Mask, Lo div W, A)
+    end.
+
+%% @private unset all bits in the word containing `High' from 0th to
+%% `High', returns updated array()
+-spec unset_word_to(non_neg_integer(), array(), pos_integer()) ->
+                           array().
+unset_word_to(High, A, W) ->
+    Mask = to_mask(High, W),
+    apply_mask(Mask, High div W, A).
+
+%% @private unset all the bits in the word containing `Lo' from `Lo'
+%% to `W'th-1 position, returns updated array().
+-spec unset_word_from(non_neg_integer(), array(), pos_integer()) ->
+                             array().
+unset_word_from(Low, A, W) ->
+    Mask = from_mask(Low, W),
+    apply_mask(Mask, Low div W, A).
+
+%% @private create a mask that sets all the bits in a word of length
+%% `W' from `Lo' to `W'th-1 bits. Returns mask.
+-spec set_from_mask(non_neg_integer(), pos_integer()) -> pos_integer().
+set_from_mask(Lo, W) ->
+    M = (1 bsl (W - (Lo rem W))) -1,
+    M bsl (Lo rem W).
+
+%% @private create a mask that when band'ed with a word of `W' length,
+%% clears all the bits in the word in the range Lo - Hi, inclusive
+-spec range_mask(pos_integer(), pos_integer(), pos_integer()) ->
+                        pos_integer().
+range_mask(Lo, Hi, W) ->
+    ToMask = to_mask(Lo-1, W), %% can't be < 0, see unset_word_from_to
+    FromMask = from_mask(Hi+1, W), %% can't be > ?W, see unset_word_from_to
     bnot ( FromMask band ToMask).
 
-%% clear all the bits in the word from N up, inclusive
-from_mask(N) ->
-     (1 bsl (N rem ?W)) - 1.
+%% @private create a mask that when band'ed with a word of `W' length
+%% clears all the bits in the word from N up to `W'th-1 bit. Returns
+%% the mask.
+-spec from_mask(non_neg_integer(), pos_integer()) -> pos_integer().
+from_mask(N, W) ->
+    (1 bsl (N rem W)) - 1.
 
-%% clear all the bits in the word up to N, inclusive
-to_mask(N) ->
-    bnot (1 bsl  ((N rem ?W) +1)  - 1).
+%% @private create a mask that can be band'ed with a word to clear all
+%% the bits in the word up to N, inclusive
+-spec to_mask(pos_integer(), pos_integer()) -> pos_integer().
+to_mask(N, W) ->
+    bnot (1 bsl  ((N rem W) +1)  - 1).
 
-%% Reset full words from Lo to Hi inclusive.
+%% @private Reset full words from Lo to Hi inclusive.
+-spec unset_range(non_neg_integer(), non_neg_integer(), array()) ->
+                         array().
 unset_range(Lo, Lo, A) ->
     array:reset(Lo, A);
 unset_range(Lo, Hi, A) ->
     unset_range(Lo+1, Hi, array:reset(Lo, A)).
 
-%% set full words from Lo to Hi inclusive.
-set_range(Lo, Lo, A) ->
-    array:set(Lo, ?FULL_WORD, A);
-set_range(Lo, Hi, A) ->
-    set_range(Lo+1, Hi, array:set(Lo, ?FULL_WORD, A)).
-
-
+%% @private return true if `N' is the first bit of a word of length `W'
 %% TODO: if these are only used in dotclouds, then 2 is the word start
 %% of the first word, not zero.
-word_start(N) when (N rem ?W) == 0 ->
+-spec word_start(non_neg_integer(), pos_integer()) -> boolean().
+word_start(N, W) when (N rem W) == 0 ->
     true;
-word_start(_) ->
+word_start(_, _) ->
     false.
 
-word_end(N) when (N rem ?W) == ?W-1 ->
+%% @private return true if `N' is the last bit of a word of length `W'
+-spec word_end(non_neg_integer(), pos_integer()) -> boolean().
+word_end(N, W) when (N rem W) == W-1 ->
     true;
-word_end(_) ->
+word_end(_, _) ->
     false.
 
-%% @doc resize ensures that unset values are no longer accessible, and
-%% take up no space.
--spec resize(bit_array()) -> bit_array().
-resize(A) ->
-    array:resize(A).
-
-%%  Convert bit vector into list of integers, with
+%% @private Convert bit vector into list of integers, with
 %% optional offset.expand(2#01, 0, []) -> [0] expand(2#10, 0, []) ->
 %% [1] expand(2#1101, 0, []) -> [3,2,0] expand(2#1101, 1, []) ->
 %% [4,3,1] expand(2#1101, 10, []) -> [13,12,10] expand(2#1101, 100,
@@ -458,7 +605,10 @@ expand(V, N, Acc) ->
         end,
     expand(V bsr 1, N+1, Acc2).
 
-%% Same as above but the acc is a running total
+%% @private Same as `expand/3' above but the acc is a running total of
+%% all set bits (a count.)
+-spec cnt(Value :: pos_integer(), Offset::non_neg_integer(), non_neg_integer()) ->
+                 non_neg_integer().
 cnt(0, _, Acc) ->
     Acc;
 cnt(V, N, Acc) ->
@@ -471,7 +621,73 @@ cnt(V, N, Acc) ->
         end,
     cnt(V bsr 1, N+1, Acc2).
 
+%% @private kind of "find first unset" but unsets all up to
+%% first-unset and returns value of first_unset-1. Clears all the set
+%% bits contiguous with `N'. Called when all bits up to, and including
+%% `N' have been unset.
+-spec unset_contiguous_with(pos_integer(), array(), pos_integer()) ->
+                              {pos_integer(), array(), pos_integer()}.
+unset_contiguous_with(N, A, W) ->
+    %% TODO eqc never hits the "full word" option. Unit test?
+    FullWord = ?FULL_WORD(W),
+    try
+        array:sparse_foldl(fun(Index, _Value, {M, Acc}) when ((M+1) div W) < Index ->
+                                   throw({break, {M, Acc}});
+                              (Index, FW, {_M, Acc}) when FW == FullWord ->
+                                   {(Index*W)+(W-1), array:reset(Index, Acc)};
+                              (Index, Value, {M, Acc})  ->
+                                   %% all bits up to and including N
+                                   %% are unset, this is not a fully
+                                   %% set word. Is bit at N+1 set? if
+                                   %% yes, check next bit, if you get
+                                   %% to end of word, unset word, and
+                                   %% fold on, if unset bit > N and
+                                   %% unset-bit =< word end then clear
+                                   %% up to unset-bit, return
+                                   %% unset-bit-index and array
+                                   %% (i.e. throw to break fold)
+                                   case find_first_zero_after_n(M+1, Value, W) of
+                                       {unset_to, X} ->
+                                           %% unset word to X and break,
+                                           %% we're done
+                                           throw({break, {X, unset_word_to(X, Acc, W)}});
+                                       unset_word ->
+                                           {(Index*W)+(W-1), array:reset(Index, Acc)}
+                                   end
+                           end,
+                           {N, A},
+                           A)
+    catch {break, Acc} ->
+            Acc
+    end.
+
+%% @private find the first unset bit in a word of length `W' after the
+%% bit represented by `N'. returns instruction to the caller.
+-spec find_first_zero_after_n(pos_integer(), non_neg_integer(), pos_integer()) ->
+                                     {unset_to, pos_integer()} |
+                                     unset_word.
+find_first_zero_after_n(N, V, W) ->
+    BitIndex = N rem W,
+    V2 = (V bsr BitIndex),
+    case V2 band 1 of
+        0 ->
+            {unset_to, N-1};
+        1 ->
+            case BitIndex == W-1 of
+                true ->
+                    %% end of the word, exit, zero whole word
+                    unset_word;
+                false ->
+                    %% keep going through word
+                    find_first_zero_after_n(N+1, V, W)
+            end
+    end.
+
 -ifdef(TEST).
+
+%%%===================================================================
+%%% Tests
+%%%===================================================================
 
 -define(NUMTESTS, 1000).
 -define(QC_OUT(P),
