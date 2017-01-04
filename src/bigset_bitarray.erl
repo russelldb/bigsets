@@ -65,7 +65,7 @@
 %%--------------------------------------------------------------------
 -spec new(integer()) -> bit_array().
 new(N) ->
-    A = array:new([{size, N}, {default, 0}, {fixed, false}]),
+    A = new_array(N),
     #bit_array{word_size=?W, array=A}.
 
 %%--------------------------------------------------------------------
@@ -136,7 +136,7 @@ subtract_range(BA=#bit_array{word_size=W, array=A}, {Lo, Hi})
     A2 = unset_word_from(Lo, A, W),
     A3 = unset_word_to(Hi, A2, W),
     A4 = unset_range((Lo div W) +1, (Hi div W) -1, A3),
-    BA=#bit_array{array=A4};
+    BA#bit_array{array=A4};
 subtract_range(_Range, BA) ->
     %% If Lo > Hi there is no range to subtract
     BA.
@@ -262,7 +262,7 @@ union(BA1=#bit_array{word_size=W}, BA2=#bit_array{word_size=W}) ->
                                                         {array:set(I, MergedV, MergedA),
                                                          array:reset(I, RemainingB)}
                                                 end,
-                                                {new(NewSize), B},
+                                                {new_array(NewSize), B},
                                                 A),
     RemainingB = array:resize(RemainingB0),
     U = array:sparse_foldl(fun(I, VB, Acc) ->
@@ -293,9 +293,9 @@ intersection(BA1=#bit_array{word_size=W}, BA2=#bit_array{word_size=W}) ->
                                      V = Word band V0,
                                      array:set(I, V, Acc)
                              end,
-                             new(NewSize),
+                             new_array(NewSize),
                              LHS),
-    Intersection = resize(Res),
+    Intersection = array:resize(Res),
     #bit_array{word_size=W, array=Intersection}.
 
 %%--------------------------------------------------------------------
@@ -340,7 +340,7 @@ subtract(BA1=#bit_array{word_size=W}, BA2=#bit_array{word_size=W}) ->
                                           VComp = (VA band (bnot VB)),
                                           array:set(I, VComp, Comp)
                                   end,
-                                  new(10),
+                                  new_array(10),
                                   A),
     #bit_array{word_size=W, array=NewArray}.
 
@@ -390,6 +390,10 @@ resize(BA=#bit_array{array=A}) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+%% @private create a new array of size `N'.
+new_array(N) ->
+    array:new([{size, N}, {default, 0}, {fixed, false}]).
 
 %% @private set a bit in the array.
 -spec set(integer(), array(), pos_integer()) -> array().
@@ -471,7 +475,7 @@ set_range(Lo, Hi, A, W) ->
 
 %% @private bor bitmask `Mask' onto the entry at `Index' in `Array',
 %% return the new `Array' with the updated entry.
--spec apply_smask(non_neg_integer(), non_neg_integer(), array()) ->
+-spec apply_smask(integer(), non_neg_integer(), array()) ->
                          array().
 apply_smask(Mask, Index, Array) ->
     Value0 = array:get(Index, Array),
@@ -480,7 +484,7 @@ apply_smask(Mask, Index, Array) ->
 
 %% @private band bitmask `Mask' onto the entry at `Index' in `Array',
 %% return the new `Array' with the updated entry.
--spec apply_mask(non_neg_integer(), non_neg_integer(), array()) ->
+-spec apply_mask(integer(), non_neg_integer(), array()) ->
                          array().
 apply_mask(Mask, Index, Array) ->
     Value0 = array:get(Index, Array),
@@ -543,7 +547,7 @@ set_from_mask(Lo, W) ->
 %% @private create a mask that when band'ed with a word of `W' length,
 %% clears all the bits in the word in the range Lo - Hi, inclusive
 -spec range_mask(pos_integer(), pos_integer(), pos_integer()) ->
-                        pos_integer().
+                        neg_integer().
 range_mask(Lo, Hi, W) ->
     ToMask = to_mask(Lo-1, W), %% can't be < 0, see unset_word_from_to
     FromMask = from_mask(Hi+1, W), %% can't be > ?W, see unset_word_from_to
@@ -626,7 +630,7 @@ cnt(V, N, Acc) ->
 %% bits contiguous with `N'. Called when all bits up to, and including
 %% `N' have been unset.
 -spec unset_contiguous_with(pos_integer(), array(), pos_integer()) ->
-                              {pos_integer(), array(), pos_integer()}.
+                                   {pos_integer(), array()}.
 unset_contiguous_with(N, A, W) ->
     %% TODO eqc never hits the "full word" option. Unit test?
     FullWord = ?FULL_WORD(W),
@@ -746,7 +750,7 @@ from_mask_test() ->
     ?assertEqual(Members, lists:reverse(expand(Value, Offset, []))),
 
     From = 10,
-    Mask = from_mask(Offset+From),
+    Mask = from_mask(Offset+From, ?W),
     Value2 = Mask band Value,
     ?assertEqual(lists:seq(Offset, Offset+(From-1)), lists:reverse(expand(Value2, Offset, []))).
 
@@ -764,7 +768,7 @@ to_mask_test() ->
     ?assertEqual(Members, lists:reverse(expand(Value, Offset, []))),
 
     To = 95,
-    Mask = to_mask(Offset+To),
+    Mask = to_mask(Offset+To, ?W),
     Value2 = Mask band Value,
     ?assertEqual(lists:seq(Offset+To+1, Offset+100), lists:reverse(expand(Value2, Offset, []))).
 
@@ -774,10 +778,9 @@ find_first_zero_after_n_test() ->
                     end,
                     0,
                     lists:seq(1, 50) ++ lists:seq(52, 102)),
-    ?assertEqual({unset_to, 50}, find_first_zero_after_n(1, V)),
-    ?assertEqual({unset_to, 102}, find_first_zero_after_n(52, V)),
-    ?assertEqual(unset_word, find_first_zero_after_n(100, ?FULL_WORD)).
-
+    ?assertEqual({unset_to, 50}, find_first_zero_after_n(1, V, ?W)),
+    ?assertEqual({unset_to, 102}, find_first_zero_after_n(52, V, ?W)),
+    ?assertEqual(unset_word, find_first_zero_after_n(100, ?FULL_WORD, ?W)).
 
 -endif.
 
@@ -913,7 +916,7 @@ prop_unset_from_mask() ->
                                                     end,
                                                     0,
                                                     Members),
-                                Mask = from_mask(Offset+From),
+                                Mask = from_mask(Offset+From, ?W),
                                 Value2 = Mask band Value,
                                 Expected = lists:filter(fun(E) -> E < Offset+From end, Members),
                                 measure(members, length(Members),
@@ -931,7 +934,7 @@ prop_set_from_mask() ->
                                             end,
                                             0,
                                             Members),
-                        Mask =  set_from_mask(From),
+                        Mask =  set_from_mask(From, ?W),
                         Value2 = Mask bor Value,
                         Expected = lists:umerge(Members, lists:seq(From, ?W-1)),
                         ?WHENFAIL(
@@ -957,7 +960,7 @@ prop_unset_to_mask() ->
                                                     end,
                                                     0,
                                                     Members),
-                                Mask = to_mask(Offset+To),
+                                Mask = to_mask(Offset+To, ?W),
                                 Value2 = Mask band Value,
                                 Expected = lists:filter(fun(E) -> E > Offset+To end, Members),
                                 measure(members, length(Members),
@@ -979,7 +982,7 @@ prop_unset_range_mask() ->
                                                     Members),
 
                                 [Lo1, Hi1] = lists:sort([Hi, Lo]),
-                                Mask = range_mask(Offset+Lo1, Offset+Hi1),
+                                Mask = range_mask(Offset+Lo1, Offset+Hi1, ?W),
                                 Value2 = Mask band Value,
                                 Expected = lists:filter(fun(E) -> E < Offset+Lo1 orelse E > Offset+Hi1 end, Members),
                                 ?WHENFAIL(begin
@@ -1001,7 +1004,7 @@ prop_find_first_zero_after() ->
                                         end,
                                         0,
                                         Set),
-                        Actual = find_first_zero_after_n(N, V),
+                        Actual = find_first_zero_after_n(N, V, ?W),
                         UnsetTo = lists:foldl(fun(E, Acc) ->
                                                       if E == Acc ->
                                                               E+1;
